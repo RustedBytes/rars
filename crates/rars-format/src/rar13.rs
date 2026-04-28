@@ -2459,6 +2459,171 @@ mod tests {
     }
 
     #[test]
+    fn rejects_malformed_main_header_boundaries() {
+        assert_eq!(MainHeader::parse(b"RE~"), Err(Error::TooShort));
+
+        let mut too_small = Vec::from(&b"RE~^"[..]);
+        too_small.extend_from_slice(&6u16.to_le_bytes());
+        too_small.push(0x80);
+        assert_eq!(
+            MainHeader::parse(&too_small),
+            Err(Error::InvalidHeader(
+                "RAR 1.3 main header is shorter than 7 bytes"
+            ))
+        );
+
+        let mut truncated_extra = Vec::from(&b"RE~^"[..]);
+        truncated_extra.extend_from_slice(&8u16.to_le_bytes());
+        truncated_extra.push(0x80);
+        assert_eq!(MainHeader::parse(&truncated_extra), Err(Error::TooShort));
+
+        assert_eq!(
+            Archive::parse(b"Rar!\x1a\x07\x00"),
+            Err(Error::UnsupportedSignature)
+        );
+    }
+
+    #[test]
+    fn rejects_file_header_shorter_than_its_name() {
+        let mut bytes = Vec::from(&b"RE~^"[..]);
+        bytes.extend_from_slice(&7u16.to_le_bytes());
+        bytes.push(0x80);
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&(FILE_HEAD_BASE_SIZE as u16).to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.push(0x20);
+        bytes.push(0);
+        bytes.push(DEFAULT_UNP_VER);
+        bytes.push(10);
+        bytes.push(METHOD_STORE);
+
+        assert_eq!(
+            Archive::parse(&bytes),
+            Err(Error::InvalidHeader(
+                "RAR 1.3 file header is shorter than its name"
+            ))
+        );
+    }
+
+    #[test]
+    fn rejects_truncated_file_payload_during_parse() {
+        let input = [StoredEntry {
+            name: b"hello.txt",
+            data: b"hello",
+            file_time: 0,
+            file_attr: 0x20,
+            password: None,
+            file_comment: None,
+        }];
+        let mut bytes = write_stored_archive(&input, WriterOptions::default()).unwrap();
+        bytes.pop();
+
+        assert_eq!(Archive::parse(&bytes), Err(Error::TooShort));
+    }
+
+    #[test]
+    fn returns_none_for_absent_archive_comment() {
+        let bytes = write_stored_archive(&[], WriterOptions::default()).unwrap();
+        let archive = Archive::parse(&bytes).unwrap();
+
+        assert_eq!(archive.archive_comment().unwrap(), None);
+    }
+
+    #[test]
+    fn rejects_normal_extract_on_split_entries() {
+        let entry = StoredEntry {
+            name: b"split.bin",
+            data: b"abcdefghijklmnopqrstuvwxyz",
+            file_time: 0,
+            file_attr: 0x20,
+            password: None,
+            file_comment: None,
+        };
+        let volumes = write_stored_volumes(entry, WriterOptions::default(), 8).unwrap();
+        let first = Archive::parse(&volumes[0]).unwrap();
+
+        assert_eq!(
+            first.extract(None),
+            Err(Error::InvalidHeader(
+                "RAR 1.3 split entry requires multivolume extraction"
+            ))
+        );
+        assert_eq!(
+            first.extract_stored(None),
+            Err(Error::InvalidHeader(
+                "RAR 1.3 split entry requires multivolume extraction"
+            ))
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_comment_extensions() {
+        let packed_too_short = Archive {
+            sfx_offset: 0,
+            main: MainHeader {
+                flags: MHD_COMMENT | MHD_PACK_COMMENT,
+                head_size: MAIN_HEAD_SIZE,
+                extra: 1u16.to_le_bytes().to_vec(),
+            },
+            entries: Vec::new(),
+        };
+        assert_eq!(
+            packed_too_short.archive_comment(),
+            Err(Error::InvalidHeader(
+                "RAR 1.3 packed archive comment is shorter than size field"
+            ))
+        );
+
+        let unpacked_too_short = Archive {
+            sfx_offset: 0,
+            main: MainHeader {
+                flags: MHD_COMMENT,
+                head_size: MAIN_HEAD_SIZE,
+                extra: 4u16.to_le_bytes().to_vec(),
+            },
+            entries: Vec::new(),
+        };
+        assert_eq!(unpacked_too_short.archive_comment(), Err(Error::TooShort));
+    }
+
+    #[test]
+    fn rejects_malformed_av_extensions() {
+        let too_short = Archive {
+            sfx_offset: 0,
+            main: MainHeader {
+                flags: MHD_AV,
+                head_size: MAIN_HEAD_SIZE,
+                extra: 5u16.to_le_bytes().to_vec(),
+            },
+            entries: Vec::new(),
+        };
+        assert_eq!(
+            too_short.authenticity_verification(),
+            Err(Error::InvalidHeader("RAR 1.3 AV payload is too short"))
+        );
+
+        let bad_prefix = Archive {
+            sfx_offset: 0,
+            main: MainHeader {
+                flags: MHD_AV,
+                head_size: MAIN_HEAD_SIZE,
+                extra: {
+                    let mut extra = 6u16.to_le_bytes().to_vec();
+                    extra.extend_from_slice(b"badbad");
+                    extra
+                },
+            },
+            entries: Vec::new(),
+        };
+        assert_eq!(
+            bad_prefix.authenticity_verification(),
+            Err(Error::InvalidHeader("RAR 1.3 AV prefix mismatch"))
+        );
+    }
+
+    #[test]
     fn writes_and_reads_encrypted_stored_archive() {
         let input = [StoredEntry {
             name: b"secret.txt",
@@ -2606,6 +2771,13 @@ mod tests {
     fn compressed_writer_emits_long_lz_matches() {
         let mut data = short_lz_resistant_prefix(300);
         data.extend_from_slice(&data[..32].to_vec());
+        assert_eq!(
+            find_long_lz(&data, 300),
+            Some(LongLz {
+                distance: 300,
+                length: 18
+            })
+        );
         let input = [FileEntry {
             name: b"far.txt",
             data: &data,

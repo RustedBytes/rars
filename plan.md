@@ -130,6 +130,10 @@ Use the specification repository fixtures as black-box compatibility tests. The
 library should not require those fixtures at runtime; fixture-driven tests belong
 in `rars-testkit` or integration tests gated on a fixture path.
 
+Coverage reporting is available via `./scripts/coverage.sh`. It uses Rust's
+native LLVM source coverage (`-Cinstrument-coverage`) and writes the HTML report
+to `target/coverage/html/index.html`.
+
 Core tests should cover:
 
 - signature detection for all archive families,

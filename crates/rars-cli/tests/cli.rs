@@ -279,6 +279,107 @@ fn reports_missing_input_path_with_context() {
 }
 
 #[test]
+fn prints_usage_without_command() {
+    let output = rars().output().unwrap();
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(stderr(&output).contains("usage:"));
+}
+
+#[test]
+fn prints_usage_for_help_command() {
+    let output = rars().arg("--help").output().unwrap();
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(stderr(&output).contains("rars info <archive>"));
+}
+
+#[test]
+fn rejects_unknown_command() {
+    let output = rars().arg("wat").output().unwrap();
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("unknown command: wat"));
+}
+
+#[test]
+fn rejects_missing_subcommand_arguments() {
+    for args in [&["info"][..], &["test"][..], &["x"][..]] {
+        let output = rars().args(args).output().unwrap();
+        assert!(!output.status.success(), "args: {args:?}");
+        assert!(stderr(&output).contains("usage:"), "args: {args:?}");
+    }
+}
+
+#[test]
+fn rejects_non_rar_input_to_info() {
+    let dir = scratch("non-rar-info");
+    let input = dir.join("plain.txt");
+    fs::write(&input, b"not a rar archive").unwrap();
+
+    let output = rars().arg("info").arg(&input).output().unwrap();
+    assert!(!output.status.success());
+    let stderr = stderr(&output);
+    assert!(stderr.contains("failed to identify archive"));
+    assert!(stderr.contains("unsupported archive signature"));
+}
+
+#[test]
+fn rejects_bad_add_invocation_shape() {
+    let output = rars().args(["a", "--format", "rar5"]).output().unwrap();
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("usage: rars a"));
+}
+
+#[test]
+fn rejects_missing_add_option_values() {
+    for args in [
+        &["a", "--format", "rar14", "--comment"][..],
+        &["a", "--format", "rar14", "--file-comment"][..],
+        &["a", "--format", "rar14", "--volume-size"][..],
+        &["a", "--password"][..],
+    ] {
+        let output = rars().args(args).output().unwrap();
+        assert!(!output.status.success(), "args: {args:?}");
+        assert!(stderr(&output).contains("missing"), "args: {args:?}");
+    }
+}
+
+#[test]
+fn rejects_invalid_volume_size() {
+    let dir = scratch("invalid-volume-size");
+    let source = dir.join("hello.txt");
+    let archive = dir.join("bad.rar");
+    fs::write(&source, b"hello").unwrap();
+
+    let output = rars()
+        .args(["a", "--format", "rar14", "--volume-size", "nope"])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("invalid digit"));
+}
+
+#[test]
+fn rejects_multivolume_with_multiple_inputs() {
+    let dir = scratch("multivolume-multiple-inputs");
+    let first = dir.join("first.txt");
+    let second = dir.join("second.txt");
+    let archive = dir.join("bad.rar");
+    fs::write(&first, b"first").unwrap();
+    fs::write(&second, b"second").unwrap();
+
+    let output = rars()
+        .args(["a", "--format", "rar14", "--volume-size", "10"])
+        .arg(&archive)
+        .arg(&first)
+        .arg(&second)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("multivolume writer currently supports one input file"));
+}
+
+#[test]
 fn creates_stored_archive_that_can_be_tested() {
     let dir = scratch("create");
     let source = dir.join("hello.txt");

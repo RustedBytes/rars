@@ -13,6 +13,23 @@ The first supported vertical slice is RAR 1.3/1.4 archives:
 - extract Unpack15 compressed files, including encrypted and solid archives;
 - verify the RAR 1.3 rolling sum+rotate checksum;
 - reassemble stored old-style multi-volume archives;
-- write stored RAR 1.4 archives.
+- write stored and compressed RAR 1.4 archives.
 
-Writing compressed archives is not implemented yet.
+## Development
+
+Run the test suite:
+
+```sh
+cargo test --workspace --all-targets
+```
+
+Generate a local coverage report:
+
+```sh
+rustup component add llvm-tools-preview
+./scripts/coverage.sh
+```
+
+The script prints a line-coverage summary, saves it to
+`target/coverage/summary.txt`, and writes HTML output to
+`target/coverage/html/library/index.html` and `target/coverage/html/cli/index.html`.

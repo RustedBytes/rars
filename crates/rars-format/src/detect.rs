@@ -74,4 +74,24 @@ mod tests {
         assert_eq!(sig.family, ArchiveFamily::Rar13);
         assert_eq!(sig.offset, 11);
     }
+
+    #[test]
+    fn rejects_unknown_and_truncated_signatures() {
+        assert_eq!(detect_archive_family(b""), None);
+        assert_eq!(detect_archive_family(b"RAR!"), None);
+        assert_eq!(detect_archive_family(b"Rar!\x1a\x07"), None);
+        assert_eq!(find_archive_start(b"not an archive", 128), None);
+    }
+
+    #[test]
+    fn scan_limit_bounds_sfx_detection() {
+        let input = b"stub bytes RE~^payload";
+
+        assert_eq!(find_archive_start(input, 10), None);
+
+        let sig = find_archive_start(input, 11).unwrap();
+        assert_eq!(sig.family, ArchiveFamily::Rar13);
+        assert_eq!(sig.offset, 11);
+        assert_eq!(sig.length, RAR13_SIGNATURE.len());
+    }
 }
