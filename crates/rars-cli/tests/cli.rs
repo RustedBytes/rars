@@ -212,6 +212,9 @@ fn rejects_wrong_password() {
         .output()
         .unwrap();
     assert!(!output.status.success());
+    let stderr = stderr(&output);
+    assert!(stderr.contains("failed to test archive"));
+    assert!(stderr.contains("invalid header") || stderr.contains("checksum mismatch"));
 }
 
 #[test]
@@ -240,6 +243,39 @@ fn rejects_unsafe_output_path() {
         .output()
         .unwrap();
     assert!(!extract.status.success());
+    let stderr = stderr(&extract);
+    assert!(stderr.contains("failed to write extracted entry"));
+    assert!(stderr.contains("unsafe archive path"));
+}
+
+#[test]
+fn reports_missing_archive_path_with_context() {
+    let dir = scratch("missing-archive");
+    let missing = dir.join("missing.rar");
+
+    let output = rars().arg("info").arg(&missing).output().unwrap();
+    assert!(!output.status.success());
+    let stderr = stderr(&output);
+    assert!(stderr.contains("failed to read archive"));
+    assert!(stderr.contains("missing.rar"));
+}
+
+#[test]
+fn reports_missing_input_path_with_context() {
+    let dir = scratch("missing-input");
+    let archive = dir.join("out.rar");
+    let missing = dir.join("missing.txt");
+
+    let output = rars()
+        .args(["a", "--format", "rar14"])
+        .arg(&archive)
+        .arg(&missing)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = stderr(&output);
+    assert!(stderr.contains("failed to stat input"));
+    assert!(stderr.contains("missing.txt"));
 }
 
 #[test]

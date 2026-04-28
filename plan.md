@@ -112,8 +112,9 @@ Read-side gaps:
   and structurally parsed from the paired shape fixtures, but the available
   AV-bearing fixture uses a registration-patched binary with BSS-zero
   registration data, so it is not a real registered-signature oracle.
-- Error typing. Current errors are structured enough for tests, but CLI messages
-  will need refinement before the tool is friendly.
+- Error typing. CLI paths now add file/operation context, but the library error
+  enum is still intentionally small and may need richer variants before a stable
+  public API.
 
 Write-side gaps:
 

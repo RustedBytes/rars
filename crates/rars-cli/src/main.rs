@@ -43,11 +43,18 @@ fn cmd_info(args: &[String]) -> CliResult<()> {
     }
 
     for path in args {
-        let bytes = fs::read(path)?;
-        let sig = detect_archive_family(&bytes).ok_or(Error::UnsupportedSignature)?;
+        let bytes = read_file(Path::new(path), "archive")?;
+        let sig = detect_archive_family(&bytes).ok_or_else(|| {
+            format!(
+                "failed to identify archive '{}': {}",
+                path,
+                Error::UnsupportedSignature
+            )
+        })?;
         println!("{path}: {:?} at offset {}", sig.family, sig.offset);
         if sig.family == ArchiveFamily::Rar13 {
-            let archive = Archive::parse(&bytes)?;
+            let archive = Archive::parse(&bytes)
+                .map_err(|err| format!("failed to parse archive '{path}': {err}"))?;
             println!(
                 "  rar13 main: flags={:#04x} head_size={} sfx_offset={}",
                 archive.main.flags, archive.main.head_size, archive.sfx_offset
@@ -62,11 +69,16 @@ fn cmd_info(args: &[String]) -> CliResult<()> {
                         ""
                     }
                 );
-                if let Some(comment) = archive.archive_comment()? {
+                if let Some(comment) = archive
+                    .archive_comment()
+                    .map_err(|err| format!("failed to decode archive comment '{path}': {err}"))?
+                {
                     println!("  comment: {}", String::from_utf8_lossy(&comment));
                 }
             }
-            if let Some(av) = archive.authenticity_verification()? {
+            if let Some(av) = archive.authenticity_verification().map_err(|err| {
+                format!("failed to parse authenticity verification in '{path}': {err}")
+            })? {
                 println!(
                     "  authenticity verification: structural size={} cipher_body={} status=not-cryptographically-verified",
                     av.size,
@@ -84,7 +96,12 @@ fn cmd_info(args: &[String]) -> CliResult<()> {
                     entry.header.file_attr,
                     entry.header.file_crc
                 );
-                if let Some(comment) = entry.file_comment()? {
+                if let Some(comment) = entry.file_comment().map_err(|err| {
+                    format!(
+                        "failed to decode file comment '{}' in '{path}': {err}",
+                        entry.name_lossy()
+                    )
+                })? {
                     println!("    comment: {}", String::from_utf8_lossy(&comment));
                 }
             }
@@ -102,9 +119,12 @@ fn cmd_test(args: &[String]) -> CliResult<()> {
 
     let archives = parse_rar13_archives(&paths)?;
     let extracted = if archives.len() == 1 {
-        archives[0].extract(password.as_deref())?
+        archives[0]
+            .extract(password.as_deref())
+            .map_err(|err| format!("failed to test archive '{}': {err}", paths[0]))?
     } else {
-        rar13::extract_volumes(&archives, password.as_deref())?
+        rar13::extract_volumes(&archives, password.as_deref())
+            .map_err(|err| format!("failed to test volume set '{}': {err}", paths.join(", ")))?
     };
 
     for entry in &extracted {
@@ -126,13 +146,22 @@ fn cmd_extract(args: &[String]) -> CliResult<()> {
 
     let archives = parse_rar13_archives(&paths)?;
     let extracted = if archives.len() == 1 {
-        archives[0].extract(password.as_deref())?
+        archives[0]
+            .extract(password.as_deref())
+            .map_err(|err| format!("failed to extract archive '{}': {err}", paths[0]))?
     } else {
-        rar13::extract_volumes(&archives, password.as_deref())?
+        rar13::extract_volumes(&archives, password.as_deref())
+            .map_err(|err| format!("failed to extract volume set '{}': {err}", paths.join(", ")))?
     };
 
     for entry in &extracted {
-        write_extracted_entry(&out_dir, entry)?;
+        write_extracted_entry(&out_dir, entry).map_err(|err| {
+            format!(
+                "failed to write extracted entry '{}' to '{}': {err}",
+                String::from_utf8_lossy(&entry.name),
+                out_dir.display()
+            )
+        })?;
         println!("x {}", String::from_utf8_lossy(&entry.name));
     }
     Ok(())
@@ -232,7 +261,12 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
             };
             rar13::write_stored_volumes(entry, options, volume_size)?
         };
-        write_volume_parts(&archive_path, &parts)?;
+        write_volume_parts(&archive_path, &parts).map_err(|err| {
+            format!(
+                "failed to write volume set starting at '{}': {err}",
+                archive_path.display()
+            )
+        })?;
         println!("created {} volumes", parts.len());
         return Ok(());
     }
@@ -264,7 +298,12 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
             .collect();
         rar13::write_stored_archive_with_comment(&entries, options, archive_comment.as_deref())?
     };
-    fs::write(&archive_path, bytes)?;
+    fs::write(&archive_path, bytes).map_err(|err| {
+        format!(
+            "failed to write archive '{}': {err}",
+            archive_path.display()
+        )
+    })?;
     println!("created {}", archive_path.display());
     Ok(())
 }
@@ -305,23 +344,38 @@ fn parse_password(args: &[String]) -> CliResult<(Option<Vec<u8>>, Vec<String>)> 
 fn parse_rar13_archives(paths: &[String]) -> CliResult<Vec<Archive>> {
     let mut archives = Vec::new();
     for path in paths {
-        let bytes = fs::read(path)?;
-        archives.push(Archive::parse(&bytes)?);
+        let bytes = read_file(Path::new(path), "archive")?;
+        archives.push(
+            Archive::parse(&bytes)
+                .map_err(|err| format!("failed to parse archive '{path}': {err}"))?,
+        );
     }
     Ok(archives)
+}
+
+fn read_file(path: &Path, role: &str) -> CliResult<Vec<u8>> {
+    fs::read(path)
+        .map_err(|err| format!("failed to read {role} '{}': {err}", path.display()).into())
 }
 
 fn write_extracted_entry(out_dir: &Path, entry: &ExtractedEntry) -> CliResult<()> {
     let rel = output_relative_path(&entry.name)?;
     let out_path = out_dir.join(rel);
     if entry.is_directory {
-        fs::create_dir_all(&out_path)?;
+        fs::create_dir_all(&out_path)
+            .map_err(|err| format!("failed to create directory '{}': {err}", out_path.display()))?;
         return Ok(());
     }
     if let Some(parent) = out_path.parent() {
-        fs::create_dir_all(parent)?;
+        fs::create_dir_all(parent).map_err(|err| {
+            format!(
+                "failed to create parent directory '{}': {err}",
+                parent.display()
+            )
+        })?;
     }
-    fs::write(out_path, &entry.data)?;
+    fs::write(&out_path, &entry.data)
+        .map_err(|err| format!("failed to write file '{}': {err}", out_path.display()))?;
     Ok(())
 }
 
@@ -359,7 +413,8 @@ fn read_inputs(paths: &[String], password: Option<&[u8]>) -> CliResult<Vec<Owned
             .to_string_lossy()
             .as_bytes()
             .to_vec();
-        let meta = fs::metadata(path)?;
+        let meta = fs::metadata(path)
+            .map_err(|err| format!("failed to stat input '{}': {err}", path.display()))?;
         if meta.is_dir() {
             out.push(OwnedInput {
                 name,
@@ -370,7 +425,7 @@ fn read_inputs(paths: &[String], password: Option<&[u8]>) -> CliResult<Vec<Owned
         } else {
             out.push(OwnedInput {
                 name,
-                data: fs::read(path)?,
+                data: read_file(path, "input")?,
                 file_attr: 0x20,
                 password: password.map(|p| p.to_vec()),
             });
