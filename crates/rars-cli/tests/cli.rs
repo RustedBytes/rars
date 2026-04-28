@@ -61,6 +61,19 @@ fn info_lists_file_comment() {
 }
 
 #[test]
+fn info_reports_inline_av_shape_fixture() {
+    let output = rars()
+        .arg("info")
+        .arg(fixture("rar140_av/rar140_av_patched.rar"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let stdout = stdout(&output);
+    assert!(stdout.contains("authenticity verification: structural"));
+    assert!(stdout.contains("status=not-cryptographically-verified"));
+}
+
+#[test]
 fn test_verifies_encrypted_stored_fixture() {
     let output = rars()
         .args(["test", "--password", "password"])
@@ -213,6 +226,7 @@ fn rejects_unsafe_output_path() {
             file_time: 0,
             file_attr: 0x20,
             password: None,
+            file_comment: None,
         }],
         WriterOptions::default(),
     )
@@ -332,6 +346,94 @@ fn creates_encrypted_compressed_archive_that_can_be_tested() {
         .unwrap();
     assert!(test.status.success(), "stderr: {}", stderr(&test));
     assert!(stdout(&test).contains("OK secret.txt"));
+}
+
+#[test]
+fn creates_archive_and_file_comments() {
+    let dir = scratch("create-comments");
+    let source = dir.join("commented.txt");
+    let archive = dir.join("comments.rar");
+    fs::write(&source, b"commented payload over sixteen").unwrap();
+
+    let create = rars()
+        .args([
+            "a",
+            "--format",
+            "rar14",
+            "--comment",
+            "archive note",
+            "--file-comment",
+            "file note",
+        ])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(create.status.success(), "stderr: {}", stderr(&create));
+
+    let info = rars().arg("info").arg(&archive).output().unwrap();
+    assert!(info.status.success(), "stderr: {}", stderr(&info));
+    let stdout = stdout(&info);
+    assert!(stdout.contains("comment: archive note"));
+    assert!(stdout.contains("comment: file note"));
+}
+
+#[test]
+fn creates_stored_multivolume_archive_that_can_be_tested() {
+    let dir = scratch("create-stored-multivolume");
+    let source = dir.join("payload.bin");
+    let archive = dir.join("split.rar");
+    fs::write(&source, b"abcdefghijklmnopqrstuvwxyz0123456789").unwrap();
+
+    let create = rars()
+        .args(["a", "--format", "rar14", "--store", "--volume-size", "10"])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(create.status.success(), "stderr: {}", stderr(&create));
+    assert!(archive.exists());
+    assert!(dir.join("split.r00").exists());
+    assert!(dir.join("split.r01").exists());
+    assert!(dir.join("split.r02").exists());
+
+    let test = rars()
+        .arg("test")
+        .arg(&archive)
+        .arg(dir.join("split.r00"))
+        .arg(dir.join("split.r01"))
+        .arg(dir.join("split.r02"))
+        .output()
+        .unwrap();
+    assert!(test.status.success(), "stderr: {}", stderr(&test));
+    assert!(stdout(&test).contains("OK payload.bin"));
+}
+
+#[test]
+fn creates_compressed_multivolume_archive_that_can_be_tested() {
+    let dir = scratch("create-compressed-multivolume");
+    let source = dir.join("repeat.txt");
+    let archive = dir.join("split.rar");
+    fs::write(&source, b"abcabcabcabcabcabcabcabcabcabcabcabcabcabc").unwrap();
+
+    let create = rars()
+        .args(["a", "--format", "rar14", "--volume-size", "8"])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(create.status.success(), "stderr: {}", stderr(&create));
+    assert!(archive.exists());
+    assert!(dir.join("split.r00").exists());
+
+    let test = rars()
+        .arg("test")
+        .arg(&archive)
+        .arg(dir.join("split.r00"))
+        .output()
+        .unwrap();
+    assert!(test.status.success(), "stderr: {}", stderr(&test));
+    assert!(stdout(&test).contains("OK repeat.txt"));
 }
 
 #[test]

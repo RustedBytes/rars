@@ -9,7 +9,9 @@ const MHD_VOLUME: u8 = 0x01;
 const MHD_COMMENT: u8 = 0x02;
 const MHD_SOLID: u8 = 0x08;
 const MHD_PACK_COMMENT: u8 = 0x10;
+const MHD_AV: u8 = 0x20;
 const MHD_ALWAYS_SET: u8 = 0x80;
+const RAR13_AV_PREFIX: &[u8; 6] = b"\x1ai\x6d\x02\xda\xae";
 const LHD_SPLIT_BEFORE: u8 = 0x01;
 const LHD_SPLIT_AFTER: u8 = 0x02;
 const LHD_PASSWORD: u8 = 0x04;
@@ -54,6 +56,19 @@ pub struct Archive {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthenticityVerification {
+    pub size: u16,
+    pub prefix: [u8; 6],
+    pub cipher_body: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthenticityVerificationStatus {
+    Absent,
+    StructurallyValid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtractedEntry {
     pub name: Vec<u8>,
     pub data: Vec<u8>,
@@ -84,6 +99,7 @@ pub struct StoredEntry<'a> {
     pub file_time: u32,
     pub file_attr: u8,
     pub password: Option<&'a [u8]>,
+    pub file_comment: Option<&'a [u8]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +109,7 @@ pub struct FileEntry<'a> {
     pub file_time: u32,
     pub file_attr: u8,
     pub password: Option<&'a [u8]>,
+    pub file_comment: Option<&'a [u8]>,
 }
 
 impl MainHeader {
@@ -110,6 +127,10 @@ impl MainHeader {
 
     pub fn is_solid(&self) -> bool {
         self.flags & MHD_SOLID != 0
+    }
+
+    pub fn has_authenticity_verification(&self) -> bool {
+        self.flags & MHD_AV != 0
     }
 
     fn parse(input: &[u8]) -> Result<Self> {
@@ -304,6 +325,46 @@ impl Archive {
             return Err(Error::TooShort);
         }
         Ok(Some(self.main.extra[comment_start..comment_end].to_vec()))
+    }
+
+    pub fn authenticity_verification(&self) -> Result<Option<AuthenticityVerification>> {
+        if !self.main.has_authenticity_verification() {
+            return Ok(None);
+        }
+        let size = read_u16(&self.main.extra, 0)?;
+        if size < RAR13_AV_PREFIX.len() as u16 {
+            return Err(Error::InvalidHeader("RAR 1.3 AV payload is too short"));
+        }
+        let payload_end = 2usize
+            .checked_add(size as usize)
+            .ok_or(Error::InvalidHeader("RAR 1.3 AV payload size overflows"))?;
+        if payload_end > self.main.extra.len() {
+            return Err(Error::TooShort);
+        }
+        let prefix_bytes = self
+            .main
+            .extra
+            .get(2..2 + RAR13_AV_PREFIX.len())
+            .ok_or(Error::TooShort)?;
+        let prefix: [u8; 6] = prefix_bytes
+            .try_into()
+            .expect("RAR 1.3 AV prefix slice has fixed length");
+        if &prefix != RAR13_AV_PREFIX {
+            return Err(Error::InvalidHeader("RAR 1.3 AV prefix mismatch"));
+        }
+        Ok(Some(AuthenticityVerification {
+            size,
+            prefix,
+            cipher_body: self.main.extra[2 + RAR13_AV_PREFIX.len()..payload_end].to_vec(),
+        }))
+    }
+
+    pub fn verify_authenticity_verification(&self) -> Result<AuthenticityVerificationStatus> {
+        Ok(if self.authenticity_verification()?.is_some() {
+            AuthenticityVerificationStatus::StructurallyValid
+        } else {
+            AuthenticityVerificationStatus::Absent
+        })
     }
 }
 
@@ -569,6 +630,14 @@ pub fn write_stored_archive(
     entries: &[StoredEntry<'_>],
     options: WriterOptions,
 ) -> Result<Vec<u8>> {
+    write_stored_archive_with_comment(entries, options, None)
+}
+
+pub fn write_stored_archive_with_comment(
+    entries: &[StoredEntry<'_>],
+    options: WriterOptions,
+    archive_comment: Option<&[u8]>,
+) -> Result<Vec<u8>> {
     if !options.target.is_rar13_family() {
         return Err(Error::UnsupportedVersion(options.target));
     }
@@ -576,7 +645,7 @@ pub fn write_stored_archive(
     validate_stored_writer_features(options.target, options.features)?;
 
     let mut out = Vec::new();
-    write_main_header(&mut out, options.features);
+    write_main_header(&mut out, options.features, archive_comment)?;
 
     for entry in entries {
         validate_stored_entry(entry)?;
@@ -590,6 +659,14 @@ pub fn write_compressed_archive(
     entries: &[FileEntry<'_>],
     options: WriterOptions,
 ) -> Result<Vec<u8>> {
+    write_compressed_archive_with_comment(entries, options, None)
+}
+
+pub fn write_compressed_archive_with_comment(
+    entries: &[FileEntry<'_>],
+    options: WriterOptions,
+    archive_comment: Option<&[u8]>,
+) -> Result<Vec<u8>> {
     if !options.target.is_rar13_family() {
         return Err(Error::UnsupportedVersion(options.target));
     }
@@ -597,7 +674,7 @@ pub fn write_compressed_archive(
     validate_compressed_writer_features(options.target, options.features)?;
 
     let mut out = Vec::new();
-    write_main_header(&mut out, options.features);
+    write_main_header(&mut out, options.features, archive_comment)?;
 
     let mut solid_encoder = options.features.solid.then(Unpack15Encoder::new);
 
@@ -618,6 +695,10 @@ pub fn write_compressed_archive(
         if entry.password.is_some() {
             flags |= LHD_PASSWORD;
         }
+        if entry.file_comment.is_some() {
+            flags |= LHD_COMMENT;
+        }
+        let file_extra = encode_file_comment(entry.file_comment)?;
         write_file_entry(
             &mut out,
             entry.name,
@@ -628,15 +709,78 @@ pub fn write_compressed_archive(
             flags,
             DEFAULT_UNP_VER,
             3,
+            &file_extra,
         )?;
     }
 
     Ok(out)
 }
 
+pub fn write_stored_volumes(
+    entry: StoredEntry<'_>,
+    options: WriterOptions,
+    max_packed_per_volume: usize,
+) -> Result<Vec<Vec<u8>>> {
+    if !options.target.is_rar13_family() {
+        return Err(Error::UnsupportedVersion(options.target));
+    }
+    options.features.validate_for(options.target)?;
+    validate_stored_writer_features(options.target, options.features)?;
+    validate_volume_writer_inputs(
+        entry.name,
+        entry.data,
+        entry.password,
+        entry.file_comment,
+        options,
+    )?;
+
+    let body = entry.data.to_vec();
+    write_split_volumes(
+        entry.name,
+        entry.data,
+        &body,
+        entry.file_time,
+        entry.file_attr,
+        METHOD_STORE,
+        0,
+        options.features,
+        max_packed_per_volume,
+    )
+}
+
+pub fn write_compressed_volumes(
+    entry: FileEntry<'_>,
+    options: WriterOptions,
+    max_packed_per_volume: usize,
+) -> Result<Vec<Vec<u8>>> {
+    if !options.target.is_rar13_family() {
+        return Err(Error::UnsupportedVersion(options.target));
+    }
+    options.features.validate_for(options.target)?;
+    validate_compressed_writer_features(options.target, options.features)?;
+    validate_volume_writer_inputs(
+        entry.name,
+        entry.data,
+        entry.password,
+        entry.file_comment,
+        options,
+    )?;
+
+    let packed = unpack15_encode(entry.data)?;
+    write_split_volumes(
+        entry.name,
+        entry.data,
+        &packed,
+        entry.file_time,
+        entry.file_attr,
+        3,
+        0,
+        options.features,
+        max_packed_per_volume,
+    )
+}
+
 fn validate_stored_writer_features(version: ArchiveVersion, features: FeatureSet) -> Result<()> {
-    reject_writer_feature(version, features.archive_comment, "archive_comment")?;
-    reject_writer_feature(version, features.file_comment, "file_comment")?;
     reject_writer_feature(version, features.sfx, "sfx")?;
     reject_writer_feature(
         version,
@@ -646,12 +790,39 @@ fn validate_stored_writer_features(version: ArchiveVersion, features: FeatureSet
     Ok(())
 }
 
+fn validate_volume_writer_inputs(
+    name: &[u8],
+    data: &[u8],
+    password: Option<&[u8]>,
+    file_comment: Option<&[u8]>,
+    options: WriterOptions,
+) -> Result<()> {
+    validate_file_entry(name, data)?;
+    if password.is_some() {
+        return Err(Error::UnsupportedFeature {
+            version: options.target,
+            feature: "volume_password",
+        });
+    }
+    if file_comment.is_some() || options.features.file_comment {
+        return Err(Error::UnsupportedFeature {
+            version: options.target,
+            feature: "volume_file_comment",
+        });
+    }
+    if options.features.archive_comment {
+        return Err(Error::UnsupportedFeature {
+            version: options.target,
+            feature: "volume_archive_comment",
+        });
+    }
+    Ok(())
+}
+
 fn validate_compressed_writer_features(
     version: ArchiveVersion,
     features: FeatureSet,
 ) -> Result<()> {
-    reject_writer_feature(version, features.archive_comment, "archive_comment")?;
-    reject_writer_feature(version, features.file_comment, "file_comment")?;
     reject_writer_feature(version, features.sfx, "sfx")?;
     reject_writer_feature(
         version,
@@ -673,17 +844,40 @@ fn reject_writer_feature(
     }
 }
 
-fn write_main_header(out: &mut Vec<u8>, features: FeatureSet) {
-    let mut flags = MHD_ALWAYS_SET;
-    if features.archive_comment {
+fn write_main_header(
+    out: &mut Vec<u8>,
+    features: FeatureSet,
+    archive_comment: Option<&[u8]>,
+) -> Result<()> {
+    write_main_header_with_flags(out, features, archive_comment, 0)
+}
+
+fn write_main_header_with_flags(
+    out: &mut Vec<u8>,
+    features: FeatureSet,
+    archive_comment: Option<&[u8]>,
+    extra_flags: u8,
+) -> Result<()> {
+    let comment_extra = encode_archive_comment(archive_comment)?;
+    let mut flags = MHD_ALWAYS_SET | extra_flags;
+    if archive_comment.is_some() {
         flags |= MHD_COMMENT;
+        flags |= MHD_PACK_COMMENT;
     }
     if features.solid {
         flags |= MHD_SOLID;
     }
     out.extend_from_slice(RAR13_SIGNATURE);
-    out.extend_from_slice(&MAIN_HEAD_SIZE.to_le_bytes());
+    let head_size = MAIN_HEAD_SIZE as usize + comment_extra.len();
+    if head_size > u16::MAX as usize {
+        return Err(Error::InvalidHeader(
+            "RAR 1.3 main header comment extension is too large",
+        ));
+    }
+    out.extend_from_slice(&(head_size as u16).to_le_bytes());
     out.push(flags);
+    out.extend_from_slice(&comment_extra);
+    Ok(())
 }
 
 fn write_stored_entry(
@@ -695,7 +889,7 @@ fn write_stored_entry(
     if entry.password.is_some() {
         flags |= LHD_PASSWORD;
     }
-    if features.file_comment {
+    if entry.file_comment.is_some() {
         flags |= LHD_COMMENT;
     }
     if features.solid {
@@ -707,6 +901,7 @@ fn write_stored_entry(
         Rar13Cipher::new(password).encrypt_in_place(&mut body);
     }
 
+    let file_extra = encode_file_comment(entry.file_comment)?;
     write_file_entry(
         out,
         entry.name,
@@ -717,6 +912,7 @@ fn write_stored_entry(
         flags,
         DEFAULT_UNP_VER,
         METHOD_STORE,
+        &file_extra,
     )?;
     Ok(())
 }
@@ -735,11 +931,40 @@ fn write_file_entry(
     flags: u8,
     unp_ver: u8,
     method: u8,
+    extra: &[u8],
 ) -> Result<()> {
-    let head_size = FILE_HEAD_BASE_SIZE + name.len();
+    write_file_entry_with_crc(
+        out,
+        name,
+        unpacked.len() as u32,
+        file_checksum(unpacked),
+        packed,
+        file_time,
+        file_attr,
+        flags,
+        unp_ver,
+        method,
+        extra,
+    )
+}
+
+fn write_file_entry_with_crc(
+    out: &mut Vec<u8>,
+    name: &[u8],
+    unpacked_size: u32,
+    file_crc: u16,
+    packed: &[u8],
+    file_time: u32,
+    file_attr: u8,
+    flags: u8,
+    unp_ver: u8,
+    method: u8,
+    extra: &[u8],
+) -> Result<()> {
+    let head_size = FILE_HEAD_BASE_SIZE + name.len() + extra.len();
     out.extend_from_slice(&(packed.len() as u32).to_le_bytes());
-    out.extend_from_slice(&(unpacked.len() as u32).to_le_bytes());
-    out.extend_from_slice(&file_checksum(unpacked).to_le_bytes());
+    out.extend_from_slice(&unpacked_size.to_le_bytes());
+    out.extend_from_slice(&file_crc.to_le_bytes());
     out.extend_from_slice(&(head_size as u16).to_le_bytes());
     out.extend_from_slice(&file_time.to_le_bytes());
     out.push(file_attr);
@@ -748,8 +973,117 @@ fn write_file_entry(
     out.push(name.len() as u8);
     out.push(method);
     out.extend_from_slice(name);
+    out.extend_from_slice(extra);
     out.extend_from_slice(packed);
     Ok(())
+}
+
+fn write_split_volumes(
+    name: &[u8],
+    unpacked: &[u8],
+    packed: &[u8],
+    file_time: u32,
+    file_attr: u8,
+    method: u8,
+    base_flags: u8,
+    features: FeatureSet,
+    max_packed_per_volume: usize,
+) -> Result<Vec<Vec<u8>>> {
+    if max_packed_per_volume == 0 {
+        return Err(Error::InvalidHeader(
+            "RAR 1.3 volume payload size must be non-zero",
+        ));
+    }
+    if packed.is_empty() {
+        return Err(Error::InvalidHeader(
+            "RAR 1.3 volume writer needs a non-empty packed payload",
+        ));
+    }
+
+    let chunks: Vec<&[u8]> = packed.chunks(max_packed_per_volume).collect();
+    if chunks.len() < 2 {
+        return Err(Error::InvalidHeader(
+            "RAR 1.3 volume writer needs at least two volumes",
+        ));
+    }
+
+    let mut volumes = Vec::with_capacity(chunks.len());
+    for (index, chunk) in chunks.iter().enumerate() {
+        let split_before = index > 0;
+        let split_after = index + 1 < chunks.len();
+        let mut flags = base_flags;
+        if split_before {
+            flags |= LHD_SPLIT_BEFORE;
+        }
+        if split_after {
+            flags |= LHD_SPLIT_AFTER;
+        }
+        if features.solid {
+            flags |= LHD_SOLID;
+        }
+
+        let mut out = Vec::new();
+        write_main_header_with_flags(&mut out, features, None, MHD_VOLUME)?;
+        let checksum_data = if split_after { *chunk } else { unpacked };
+        write_file_entry_with_crc(
+            &mut out,
+            name,
+            unpacked.len() as u32,
+            file_checksum(checksum_data),
+            chunk,
+            file_time,
+            file_attr,
+            flags,
+            DEFAULT_UNP_VER,
+            method,
+            &[],
+        )?;
+        volumes.push(out);
+    }
+
+    Ok(volumes)
+}
+
+fn encode_archive_comment(comment: Option<&[u8]>) -> Result<Vec<u8>> {
+    let Some(comment) = comment else {
+        return Ok(Vec::new());
+    };
+    if comment.len() > u16::MAX as usize {
+        return Err(Error::InvalidHeader(
+            "RAR 1.3 archive comment is longer than 65535 bytes",
+        ));
+    }
+    let mut packed = unpack15_encode(comment)?;
+    Rar13Cipher::new_comment().encrypt_in_place(&mut packed);
+    let packed_field_len = packed.len().checked_add(2).ok_or(Error::InvalidHeader(
+        "RAR 1.3 archive comment size overflows",
+    ))?;
+    if packed_field_len > u16::MAX as usize {
+        return Err(Error::InvalidHeader(
+            "RAR 1.3 packed archive comment is longer than 65535 bytes",
+        ));
+    }
+
+    let mut out = Vec::with_capacity(4 + packed.len());
+    out.extend_from_slice(&(packed_field_len as u16).to_le_bytes());
+    out.extend_from_slice(&(comment.len() as u16).to_le_bytes());
+    out.extend_from_slice(&packed);
+    Ok(out)
+}
+
+fn encode_file_comment(comment: Option<&[u8]>) -> Result<Vec<u8>> {
+    let Some(comment) = comment else {
+        return Ok(Vec::new());
+    };
+    if comment.len() > u16::MAX as usize {
+        return Err(Error::InvalidHeader(
+            "RAR 1.3 file comment is longer than 65535 bytes",
+        ));
+    }
+    let mut out = Vec::with_capacity(2 + comment.len());
+    out.extend_from_slice(&(comment.len() as u16).to_le_bytes());
+    out.extend_from_slice(comment);
+    Ok(out)
 }
 
 fn validate_file_entry(name: &[u8], data: &[u8]) -> Result<()> {
@@ -2096,6 +2430,7 @@ mod tests {
                 file_time: 0,
                 file_attr: 0x20,
                 password: None,
+                file_comment: None,
             },
             StoredEntry {
                 name: b"docs",
@@ -2103,6 +2438,7 @@ mod tests {
                 file_time: 0,
                 file_attr: 0x10,
                 password: None,
+                file_comment: None,
             },
         ];
 
@@ -2130,6 +2466,7 @@ mod tests {
             file_time: 0,
             file_attr: 0x20,
             password: Some(b"pass"),
+            file_comment: None,
         }];
 
         let bytes = write_stored_archive(&input, WriterOptions::default()).unwrap();
@@ -2149,6 +2486,54 @@ mod tests {
     }
 
     #[test]
+    fn writes_and_reads_archive_comment() {
+        let input = [StoredEntry {
+            name: b"README.md",
+            data: b"hello rar 1.3",
+            file_time: 0,
+            file_attr: 0x20,
+            password: None,
+            file_comment: None,
+        }];
+
+        let bytes = write_stored_archive_with_comment(
+            &input,
+            WriterOptions::default(),
+            Some(b"This is an archive comment."),
+        )
+        .unwrap();
+        let archive = Archive::parse(&bytes).unwrap();
+        assert!(archive.main.has_archive_comment());
+        assert!(archive.main.has_packed_comment());
+        assert_eq!(
+            archive.archive_comment().unwrap().as_deref(),
+            Some(&b"This is an archive comment."[..])
+        );
+        assert_eq!(archive.extract(None).unwrap()[0].data, b"hello rar 1.3");
+    }
+
+    #[test]
+    fn writes_and_reads_file_comment() {
+        let input = [StoredEntry {
+            name: b"README.md",
+            data: b"hello rar 1.3",
+            file_time: 0,
+            file_attr: 0x20,
+            password: None,
+            file_comment: Some(b"file comment\r\n"),
+        }];
+
+        let bytes = write_stored_archive(&input, WriterOptions::default()).unwrap();
+        let archive = Archive::parse(&bytes).unwrap();
+        assert!(archive.entries[0].has_file_comment());
+        assert_eq!(
+            archive.entries[0].file_comment().unwrap().as_deref(),
+            Some(&b"file comment\r\n"[..])
+        );
+        assert_eq!(archive.extract(None).unwrap()[0].data, b"hello rar 1.3");
+    }
+
+    #[test]
     fn writes_and_reads_literal_only_compressed_archive() {
         let input = [FileEntry {
             name: b"tiny.txt",
@@ -2156,6 +2541,7 @@ mod tests {
             file_time: 0,
             file_attr: 0x20,
             password: None,
+            file_comment: None,
         }];
 
         let bytes = write_compressed_archive(&input, WriterOptions::default()).unwrap();
@@ -2181,6 +2567,7 @@ mod tests {
             file_time: 0,
             file_attr: 0x20,
             password: None,
+            file_comment: None,
         }];
 
         let bytes = write_compressed_archive(&input, WriterOptions::default()).unwrap();
@@ -2200,6 +2587,7 @@ mod tests {
             file_time: 0,
             file_attr: 0x20,
             password: None,
+            file_comment: None,
         }];
 
         let bytes = write_compressed_archive(&input, WriterOptions::default()).unwrap();
@@ -2224,6 +2612,7 @@ mod tests {
             file_time: 0,
             file_attr: 0x20,
             password: None,
+            file_comment: None,
         }];
 
         let literal_only = Unpack15Encoder::new()
@@ -2251,6 +2640,7 @@ mod tests {
                 file_time: 0,
                 file_attr: 0x20,
                 password: None,
+                file_comment: None,
             },
             FileEntry {
                 name: b"second.txt",
@@ -2258,6 +2648,7 @@ mod tests {
                 file_time: 0,
                 file_attr: 0x20,
                 password: None,
+                file_comment: None,
             },
         ];
         let mut features = FeatureSet::store_only();
@@ -2289,6 +2680,7 @@ mod tests {
             file_time: 0,
             file_attr: 0x20,
             password: Some(b"pass"),
+            file_comment: None,
         }];
 
         let bytes = write_compressed_archive(&input, WriterOptions::default()).unwrap();
@@ -2299,6 +2691,90 @@ mod tests {
 
         let extracted = archive.extract(Some(b"pass")).unwrap();
         assert_eq!(extracted[0].data, input[0].data);
+    }
+
+    #[test]
+    fn writes_and_reads_compressed_file_comment() {
+        let input = [FileEntry {
+            name: b"commented.txt",
+            data: b"compressed member with file comment",
+            file_time: 0,
+            file_attr: 0x20,
+            password: None,
+            file_comment: Some(b"compressed file comment"),
+        }];
+
+        let bytes = write_compressed_archive(&input, WriterOptions::default()).unwrap();
+        let archive = Archive::parse(&bytes).unwrap();
+        assert_eq!(
+            archive.entries[0].file_comment().unwrap().as_deref(),
+            Some(&b"compressed file comment"[..])
+        );
+
+        let extracted = archive.extract(None).unwrap();
+        assert_eq!(extracted[0].data, input[0].data);
+    }
+
+    #[test]
+    fn writes_and_reads_stored_multivolume_archive() {
+        let entry = StoredEntry {
+            name: b"random.bin",
+            data: b"abcdefghijklmnopqrstuvwxyz0123456789",
+            file_time: 0,
+            file_attr: 0x20,
+            password: None,
+            file_comment: None,
+        };
+
+        let bytes = write_stored_volumes(entry, WriterOptions::default(), 10).unwrap();
+        assert_eq!(bytes.len(), 4);
+        let volumes: Vec<_> = bytes
+            .iter()
+            .map(|bytes| Archive::parse(bytes).unwrap())
+            .collect();
+        assert!(volumes.iter().all(|archive| archive.main.is_volume()));
+        assert!(!volumes[0].entries[0].is_split_before());
+        assert!(volumes[0].entries[0].is_split_after());
+        assert!(volumes[1].entries[0].is_split_before());
+        assert!(volumes[1].entries[0].is_split_after());
+        assert!(volumes[3].entries[0].is_split_before());
+        assert!(!volumes[3].entries[0].is_split_after());
+        assert!(volumes.iter().all(|archive| archive.entries[0].is_stored()));
+
+        let extracted = extract_volumes(&volumes, None).unwrap();
+        assert_eq!(extracted.len(), 1);
+        assert_eq!(extracted[0].name, b"random.bin");
+        assert_eq!(extracted[0].data, entry.data);
+    }
+
+    #[test]
+    fn writes_and_reads_compressed_multivolume_archive() {
+        let data = b"abcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabc";
+        let entry = FileEntry {
+            name: b"repeat.txt",
+            data,
+            file_time: 0,
+            file_attr: 0x20,
+            password: None,
+            file_comment: None,
+        };
+
+        let bytes = write_compressed_volumes(entry, WriterOptions::default(), 8).unwrap();
+        assert!(bytes.len() >= 2);
+        let volumes: Vec<_> = bytes
+            .iter()
+            .map(|bytes| Archive::parse(bytes).unwrap())
+            .collect();
+        assert!(volumes.iter().all(|archive| archive.main.is_volume()));
+        assert!(!volumes[0].entries[0].is_stored());
+        assert!(volumes[0].entries[0].is_split_after());
+        assert!(volumes.last().unwrap().entries[0].is_split_before());
+        assert!(!volumes.last().unwrap().entries[0].is_split_after());
+
+        let extracted = extract_volumes(&volumes, None).unwrap();
+        assert_eq!(extracted.len(), 1);
+        assert_eq!(extracted[0].name, b"repeat.txt");
+        assert_eq!(extracted[0].data, data);
     }
 
     fn short_lz_resistant_prefix(len: usize) -> Vec<u8> {
@@ -2328,6 +2804,7 @@ mod tests {
             file_time: 0,
             file_attr: 0x20,
             password: None,
+            file_comment: None,
         }];
 
         let bytes = write_compressed_archive(&input, WriterOptions::default()).unwrap();
@@ -2361,7 +2838,7 @@ mod tests {
     #[test]
     fn rejects_unimplemented_rar13_writer_features() {
         let mut features = FeatureSet::store_only();
-        features.archive_comment = true;
+        features.sfx = true;
 
         let options = WriterOptions {
             target: ArchiveVersion::Rar14,
@@ -2372,7 +2849,7 @@ mod tests {
             err,
             Error::UnsupportedFeature {
                 version: ArchiveVersion::Rar14,
-                feature: "archive_comment"
+                feature: "sfx"
             }
         );
     }

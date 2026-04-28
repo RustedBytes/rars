@@ -74,11 +74,14 @@ This slice is now good enough to act as the first backend for a CLI:
   solid compressed, old-style compressed multi-volume archives, directory
   entries, and SFX-prefixed archives.
 - Write: valid stored archives, encrypted stored archives, compressed archives,
-  encrypted compressed archives, and solid compressed archives using Huff
-  literals, ShortLZ matches, LongLZ matches, and solid-state carry, with
-  version and feature validation.
+  encrypted compressed archives, solid compressed archives, packed archive
+  comments, file comments, and old-style single-file multi-volume archives
+  using Huff literals, ShortLZ matches, LongLZ matches, and solid-state carry,
+  with version and feature validation.
 - CLI: `info`, `test`, `x`, and `a --format rar14` (compressed by default,
-  `--store` to force stored output, `--solid` for solid compressed output).
+  `--store` to force stored output, `--solid` for solid compressed output,
+  `--comment` and `--file-comment` for comment writing, `--volume-size` for
+  old-style single-file volumes).
 - Negative coverage: wrong password rejection, corrupt stored payload checksum
   rejection, truncated compressed payload rejection, and unsafe extraction path
   rejection. Positive fixture coverage includes packed archive-comment and
@@ -93,30 +96,32 @@ The first version slice should be useful without attempting WinRAR byte identity
   entries, stored/compressed multi-volume archives, archive comments, and file
   comments are implemented.
 - Write: stored files, encrypted stored files, compressed files, encrypted
-  compressed files, and solid compressed files using Huff literals plus
-  ShortLZ/LongLZ matches are implemented. The compressed writer handles longer
-  literal runs by exiting StMode and is accepted by RAR 1.402 for the covered
-  paths.
-- Defer: AV emission and byte-identical historical compressor
-  heuristics.
+  compressed files, solid compressed files, packed archive comments, and file
+  comments, plus stored/compressed old-style single-file multi-volume output,
+  using Huff literals plus ShortLZ/LongLZ matches are implemented. The
+  compressed writer handles longer literal runs by exiting StMode and is
+  accepted by RAR 1.402 for the covered paths.
+- Defer: AV emission, cryptographic AV verification without a real registered
+  signature fixture, and byte-identical historical compressor heuristics.
 
 ## Remaining RAR 1.3/1.4 gaps
 
 Read-side gaps:
 
-- AV payload parsing/verification. The spec repository has structural notes, but
-  `rars` does not expose or validate AV records yet.
+- Full cryptographic AV verification. RAR 1.40 inline AV records are detected
+  and structurally parsed from the paired shape fixtures, but the available
+  AV-bearing fixture uses a registration-patched binary with BSS-zero
+  registration data, so it is not a real registered-signature oracle.
 - Error typing. Current errors are structured enough for tests, but CLI messages
   will need refinement before the tool is friendly.
 
 Write-side gaps:
 
-- Archive and file comment writer support.
-- Old-style multi-volume writer.
 - SFX writer/stub support.
 - AV writer. Likely defer unless a concrete compatibility need appears.
 
-Recommended next task after compaction: add archive/file comment writing.
+Recommended next task after compaction: decide whether to polish RAR 1.3/1.4
+error/reporting edges or move on to the RAR 1.5-4.x container slice.
 
 ## Testing strategy
 

@@ -7,7 +7,7 @@ use std::path::{Component, Path, PathBuf};
 type CliResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 const ADD_USAGE: &str =
-    "usage: rars a [--password <password>] --format rar14 [--store] [--solid] <archive> <files...>";
+    "usage: rars a [--password <password>] --format rar14 [--store] [--solid] [--comment <text>] [--file-comment <text>] [--volume-size <bytes>] <archive> <files...>";
 
 fn main() {
     if let Err(err) = run() {
@@ -65,6 +65,13 @@ fn cmd_info(args: &[String]) -> CliResult<()> {
                 if let Some(comment) = archive.archive_comment()? {
                     println!("  comment: {}", String::from_utf8_lossy(&comment));
                 }
+            }
+            if let Some(av) = archive.authenticity_verification()? {
+                println!(
+                    "  authenticity verification: structural size={} cipher_body={} status=not-cryptographically-verified",
+                    av.size,
+                    av.cipher_body.len()
+                );
             }
             for (index, entry) in archive.entries.iter().enumerate() {
                 println!(
@@ -138,6 +145,9 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
     }
     let mut store = false;
     let mut solid = false;
+    let mut archive_comment = None;
+    let mut file_comment = None;
+    let mut volume_size = None;
     let mut archive_index = 2;
     while let Some(arg) = args.get(archive_index) {
         match arg.as_str() {
@@ -148,6 +158,27 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
             "--solid" => {
                 solid = true;
                 archive_index += 1;
+            }
+            "--comment" => {
+                let value = args
+                    .get(archive_index + 1)
+                    .ok_or("missing --comment value")?;
+                archive_comment = Some(value.as_bytes().to_vec());
+                archive_index += 2;
+            }
+            "--file-comment" => {
+                let value = args
+                    .get(archive_index + 1)
+                    .ok_or("missing --file-comment value")?;
+                file_comment = Some(value.as_bytes().to_vec());
+                archive_index += 2;
+            }
+            "--volume-size" => {
+                let value = args
+                    .get(archive_index + 1)
+                    .ok_or("missing --volume-size value")?;
+                volume_size = Some(value.parse::<usize>()?);
+                archive_index += 2;
             }
             unknown if unknown.starts_with('-') => {
                 return Err(format!("unknown add option: {unknown}").into());
@@ -167,6 +198,9 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
     if input_paths.is_empty() {
         return Err("no input files".into());
     }
+    if volume_size.is_some() && input_paths.len() != 1 {
+        return Err("RAR 1.4 multivolume writer currently supports one input file".into());
+    }
 
     let owned = read_inputs(input_paths, password.as_deref())?;
     let mut features = FeatureSet::store_only();
@@ -175,6 +209,34 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
         target: ArchiveVersion::Rar14,
         features,
     };
+    if let Some(volume_size) = volume_size {
+        let entry = owned.first().expect("one input checked above");
+        let parts = if compress {
+            let entry = FileEntry {
+                name: &entry.name,
+                data: &entry.data,
+                file_time: 0,
+                file_attr: entry.file_attr,
+                password: entry.password.as_deref(),
+                file_comment: file_comment.as_deref(),
+            };
+            rar13::write_compressed_volumes(entry, options, volume_size)?
+        } else {
+            let entry = StoredEntry {
+                name: &entry.name,
+                data: &entry.data,
+                file_time: 0,
+                file_attr: entry.file_attr,
+                password: entry.password.as_deref(),
+                file_comment: file_comment.as_deref(),
+            };
+            rar13::write_stored_volumes(entry, options, volume_size)?
+        };
+        write_volume_parts(&archive_path, &parts)?;
+        println!("created {} volumes", parts.len());
+        return Ok(());
+    }
+
     let bytes = if compress {
         let entries: Vec<_> = owned
             .iter()
@@ -184,9 +246,10 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                 file_time: 0,
                 file_attr: entry.file_attr,
                 password: entry.password.as_deref(),
+                file_comment: file_comment.as_deref(),
             })
             .collect();
-        rar13::write_compressed_archive(&entries, options)?
+        rar13::write_compressed_archive_with_comment(&entries, options, archive_comment.as_deref())?
     } else {
         let entries: Vec<_> = owned
             .iter()
@@ -196,13 +259,32 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                 file_time: 0,
                 file_attr: entry.file_attr,
                 password: entry.password.as_deref(),
+                file_comment: file_comment.as_deref(),
             })
             .collect();
-        rar13::write_stored_archive(&entries, options)?
+        rar13::write_stored_archive_with_comment(&entries, options, archive_comment.as_deref())?
     };
     fs::write(&archive_path, bytes)?;
     println!("created {}", archive_path.display());
     Ok(())
+}
+
+fn write_volume_parts(first_path: &Path, parts: &[Vec<u8>]) -> CliResult<()> {
+    for (index, bytes) in parts.iter().enumerate() {
+        let path = volume_part_path(first_path, index)?;
+        fs::write(path, bytes)?;
+    }
+    Ok(())
+}
+
+fn volume_part_path(first_path: &Path, index: usize) -> CliResult<PathBuf> {
+    if index == 0 {
+        return Ok(first_path.to_path_buf());
+    }
+    if index > 100 {
+        return Err("RAR 1.4 old-style volume names only support .r00 through .r99 here".into());
+    }
+    Ok(first_path.with_extension(format!("r{:02}", index - 1)))
 }
 
 fn parse_password(args: &[String]) -> CliResult<(Option<Vec<u8>>, Vec<String>)> {
