@@ -15,10 +15,10 @@ rars/
     rars/              public library facade
     rars-cli/          command line interface
     rars-format/       signatures, headers, flags, version detection, raw I/O
-    rars-codec/        LZ/Huffman/PPMd/RARVM/filter codecs
-    rars-crypto/       legacy ciphers, AES/KDF/HMAC
+    rars-codec/        LZ/Huffman/PPMd/RARVM/filter codecs (Unpack15 lives here)
+    rars-crypto/       legacy ciphers, AES/KDF/HMAC (RAR 1.3 cipher lives here)
     rars-recovery/     RR/REV recovery data and repair logic
-    rars-testkit/      fixture helpers and reference-tool integration
+    rars-testkit/      fixture helpers and reference-tool integration scaffold
 ```
 
 ## Version model
@@ -60,7 +60,11 @@ WinRAR-like heuristics.
 7. [done] Add a baseline legal Unpack15 encoder. Output now covers Huff
    literals, repeated StMode exit handling, ShortLZ matches, LongLZ matches,
    and solid-state carry between members.
-8. Expand to RAR 1.5-4.x container, then RAR 5.0.
+8. [done] Re-align the workspace with the intended crate boundaries after the
+   RAR 1.3/1.4 vertical slice was proven: `rars-codec` owns Unpack15,
+   `rars-crypto` owns the legacy RAR 1.3 cipher, `rars-format` owns container
+   parsing/writing, and `rars-testkit` is scaffolded for reference-tool checks.
+9. Expand to RAR 1.5-4.x container, then RAR 5.0.
 
 ## Current RAR 1.3/1.4 status
 
@@ -82,6 +86,11 @@ This slice is now good enough to act as the first backend for a CLI:
   `--store` to force stored output, `--solid` for solid compressed output,
   `--comment` and `--file-comment` for comment writing, `--volume-size` for
   old-style single-file volumes).
+- Architecture: the RAR 1.3/1.4 container remains in `rars-format::rar13`,
+  while Unpack15 codec state now lives in `rars-codec` and the legacy password
+  cipher lives in `rars-crypto`. The facade crate exposes `ArchiveReader`,
+  `Archive`, and a small `ArchiveWriter` wrapper so callers have an auto-detect
+  path instead of only version-specific entry points.
 - Negative coverage: wrong password rejection, corrupt stored payload checksum
   rejection, truncated compressed payload rejection, and unsafe extraction path
   rejection. Positive fixture coverage includes packed archive-comment and

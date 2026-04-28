@@ -1,10 +1,8 @@
 [package]
-name = "rars-format"
+name = "rars-testkit"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [dependencies]
-rars-codec = { path = "../rars-codec" }
-rars-crypto = { path = "../rars-crypto" }

@@ -2,7 +2,10 @@
 members = [
     "crates/rars",
     "crates/rars-cli",
+    "crates/rars-codec",
+    "crates/rars-crypto",
     "crates/rars-format",
+    "crates/rars-testkit",
 ]
 resolver = "2"
 

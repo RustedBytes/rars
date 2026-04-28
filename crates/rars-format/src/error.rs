@@ -41,3 +41,11 @@ impl std::fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+impl From<rars_codec::Error> for Error {
+    fn from(error: rars_codec::Error) -> Self {
+        match error {
+            rars_codec::Error::InvalidData(message) => Self::InvalidHeader(message),
+        }
+    }
+}

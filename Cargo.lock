@@ -17,5 +17,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rars-codec"
+version = "0.1.0"
+
+[[package]]
+name = "rars-crypto"
+version = "0.1.0"
+
+[[package]]
 name = "rars-format"
+version = "0.1.0"
+dependencies = [
+ "rars-codec",
+ "rars-crypto",
+]
+
+[[package]]
+name = "rars-testkit"
 version = "0.1.0"

@@ -1,5 +1,8 @@
 use rars::rar13::{self, Archive, ExtractedEntry, FileEntry, StoredEntry, WriterOptions};
-use rars::{detect_archive_family, ArchiveFamily, ArchiveVersion, Error, FeatureSet};
+use rars::{
+    detect_archive_family, Archive as DetectedArchive, ArchiveFamily, ArchiveReader,
+    ArchiveVersion, Error, FeatureSet,
+};
 use std::env;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -346,8 +349,11 @@ fn parse_rar13_archives(paths: &[String]) -> CliResult<Vec<Archive>> {
     for path in paths {
         let bytes = read_file(Path::new(path), "archive")?;
         archives.push(
-            Archive::parse(&bytes)
-                .map_err(|err| format!("failed to parse archive '{path}': {err}"))?,
+            match ArchiveReader::read(&bytes)
+                .map_err(|err| format!("failed to parse archive '{path}': {err}"))?
+            {
+                DetectedArchive::Rar13(archive) => archive,
+            },
         );
     }
     Ok(archives)
