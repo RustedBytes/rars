@@ -1,0 +1,77 @@
+use crate::version::ArchiveFamily;
+
+pub const RAR13_SIGNATURE: &[u8; 4] = b"RE~^";
+pub const RAR15_SIGNATURE: &[u8; 7] = b"Rar!\x1a\x07\x00";
+pub const RAR50_SIGNATURE: &[u8; 8] = b"Rar!\x1a\x07\x01\x00";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArchiveSignature {
+    pub family: ArchiveFamily,
+    pub offset: usize,
+    pub length: usize,
+}
+
+pub fn detect_archive_family(input: &[u8]) -> Option<ArchiveSignature> {
+    detect_at(input, 0)
+}
+
+pub fn find_archive_start(input: &[u8], max_scan: usize) -> Option<ArchiveSignature> {
+    let limit = input.len().min(max_scan);
+    (0..=limit).find_map(|offset| detect_at(input, offset))
+}
+
+fn detect_at(input: &[u8], offset: usize) -> Option<ArchiveSignature> {
+    let tail = input.get(offset..)?;
+
+    if tail.starts_with(RAR50_SIGNATURE) {
+        Some(ArchiveSignature {
+            family: ArchiveFamily::Rar50Plus,
+            offset,
+            length: RAR50_SIGNATURE.len(),
+        })
+    } else if tail.starts_with(RAR15_SIGNATURE) {
+        Some(ArchiveSignature {
+            family: ArchiveFamily::Rar15To40,
+            offset,
+            length: RAR15_SIGNATURE.len(),
+        })
+    } else if tail.starts_with(RAR13_SIGNATURE) {
+        Some(ArchiveSignature {
+            family: ArchiveFamily::Rar13,
+            offset,
+            length: RAR13_SIGNATURE.len(),
+        })
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_all_known_signatures() {
+        assert_eq!(
+            detect_archive_family(b"RE~^").unwrap().family,
+            ArchiveFamily::Rar13
+        );
+        assert_eq!(
+            detect_archive_family(b"Rar!\x1a\x07\x00").unwrap().family,
+            ArchiveFamily::Rar15To40
+        );
+        assert_eq!(
+            detect_archive_family(b"Rar!\x1a\x07\x01\x00")
+                .unwrap()
+                .family,
+            ArchiveFamily::Rar50Plus
+        );
+    }
+
+    #[test]
+    fn finds_sfx_prefixed_archive() {
+        let sig = find_archive_start(b"stub bytes RE~^payload", 128).unwrap();
+        assert_eq!(sig.family, ArchiveFamily::Rar13);
+        assert_eq!(sig.offset, 11);
+    }
+}
