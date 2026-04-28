@@ -129,6 +129,17 @@ fn test_verifies_solid_fixture() {
 }
 
 #[test]
+fn test_verifies_sfx_prefixed_fixture() {
+    let output = rars()
+        .arg("test")
+        .arg(fixture("SFXSRC.EXE"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(stdout(&output).contains("OK HELLO.TXT"));
+}
+
+#[test]
 fn extracts_compressed_multivolume_fixture() {
     let out_dir = scratch("extract-compressed-multivolume");
     let output = rars()
@@ -235,6 +246,140 @@ fn creates_stored_archive_that_can_be_tested() {
     let test = rars().arg("test").arg(&archive).output().unwrap();
     assert!(test.status.success(), "stderr: {}", stderr(&test));
     assert!(stdout(&test).contains("OK hello.txt"));
+}
+
+#[test]
+fn creates_literal_compressed_archive_that_can_be_tested() {
+    let dir = scratch("create-compressed");
+    let source = dir.join("tiny.txt");
+    let archive = dir.join("created.rar");
+    fs::write(&source, b"tiny payload over sixteen").unwrap();
+
+    let create = rars()
+        .args(["a", "--format", "rar14"])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(create.status.success(), "stderr: {}", stderr(&create));
+
+    let info = rars().arg("info").arg(&archive).output().unwrap();
+    assert!(info.status.success(), "stderr: {}", stderr(&info));
+    assert!(stdout(&info).contains("method=3"));
+
+    let test = rars().arg("test").arg(&archive).output().unwrap();
+    assert!(test.status.success(), "stderr: {}", stderr(&test));
+    assert!(stdout(&test).contains("OK tiny.txt"));
+}
+
+#[test]
+fn creates_solid_compressed_archive_that_can_be_tested() {
+    let dir = scratch("create-solid-compressed");
+    let first = dir.join("first.txt");
+    let second = dir.join("second.txt");
+    let archive = dir.join("solid.rar");
+    fs::write(&first, b"first member primes the adaptive unpack15 state").unwrap();
+    fs::write(
+        &second,
+        b"second member is encoded without resetting that state",
+    )
+    .unwrap();
+
+    let create = rars()
+        .args(["a", "--format", "rar14", "--solid"])
+        .arg(&archive)
+        .arg(&first)
+        .arg(&second)
+        .output()
+        .unwrap();
+    assert!(create.status.success(), "stderr: {}", stderr(&create));
+
+    let info = rars().arg("info").arg(&archive).output().unwrap();
+    assert!(info.status.success(), "stderr: {}", stderr(&info));
+    let info_stdout = stdout(&info);
+    assert!(info_stdout.contains("rar13 main: flags=0x88"));
+    assert!(info_stdout.contains("flags=0x10"));
+
+    let test = rars().arg("test").arg(&archive).output().unwrap();
+    assert!(test.status.success(), "stderr: {}", stderr(&test));
+    let stdout = stdout(&test);
+    assert!(stdout.contains("OK first.txt"));
+    assert!(stdout.contains("OK second.txt"));
+}
+
+#[test]
+fn creates_encrypted_compressed_archive_that_can_be_tested() {
+    let dir = scratch("create-encrypted-compressed");
+    let source = dir.join("secret.txt");
+    let archive = dir.join("secret.rar");
+    fs::write(&source, b"secret compressed payload over sixteen").unwrap();
+
+    let create = rars()
+        .args(["a", "--password", "pass", "--format", "rar14"])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(create.status.success(), "stderr: {}", stderr(&create));
+
+    let without_password = rars().arg("test").arg(&archive).output().unwrap();
+    assert!(!without_password.status.success());
+
+    let test = rars()
+        .args(["test", "--password", "pass"])
+        .arg(&archive)
+        .output()
+        .unwrap();
+    assert!(test.status.success(), "stderr: {}", stderr(&test));
+    assert!(stdout(&test).contains("OK secret.txt"));
+}
+
+#[test]
+fn rejects_solid_store_output() {
+    let dir = scratch("reject-solid-store");
+    let source = dir.join("hello.txt");
+    let archive = dir.join("bad.rar");
+    fs::write(&source, b"hello").unwrap();
+
+    let output = rars()
+        .args(["a", "--format", "rar14", "--store", "--solid"])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("solid RAR 1.4 output requires compression"));
+}
+
+#[test]
+fn rejects_add_without_inputs() {
+    let dir = scratch("reject-no-inputs");
+    let archive = dir.join("empty.rar");
+
+    let output = rars()
+        .args(["a", "--format", "rar14"])
+        .arg(&archive)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("no input files"));
+}
+
+#[test]
+fn rejects_unknown_add_option() {
+    let dir = scratch("reject-unknown-add-option");
+    let source = dir.join("hello.txt");
+    let archive = dir.join("bad.rar");
+    fs::write(&source, b"hello").unwrap();
+
+    let output = rars()
+        .args(["a", "--format", "rar14", "--not-a-real-option"])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("unknown add option: --not-a-real-option"));
 }
 
 fn stdout(output: &std::process::Output) -> String {

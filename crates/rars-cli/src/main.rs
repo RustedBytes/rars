@@ -1,10 +1,13 @@
-use rars::rar13::{self, Archive, ExtractedEntry, StoredEntry, WriterOptions};
+use rars::rar13::{self, Archive, ExtractedEntry, FileEntry, StoredEntry, WriterOptions};
 use rars::{detect_archive_family, ArchiveFamily, ArchiveVersion, Error, FeatureSet};
 use std::env;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 type CliResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+const ADD_USAGE: &str =
+    "usage: rars a [--password <password>] --format rar14 [--store] [--solid] <archive> <files...>";
 
 fn main() {
     if let Err(err) = run() {
@@ -130,37 +133,73 @@ fn cmd_extract(args: &[String]) -> CliResult<()> {
 
 fn cmd_add(args: &[String]) -> CliResult<()> {
     let (password, args) = parse_password(args)?;
-    if args.len() < 4 || args[0] != "--format" || args[1] != "rar14" || args[2] != "--store" {
-        return Err(
-            "usage: rars a [--password <password>] --format rar14 --store <archive> <files...>"
-                .into(),
-        );
+    if args.len() < 3 || args[0] != "--format" || args[1] != "rar14" {
+        return Err(ADD_USAGE.into());
     }
-    let archive_path = PathBuf::from(&args[3]);
-    let input_paths = &args[4..];
+    let mut store = false;
+    let mut solid = false;
+    let mut archive_index = 2;
+    while let Some(arg) = args.get(archive_index) {
+        match arg.as_str() {
+            "--store" => {
+                store = true;
+                archive_index += 1;
+            }
+            "--solid" => {
+                solid = true;
+                archive_index += 1;
+            }
+            unknown if unknown.starts_with('-') => {
+                return Err(format!("unknown add option: {unknown}").into());
+            }
+            _ => break,
+        }
+    }
+    if args.len() <= archive_index {
+        return Err(ADD_USAGE.into());
+    }
+    let compress = !store;
+    if solid && store {
+        return Err("solid RAR 1.4 output requires compression".into());
+    }
+    let archive_path = PathBuf::from(&args[archive_index]);
+    let input_paths = &args[archive_index + 1..];
     if input_paths.is_empty() {
         return Err("no input files".into());
     }
 
     let owned = read_inputs(input_paths, password.as_deref())?;
-    let entries: Vec<_> = owned
-        .iter()
-        .map(|entry| StoredEntry {
-            name: &entry.name,
-            data: &entry.data,
-            file_time: 0,
-            file_attr: entry.file_attr,
-            password: entry.password.as_deref(),
-        })
-        .collect();
-
-    let bytes = rar13::write_stored_archive(
-        &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar14,
-            features: FeatureSet::store_only(),
-        },
-    )?;
+    let mut features = FeatureSet::store_only();
+    features.solid = solid;
+    let options = WriterOptions {
+        target: ArchiveVersion::Rar14,
+        features,
+    };
+    let bytes = if compress {
+        let entries: Vec<_> = owned
+            .iter()
+            .map(|entry| FileEntry {
+                name: &entry.name,
+                data: &entry.data,
+                file_time: 0,
+                file_attr: entry.file_attr,
+                password: entry.password.as_deref(),
+            })
+            .collect();
+        rar13::write_compressed_archive(&entries, options)?
+    } else {
+        let entries: Vec<_> = owned
+            .iter()
+            .map(|entry| StoredEntry {
+                name: &entry.name,
+                data: &entry.data,
+                file_time: 0,
+                file_attr: entry.file_attr,
+                password: entry.password.as_deref(),
+            })
+            .collect();
+        rar13::write_stored_archive(&entries, options)?
+    };
     fs::write(&archive_path, bytes)?;
     println!("created {}", archive_path.display());
     Ok(())
@@ -264,6 +303,6 @@ fn usage() {
   rars info <archive>...
   rars test [--password <password>] <archive> [parts...]
   rars x [--password <password>] <archive> [parts...] <outdir>
-  rars a [--password <password>] --format rar14 --store <archive> <files...>"
+  {ADD_USAGE}"
     );
 }

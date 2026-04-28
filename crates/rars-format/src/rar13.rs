@@ -86,6 +86,15 @@ pub struct StoredEntry<'a> {
     pub password: Option<&'a [u8]>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileEntry<'a> {
+    pub name: &'a [u8],
+    pub data: &'a [u8],
+    pub file_time: u32,
+    pub file_attr: u8,
+    pub password: Option<&'a [u8]>,
+}
+
 impl MainHeader {
     pub fn is_volume(&self) -> bool {
         self.flags & MHD_VOLUME != 0
@@ -577,7 +586,70 @@ pub fn write_stored_archive(
     Ok(out)
 }
 
+pub fn write_compressed_archive(
+    entries: &[FileEntry<'_>],
+    options: WriterOptions,
+) -> Result<Vec<u8>> {
+    if !options.target.is_rar13_family() {
+        return Err(Error::UnsupportedVersion(options.target));
+    }
+    options.features.validate_for(options.target)?;
+    validate_compressed_writer_features(options.target, options.features)?;
+
+    let mut out = Vec::new();
+    write_main_header(&mut out, options.features);
+
+    let mut solid_encoder = options.features.solid.then(Unpack15Encoder::new);
+
+    for entry in entries {
+        validate_file_entry(entry.name, entry.data)?;
+        let mut packed = if let Some(encoder) = solid_encoder.as_mut() {
+            encoder.encode_member(entry.data)?
+        } else {
+            unpack15_encode(entry.data)?
+        };
+        if let Some(password) = entry.password {
+            Rar13Cipher::new(password).encrypt_in_place(&mut packed);
+        }
+        let mut flags = 0;
+        if options.features.solid {
+            flags |= LHD_SOLID;
+        }
+        if entry.password.is_some() {
+            flags |= LHD_PASSWORD;
+        }
+        write_file_entry(
+            &mut out,
+            entry.name,
+            entry.data,
+            &packed,
+            entry.file_time,
+            entry.file_attr,
+            flags,
+            DEFAULT_UNP_VER,
+            3,
+        )?;
+    }
+
+    Ok(out)
+}
+
 fn validate_stored_writer_features(version: ArchiveVersion, features: FeatureSet) -> Result<()> {
+    reject_writer_feature(version, features.archive_comment, "archive_comment")?;
+    reject_writer_feature(version, features.file_comment, "file_comment")?;
+    reject_writer_feature(version, features.sfx, "sfx")?;
+    reject_writer_feature(
+        version,
+        features.authenticity_verification,
+        "authenticity_verification",
+    )?;
+    Ok(())
+}
+
+fn validate_compressed_writer_features(
+    version: ArchiveVersion,
+    features: FeatureSet,
+) -> Result<()> {
     reject_writer_feature(version, features.archive_comment, "archive_comment")?;
     reject_writer_feature(version, features.file_comment, "file_comment")?;
     reject_writer_feature(version, features.sfx, "sfx")?;
@@ -630,37 +702,66 @@ fn write_stored_entry(
         flags |= LHD_SOLID;
     }
 
-    let head_size = FILE_HEAD_BASE_SIZE + entry.name.len();
     let mut body = entry.data.to_vec();
     if let Some(password) = entry.password {
         Rar13Cipher::new(password).encrypt_in_place(&mut body);
     }
 
-    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
-    out.extend_from_slice(&(entry.data.len() as u32).to_le_bytes());
-    out.extend_from_slice(&file_checksum(entry.data).to_le_bytes());
-    out.extend_from_slice(&(head_size as u16).to_le_bytes());
-    out.extend_from_slice(&entry.file_time.to_le_bytes());
-    out.push(entry.file_attr);
-    out.push(flags);
-    out.push(DEFAULT_UNP_VER);
-    out.push(entry.name.len() as u8);
-    out.push(METHOD_STORE);
-    out.extend_from_slice(entry.name);
-    out.extend_from_slice(&body);
+    write_file_entry(
+        out,
+        entry.name,
+        entry.data,
+        &body,
+        entry.file_time,
+        entry.file_attr,
+        flags,
+        DEFAULT_UNP_VER,
+        METHOD_STORE,
+    )?;
     Ok(())
 }
 
 fn validate_stored_entry(entry: &StoredEntry<'_>) -> Result<()> {
-    if entry.name.is_empty() {
+    validate_file_entry(entry.name, entry.data)
+}
+
+fn write_file_entry(
+    out: &mut Vec<u8>,
+    name: &[u8],
+    unpacked: &[u8],
+    packed: &[u8],
+    file_time: u32,
+    file_attr: u8,
+    flags: u8,
+    unp_ver: u8,
+    method: u8,
+) -> Result<()> {
+    let head_size = FILE_HEAD_BASE_SIZE + name.len();
+    out.extend_from_slice(&(packed.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(unpacked.len() as u32).to_le_bytes());
+    out.extend_from_slice(&file_checksum(unpacked).to_le_bytes());
+    out.extend_from_slice(&(head_size as u16).to_le_bytes());
+    out.extend_from_slice(&file_time.to_le_bytes());
+    out.push(file_attr);
+    out.push(flags);
+    out.push(unp_ver);
+    out.push(name.len() as u8);
+    out.push(method);
+    out.extend_from_slice(name);
+    out.extend_from_slice(packed);
+    Ok(())
+}
+
+fn validate_file_entry(name: &[u8], data: &[u8]) -> Result<()> {
+    if name.is_empty() {
         return Err(Error::InvalidHeader("RAR 1.3 file name is empty"));
     }
-    if entry.name.len() > u8::MAX as usize {
+    if name.len() > u8::MAX as usize {
         return Err(Error::InvalidHeader(
             "RAR 1.3 file name is longer than 255 bytes",
         ));
     }
-    if entry.data.len() > u32::MAX as usize {
+    if data.len() > u32::MAX as usize {
         return Err(Error::InvalidHeader(
             "RAR 1.3 file is larger than 32-bit size fields",
         ));
@@ -720,9 +821,617 @@ const SHORT_XOR2: [u8; 15] = [
     0x00, 0x40, 0x60, 0xa0, 0xd0, 0xe0, 0xf0, 0xf8, 0xfc, 0xc0, 0x80, 0x90, 0x98, 0x9c, 0xb0,
 ];
 
+fn unpack15_encode(input: &[u8]) -> Result<Vec<u8>> {
+    if input.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut encoder = Unpack15Encoder::new();
+    encoder.encode_member(input)
+}
+
 fn unpack15_decode(input: &[u8], output_size: usize) -> Result<Vec<u8>> {
     let mut decoder = Unpack15::new();
     decoder.decode_member(input, output_size, false)
+}
+
+struct Unpack15Encoder {
+    bits: BitWriter,
+    ch_set: [u16; 256],
+    ch_set_c: [u16; 256],
+    ch_set_b: [u16; 256],
+    n_to_pl: [u8; 256],
+    n_to_pl_b: [u8; 256],
+    n_to_pl_c: [u8; 256],
+    ch_set_a: [u16; 256],
+    avr_plc: u32,
+    avr_plc_b: u32,
+    avr_ln1: u32,
+    avr_ln2: u32,
+    avr_ln3: u32,
+    max_dist3: u32,
+    nhfb: u32,
+    nlzb: u32,
+    num_huf: u32,
+    old_dist: [u32; 4],
+    old_dist_ptr: usize,
+    last_dist: u32,
+    last_length: u32,
+}
+
+impl Unpack15Encoder {
+    fn new() -> Self {
+        let mut encoder = Self {
+            bits: BitWriter::new(),
+            ch_set: [0; 256],
+            ch_set_c: [0; 256],
+            ch_set_b: [0; 256],
+            n_to_pl: [0; 256],
+            n_to_pl_b: [0; 256],
+            n_to_pl_c: [0; 256],
+            ch_set_a: [0; 256],
+            avr_plc: 0x3500,
+            avr_plc_b: 0,
+            avr_ln1: 0,
+            avr_ln2: 0,
+            avr_ln3: 0,
+            max_dist3: 0x2001,
+            nhfb: 0x80,
+            nlzb: 0x80,
+            num_huf: 0,
+            old_dist: [u32::MAX; 4],
+            old_dist_ptr: 0,
+            last_dist: u32::MAX,
+            last_length: 0,
+        };
+        encoder.init_huff();
+        encoder
+    }
+
+    #[cfg(test)]
+    fn encode_literals_only(mut self, input: &[u8]) -> Result<Vec<u8>> {
+        self.encode_literals_only_member(input)
+    }
+
+    #[cfg(test)]
+    fn encode_literals_only_member(&mut self, input: &[u8]) -> Result<Vec<u8>> {
+        if input.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.bits = BitWriter::new();
+        let mut pos = 0usize;
+        while pos < input.len() {
+            let mut flags = 0u8;
+            let mut flag_bits = 0usize;
+            let mut payloads = Vec::new();
+            let mut plan_nhfb = self.nhfb;
+            let mut plan_nlzb = self.nlzb;
+
+            while flag_bits < 8 && pos < input.len() {
+                let flag = huff_flag_bits(plan_nlzb <= plan_nhfb);
+                if flag_bits + flag.len() > 8 {
+                    break;
+                }
+                write_planned_flag_bits(&mut flags, flag_bits, flag);
+                payloads.push(EncodedToken::Literal(input[pos]));
+                flag_bits += flag.len();
+                pos += 1;
+                plan_huff_effect(&mut plan_nhfb, &mut plan_nlzb);
+            }
+
+            self.emit_flags_byte(flags)?;
+            self.emit_payloads(payloads, pos < input.len())?;
+        }
+        Ok(std::mem::take(&mut self.bits).finish())
+    }
+
+    fn encode_member(&mut self, input: &[u8]) -> Result<Vec<u8>> {
+        if input.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.bits = BitWriter::new();
+        let mut pos = 0usize;
+        while pos < input.len() {
+            let mut flags = 0u8;
+            let mut flag_bits = 0usize;
+            let mut payloads = Vec::new();
+            let mut plan_nhfb = self.nhfb;
+            let mut plan_nlzb = self.nlzb;
+
+            while flag_bits < 8 && pos < input.len() {
+                if let Some(short_lz) = find_short_lz(input, pos) {
+                    if flag_bits + 2 <= 8 {
+                        payloads.push(EncodedToken::ShortLz(short_lz));
+                        flag_bits += 2;
+                        pos += short_lz.length as usize;
+                        continue;
+                    }
+                }
+                if let Some(long_lz) = find_long_lz(input, pos) {
+                    let flag = long_lz_flag_bits(plan_nlzb > plan_nhfb);
+                    if flag_bits + flag.len() <= 8 {
+                        write_planned_flag_bits(&mut flags, flag_bits, flag);
+                        payloads.push(EncodedToken::LongLz(long_lz));
+                        flag_bits += flag.len();
+                        pos += long_lz.length as usize;
+                        plan_long_lz_effect(&mut plan_nhfb, &mut plan_nlzb);
+                        continue;
+                    }
+                }
+
+                let flag = huff_flag_bits(plan_nlzb <= plan_nhfb);
+                if flag_bits + flag.len() > 8 {
+                    break;
+                }
+                write_planned_flag_bits(&mut flags, flag_bits, flag);
+                payloads.push(EncodedToken::Literal(input[pos]));
+                flag_bits += flag.len();
+                pos += 1;
+                plan_huff_effect(&mut plan_nhfb, &mut plan_nlzb);
+            }
+
+            self.emit_flags_byte(flags)?;
+            self.emit_payloads(payloads, pos < input.len())?;
+        }
+        Ok(std::mem::take(&mut self.bits).finish())
+    }
+
+    fn emit_payloads(&mut self, payloads: Vec<EncodedToken>, more_input: bool) -> Result<()> {
+        let mut consumed_flag_bits = 0usize;
+        let mut decoder_enters_stmode = false;
+        for payload in payloads {
+            match payload {
+                EncodedToken::Literal(byte) => {
+                    consumed_flag_bits += huff_flag_bits(self.nlzb <= self.nhfb).len();
+                    if consumed_flag_bits == 8 && self.num_huf >= 16 {
+                        decoder_enters_stmode = true;
+                    }
+                    self.emit_literal(byte)?;
+                }
+                EncodedToken::ShortLz(short_lz) => {
+                    consumed_flag_bits += 2;
+                    self.emit_short_lz(short_lz)?;
+                }
+                EncodedToken::LongLz(long_lz) => {
+                    consumed_flag_bits += long_lz_flag_bits(self.nlzb > self.nhfb).len();
+                    self.emit_long_lz(long_lz)?;
+                }
+            }
+        }
+
+        if decoder_enters_stmode && more_input {
+            self.emit_stmode_exit()?;
+        }
+        Ok(())
+    }
+
+    fn emit_flags_byte(&mut self, flags: u8) -> Result<()> {
+        let flags_place = self
+            .ch_set_c
+            .iter()
+            .position(|&value| (value >> 8) as u8 == flags)
+            .ok_or(Error::InvalidHeader("RAR 1.3 flag byte is not encodable"))?;
+        emit_decode_num(&mut self.bits, flags_place as u32, 5, DEC_HF2, POS_HF2)?;
+
+        let mut cur_flags;
+        let mut new_flags_place;
+        loop {
+            cur_flags = self.ch_set_c[flags_place] as u32;
+            new_flags_place = self.n_to_pl_c[(cur_flags & 0xff) as usize] as usize;
+            self.n_to_pl_c[(cur_flags & 0xff) as usize] =
+                self.n_to_pl_c[(cur_flags & 0xff) as usize].wrapping_add(1);
+            cur_flags += 1;
+            if cur_flags & 0xff == 0 {
+                corr_huff(&mut self.ch_set_c, &mut self.n_to_pl_c);
+            } else {
+                break;
+            }
+        }
+
+        self.ch_set_c[flags_place] = self.ch_set_c[new_flags_place];
+        self.ch_set_c[new_flags_place] = cur_flags as u16;
+        Ok(())
+    }
+
+    fn emit_literal(&mut self, byte: u8) -> Result<()> {
+        let byte_place = self
+            .ch_set
+            .iter()
+            .position(|&value| (value >> 8) as u8 == byte)
+            .ok_or(Error::InvalidHeader("RAR 1.3 literal is not encodable"))?;
+
+        let (start_pos, dec_tab, pos_tab) = if self.avr_plc > 0x75ff {
+            (8, DEC_HF4, POS_HF4)
+        } else if self.avr_plc > 0x5dff {
+            (6, DEC_HF3, POS_HF3)
+        } else if self.avr_plc > 0x35ff {
+            (5, DEC_HF2, POS_HF2)
+        } else if self.avr_plc > 0x0dff {
+            (5, DEC_HF1, POS_HF1)
+        } else {
+            (4, DEC_HF0, POS_HF0)
+        };
+        emit_decode_num(
+            &mut self.bits,
+            byte_place as u32,
+            start_pos,
+            dec_tab,
+            pos_tab,
+        )?;
+
+        self.avr_plc += byte_place as u32;
+        self.avr_plc -= self.avr_plc >> 8;
+        self.nhfb += 16;
+        if self.nhfb > 0xff {
+            self.nhfb = 0x90;
+            self.nlzb >>= 1;
+        }
+        self.num_huf += 1;
+
+        let idx = byte_place;
+        let mut cur_byte;
+        let mut new_byte_place;
+        loop {
+            cur_byte = self.ch_set[idx] as u32;
+            new_byte_place = self.n_to_pl[(cur_byte & 0xff) as usize] as usize;
+            self.n_to_pl[(cur_byte & 0xff) as usize] =
+                self.n_to_pl[(cur_byte & 0xff) as usize].wrapping_add(1);
+            cur_byte += 1;
+            if cur_byte & 0xff > 0xa1 {
+                corr_huff(&mut self.ch_set, &mut self.n_to_pl);
+            } else {
+                break;
+            }
+        }
+
+        self.ch_set[idx] = self.ch_set[new_byte_place];
+        self.ch_set[new_byte_place] = cur_byte as u16;
+        Ok(())
+    }
+
+    fn emit_short_lz(&mut self, short_lz: ShortLz) -> Result<()> {
+        self.num_huf = 0;
+        let length_place = short_lz.length - 2;
+        let code_len = if self.avr_ln1 < 37 {
+            self.short_len1(length_place as usize)
+        } else {
+            self.short_len2(length_place as usize)
+        };
+        let code_byte = if self.avr_ln1 < 37 {
+            SHORT_XOR1[length_place as usize]
+        } else {
+            SHORT_XOR2[length_place as usize]
+        };
+        self.bits
+            .write_bits((code_byte >> (8 - code_len)) as u32, code_len as usize);
+
+        self.avr_ln1 += length_place;
+        self.avr_ln1 -= self.avr_ln1 >> 4;
+
+        let distance_value = short_lz.distance - 1;
+        let distance_place = self
+            .ch_set_a
+            .iter()
+            .position(|&value| value as u32 == distance_value)
+            .ok_or(Error::InvalidHeader(
+                "RAR 1.3 ShortLZ distance is not encodable",
+            ))?;
+        emit_decode_num(&mut self.bits, distance_place as u32, 5, DEC_HF2, POS_HF2)?;
+        if distance_place > 0 {
+            let last_distance = self.ch_set_a[distance_place - 1];
+            self.ch_set_a[distance_place] = last_distance;
+            self.ch_set_a[distance_place - 1] = distance_value as u16;
+        }
+        self.remember_match(short_lz.distance, short_lz.length);
+        Ok(())
+    }
+
+    fn emit_long_lz(&mut self, long_lz: LongLz) -> Result<()> {
+        self.num_huf = 0;
+        self.nlzb += 16;
+        if self.nlzb > 0xff {
+            self.nlzb = 0x90;
+            self.nhfb >>= 1;
+        }
+        let old_avr2 = self.avr_ln2;
+
+        let length_code = long_lz.length - 3;
+        emit_long_lz_length(&mut self.bits, length_code)?;
+        self.avr_ln2 += length_code;
+        self.avr_ln2 -= self.avr_ln2 >> 5;
+
+        let distance_place = self.long_lz_distance_place(long_lz.distance)?;
+        let (start_pos, dec_tab, pos_tab) = if self.avr_plc_b > 0x28ff {
+            (5, DEC_HF2, POS_HF2)
+        } else if self.avr_plc_b > 0x06ff {
+            (5, DEC_HF1, POS_HF1)
+        } else {
+            (4, DEC_HF0, POS_HF0)
+        };
+        emit_decode_num(
+            &mut self.bits,
+            distance_place as u32,
+            start_pos,
+            dec_tab,
+            pos_tab,
+        )?;
+        self.avr_plc_b += distance_place as u32;
+        self.avr_plc_b -= self.avr_plc_b >> 8;
+
+        let idx = distance_place;
+        let mut distance;
+        let mut new_distance_place;
+        loop {
+            distance = self.ch_set_b[idx] as u32;
+            new_distance_place = self.n_to_pl_b[(distance & 0xff) as usize] as usize;
+            self.n_to_pl_b[(distance & 0xff) as usize] =
+                self.n_to_pl_b[(distance & 0xff) as usize].wrapping_add(1);
+            distance += 1;
+            if distance & 0xff == 0 {
+                corr_huff(&mut self.ch_set_b, &mut self.n_to_pl_b);
+            } else {
+                break;
+            }
+        }
+
+        self.ch_set_b[idx] = self.ch_set_b[new_distance_place];
+        self.ch_set_b[new_distance_place] = distance as u16;
+
+        let low_byte = ((long_lz.distance << 1) & 0xff) as u8;
+        self.bits.write_bits((low_byte >> 1) as u32, 7);
+
+        let old_avr3 = self.avr_ln3;
+        if length_code != 1 && length_code != 4 {
+            if length_code == 0 && long_lz.distance <= self.max_dist3 {
+                self.avr_ln3 += 1;
+                self.avr_ln3 -= self.avr_ln3 >> 8;
+            } else if self.avr_ln3 > 0 {
+                self.avr_ln3 -= 1;
+            }
+        }
+        if old_avr3 > 0xb0 || (self.avr_plc >= 0x2a00 && old_avr2 < 0x40) {
+            self.max_dist3 = 0x7f00;
+        } else {
+            self.max_dist3 = 0x2001;
+        }
+
+        self.remember_match(long_lz.distance, long_lz.length);
+        Ok(())
+    }
+
+    fn long_lz_distance_place(&self, target_distance: u32) -> Result<usize> {
+        let wanted_high = ((target_distance << 1) & 0xff00) as u16;
+        self.ch_set_b
+            .iter()
+            .position(|&value| value & 0xff00 == wanted_high)
+            .ok_or(Error::InvalidHeader(
+                "RAR 1.3 LongLZ distance is not encodable",
+            ))
+    }
+
+    fn emit_stmode_exit(&mut self) -> Result<()> {
+        let (start_pos, dec_tab, pos_tab) = if self.avr_plc > 0x75ff {
+            (8, DEC_HF4, POS_HF4)
+        } else if self.avr_plc > 0x5dff {
+            (6, DEC_HF3, POS_HF3)
+        } else if self.avr_plc > 0x35ff {
+            (5, DEC_HF2, POS_HF2)
+        } else if self.avr_plc > 0x0dff {
+            (5, DEC_HF1, POS_HF1)
+        } else {
+            (4, DEC_HF0, POS_HF0)
+        };
+        emit_decode_num(&mut self.bits, 0, start_pos, dec_tab, pos_tab)?;
+        self.bits.write_bits(1, 1);
+        self.num_huf = 0;
+        Ok(())
+    }
+
+    fn init_huff(&mut self) {
+        for i in 0..256 {
+            self.ch_set[i] = (i as u16) << 8;
+            self.ch_set_c[i] = ((0u8.wrapping_sub(i as u8) as u16) << 8) as u16;
+            self.ch_set_b[i] = (i as u16) << 8;
+        }
+        self.n_to_pl = [0; 256];
+        self.n_to_pl_b = [0; 256];
+        self.n_to_pl_c = [0; 256];
+        for i in 0..256 {
+            self.ch_set_a[i] = i as u16;
+        }
+        corr_huff(&mut self.ch_set_b, &mut self.n_to_pl_b);
+    }
+
+    fn remember_match(&mut self, distance: u32, length: u32) {
+        self.old_dist[self.old_dist_ptr] = distance;
+        self.old_dist_ptr = (self.old_dist_ptr + 1) & 3;
+        self.last_length = length;
+        self.last_dist = distance;
+    }
+
+    fn short_len1(&self, pos: usize) -> u8 {
+        if pos == 1 {
+            3
+        } else {
+            SHORT_LEN1[pos]
+        }
+    }
+
+    fn short_len2(&self, pos: usize) -> u8 {
+        if pos == 3 {
+            3
+        } else {
+            SHORT_LEN2[pos]
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EncodedToken {
+    Literal(u8),
+    ShortLz(ShortLz),
+    LongLz(LongLz),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ShortLz {
+    distance: u32,
+    length: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LongLz {
+    distance: u32,
+    length: u32,
+}
+
+fn huff_flag_bits(prefer_huff_on_one: bool) -> &'static [bool] {
+    if prefer_huff_on_one {
+        &[true]
+    } else {
+        &[false, true]
+    }
+}
+
+fn long_lz_flag_bits(prefer_long_lz_on_one: bool) -> &'static [bool] {
+    if prefer_long_lz_on_one {
+        &[true]
+    } else {
+        &[false, true]
+    }
+}
+
+fn write_planned_flag_bits(flags: &mut u8, start: usize, bits: &[bool]) {
+    for (offset, &bit) in bits.iter().enumerate() {
+        if bit {
+            *flags |= 1 << (7 - start - offset);
+        }
+    }
+}
+
+fn plan_huff_effect(nhfb: &mut u32, nlzb: &mut u32) {
+    *nhfb += 16;
+    if *nhfb > 0xff {
+        *nhfb = 0x90;
+        *nlzb >>= 1;
+    }
+}
+
+fn plan_long_lz_effect(nhfb: &mut u32, nlzb: &mut u32) {
+    *nlzb += 16;
+    if *nlzb > 0xff {
+        *nlzb = 0x90;
+        *nhfb >>= 1;
+    }
+}
+
+fn find_short_lz(input: &[u8], pos: usize) -> Option<ShortLz> {
+    if pos < 2 {
+        return None;
+    }
+
+    let max_distance = pos.min(256);
+    let mut best = ShortLz {
+        distance: 0,
+        length: 0,
+    };
+    for distance in 1..=max_distance {
+        let mut length = 0usize;
+        while length < 10
+            && pos + length < input.len()
+            && input[pos + length] == input[pos + length - distance]
+        {
+            length += 1;
+        }
+        if length >= 3 && length > best.length as usize {
+            best = ShortLz {
+                distance: distance as u32,
+                length: length as u32,
+            };
+        }
+    }
+
+    (best.length >= 3).then_some(best)
+}
+
+fn find_long_lz(input: &[u8], pos: usize) -> Option<LongLz> {
+    if pos < 257 {
+        return None;
+    }
+
+    let max_distance = pos.min(0x8000);
+    let mut best = LongLz {
+        distance: 0,
+        length: 0,
+    };
+    for distance in 257..=max_distance {
+        let mut length = 0usize;
+        while length < 18
+            && pos + length < input.len()
+            && input[pos + length] == input[pos + length - distance]
+        {
+            length += 1;
+        }
+        if length >= 3 && length > best.length as usize {
+            best = LongLz {
+                distance: distance as u32,
+                length: length as u32,
+            };
+        }
+    }
+
+    (best.length >= 3).then_some(best)
+}
+
+fn emit_long_lz_length(bits: &mut BitWriter, length_code: u32) -> Result<()> {
+    if length_code > 15 {
+        return Err(Error::InvalidHeader(
+            "RAR 1.3 LongLZ encoder length is not encodable",
+        ));
+    }
+    bits.write_bits(1, length_code as usize + 1);
+    Ok(())
+}
+
+fn emit_decode_num(
+    bits: &mut BitWriter,
+    target: u32,
+    start_pos: u32,
+    dec_tab: &[u16],
+    pos_tab: &[u16],
+) -> Result<()> {
+    for len in start_pos as usize..=16 {
+        for code in 0..(1u32 << len) {
+            let bit_field = code << (16 - len);
+            let (decoded, consumed) = simulate_decode_num(bit_field, start_pos, dec_tab, pos_tab);
+            if decoded == target && consumed == len {
+                bits.write_bits(code, len);
+                return Ok(());
+            }
+        }
+    }
+    Err(Error::InvalidHeader(
+        "RAR 1.3 DecodeNum value is not encodable",
+    ))
+}
+
+fn simulate_decode_num(
+    bit_field: u32,
+    mut start_pos: u32,
+    dec_tab: &[u16],
+    pos_tab: &[u16],
+) -> (u32, usize) {
+    let num = bit_field & 0xfff0;
+    let mut i = 0usize;
+    while dec_tab[i] as u32 <= num {
+        start_pos += 1;
+        i += 1;
+    }
+    (
+        ((num - if i > 0 { dec_tab[i - 1] as u32 } else { 0 }) >> (16 - start_pos))
+            + pos_tab[start_pos as usize] as u32,
+        start_pos as usize,
+    )
 }
 
 struct Unpack15 {
@@ -1301,6 +2010,39 @@ impl BitReader {
     }
 }
 
+#[derive(Default)]
+struct BitWriter {
+    output: Vec<u8>,
+    bit_pos: usize,
+}
+
+impl BitWriter {
+    fn new() -> Self {
+        Self {
+            output: Vec::new(),
+            bit_pos: 0,
+        }
+    }
+
+    fn write_bits(&mut self, value: u32, count: usize) {
+        for i in (0..count).rev() {
+            let bit = ((value >> i) & 1) as u8;
+            if self.bit_pos % 8 == 0 {
+                self.output.push(0);
+            }
+            if bit != 0 {
+                let idx = self.output.len() - 1;
+                self.output[idx] |= 1 << (7 - (self.bit_pos % 8));
+            }
+            self.bit_pos += 1;
+        }
+    }
+
+    fn finish(self) -> Vec<u8> {
+        self.output
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Rar13Cipher {
     key: [u8; 3],
@@ -1404,6 +2146,197 @@ mod tests {
 
         let extracted = archive.extract_stored(Some(b"pass")).unwrap();
         assert_eq!(extracted[0].data, b"secret bytes");
+    }
+
+    #[test]
+    fn writes_and_reads_literal_only_compressed_archive() {
+        let input = [FileEntry {
+            name: b"tiny.txt",
+            data: b"literal bytes over sixteen",
+            file_time: 0,
+            file_attr: 0x20,
+            password: None,
+        }];
+
+        let bytes = write_compressed_archive(&input, WriterOptions::default()).unwrap();
+        let archive = Archive::parse(&bytes).unwrap();
+        assert_eq!(archive.main.flags, 0x80);
+        assert_eq!(archive.entries.len(), 1);
+        assert_eq!(archive.entries[0].name, b"tiny.txt");
+        assert!(!archive.entries[0].is_stored());
+        assert_eq!(archive.entries[0].header.method, 3);
+        assert!(archive.entries[0].header.pack_size > 0);
+
+        let extracted = archive.extract(None).unwrap();
+        assert_eq!(extracted[0].data, b"literal bytes over sixteen");
+    }
+
+    #[test]
+    fn writes_and_reads_literal_only_compressed_archive_with_repeated_stmode() {
+        let data =
+            b"this literal-only payload is long enough to enter and exit stmode more than once";
+        let input = [FileEntry {
+            name: b"long.txt",
+            data,
+            file_time: 0,
+            file_attr: 0x20,
+            password: None,
+        }];
+
+        let bytes = write_compressed_archive(&input, WriterOptions::default()).unwrap();
+        let archive = Archive::parse(&bytes).unwrap();
+        assert_eq!(archive.entries[0].header.method, 3);
+
+        let extracted = archive.extract(None).unwrap();
+        assert_eq!(extracted[0].data, data);
+    }
+
+    #[test]
+    fn compressed_writer_emits_short_lz_matches() {
+        let data = b"abcabcabcabcabcabcabcabcabcabcabcabc";
+        let input = [FileEntry {
+            name: b"repeat.txt",
+            data,
+            file_time: 0,
+            file_attr: 0x20,
+            password: None,
+        }];
+
+        let bytes = write_compressed_archive(&input, WriterOptions::default()).unwrap();
+        let archive = Archive::parse(&bytes).unwrap();
+        assert_eq!(archive.entries[0].header.method, 3);
+        assert!(
+            archive.entries[0].header.pack_size < data.len() as u32,
+            "ShortLZ should make the repeated payload smaller than stored data"
+        );
+
+        let extracted = archive.extract(None).unwrap();
+        assert_eq!(extracted[0].data, data);
+    }
+
+    #[test]
+    fn compressed_writer_emits_long_lz_matches() {
+        let mut data = short_lz_resistant_prefix(300);
+        data.extend_from_slice(&data[..32].to_vec());
+        let input = [FileEntry {
+            name: b"far.txt",
+            data: &data,
+            file_time: 0,
+            file_attr: 0x20,
+            password: None,
+        }];
+
+        let literal_only = Unpack15Encoder::new()
+            .encode_literals_only(&data)
+            .unwrap()
+            .len();
+        let bytes = write_compressed_archive(&input, WriterOptions::default()).unwrap();
+        let archive = Archive::parse(&bytes).unwrap();
+        assert_eq!(archive.entries[0].header.method, 3);
+        assert!(
+            (archive.entries[0].header.pack_size as usize) < literal_only,
+            "LongLZ should make a >256-byte-distance repeat smaller than literal-only output"
+        );
+
+        let extracted = archive.extract(None).unwrap();
+        assert_eq!(extracted[0].data, data);
+    }
+
+    #[test]
+    fn writes_and_reads_solid_compressed_archive() {
+        let input = [
+            FileEntry {
+                name: b"first.txt",
+                data: b"first member primes the adaptive unpack15 state",
+                file_time: 0,
+                file_attr: 0x20,
+                password: None,
+            },
+            FileEntry {
+                name: b"second.txt",
+                data: b"second member is encoded without resetting that state",
+                file_time: 0,
+                file_attr: 0x20,
+                password: None,
+            },
+        ];
+        let mut features = FeatureSet::store_only();
+        features.solid = true;
+        let options = WriterOptions {
+            target: ArchiveVersion::Rar14,
+            features,
+        };
+
+        let bytes = write_compressed_archive(&input, options).unwrap();
+        let archive = Archive::parse(&bytes).unwrap();
+        assert!(archive.main.is_solid());
+        assert_eq!(archive.entries.len(), 2);
+        assert!(archive
+            .entries
+            .iter()
+            .all(|entry| entry.header.flags & LHD_SOLID != 0));
+
+        let extracted = archive.extract(None).unwrap();
+        assert_eq!(extracted[0].data, input[0].data);
+        assert_eq!(extracted[1].data, input[1].data);
+    }
+
+    #[test]
+    fn writes_and_reads_encrypted_compressed_archive() {
+        let input = [FileEntry {
+            name: b"secret.txt",
+            data: b"secret compressed bytes over sixteen",
+            file_time: 0,
+            file_attr: 0x20,
+            password: Some(b"pass"),
+        }];
+
+        let bytes = write_compressed_archive(&input, WriterOptions::default()).unwrap();
+        let archive = Archive::parse(&bytes).unwrap();
+        assert!(archive.entries[0].is_encrypted());
+        assert_eq!(archive.entries[0].header.method, 3);
+        assert!(matches!(archive.extract(None), Err(Error::NeedPassword)));
+
+        let extracted = archive.extract(Some(b"pass")).unwrap();
+        assert_eq!(extracted[0].data, input[0].data);
+    }
+
+    fn short_lz_resistant_prefix(len: usize) -> Vec<u8> {
+        let mut data = Vec::with_capacity(len);
+        while data.len() < len {
+            let next = (0u8..=u8::MAX)
+                .find(|&candidate| {
+                    if data.len() < 2 {
+                        return true;
+                    }
+                    let start = data.len().saturating_sub(256);
+                    !data[start..].windows(3).any(|window| {
+                        window == [data[data.len() - 2], data[data.len() - 1], candidate]
+                    })
+                })
+                .expect("byte alphabet can avoid local 3-byte repeats");
+            data.push(next);
+        }
+        data
+    }
+
+    #[test]
+    fn writes_empty_compressed_archive_member() {
+        let input = [FileEntry {
+            name: b"empty.bin",
+            data: b"",
+            file_time: 0,
+            file_attr: 0x20,
+            password: None,
+        }];
+
+        let bytes = write_compressed_archive(&input, WriterOptions::default()).unwrap();
+        let archive = Archive::parse(&bytes).unwrap();
+        assert_eq!(archive.entries[0].header.method, 3);
+        assert_eq!(archive.entries[0].header.pack_size, 0);
+
+        let extracted = archive.extract(None).unwrap();
+        assert_eq!(extracted[0].data, b"");
     }
 
     #[test]

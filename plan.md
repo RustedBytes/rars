@@ -57,8 +57,9 @@ WinRAR-like heuristics.
 5. [done] Add RAR 1.3 encryption/decryption for stored files.
 6. [done] Add Unpack15 decompression for RAR 1.3/1.4 entries, including solid
    carry-over.
-7. Add a simple legal Unpack15 encoder, starting literal-only, then ShortLZ,
-   then LongLZ, then solid carry.
+7. [done] Add a baseline legal Unpack15 encoder. Output now covers Huff
+   literals, repeated StMode exit handling, ShortLZ matches, LongLZ matches,
+   and solid-state carry between members.
 8. Expand to RAR 1.5-4.x container, then RAR 5.0.
 
 ## Current RAR 1.3/1.4 status
@@ -66,17 +67,22 @@ WinRAR-like heuristics.
 This slice is now good enough to act as the first backend for a CLI:
 
 - Container: `RE~^` signature detection, optional SFX prefix scan, main-header
-  parsing, file-header parsing, directory entries, archive-comment header
-  extension decode/skip, and old-style multi-volume reassembly.
+  parsing, file-header parsing, directory entries, archive-comment and
+  file-comment header extension decode/skip, and old-style multi-volume
+  reassembly.
 - Read/extract: stored, encrypted stored, compressed, encrypted compressed,
   solid compressed, old-style compressed multi-volume archives, directory
   entries, and SFX-prefixed archives.
-- Write: valid stored archives and encrypted stored archives with version and
-  feature validation.
-- CLI: `info`, `test`, `x`, and `a --format rar14 --store`.
+- Write: valid stored archives, encrypted stored archives, compressed archives,
+  encrypted compressed archives, and solid compressed archives using Huff
+  literals, ShortLZ matches, LongLZ matches, and solid-state carry, with
+  version and feature validation.
+- CLI: `info`, `test`, `x`, and `a --format rar14` (compressed by default,
+  `--store` to force stored output, `--solid` for solid compressed output).
 - Negative coverage: wrong password rejection, corrupt stored payload checksum
   rejection, truncated compressed payload rejection, and unsafe extraction path
-  rejection. Positive fixture coverage includes packed archive-comment decode.
+  rejection. Positive fixture coverage includes packed archive-comment and
+  file-comment decode.
 
 ## RAR 1.3/1.4 scope
 
@@ -84,23 +90,20 @@ The first version slice should be useful without attempting WinRAR byte identity
 
 - Read: stored files, encrypted stored files, compressed files, encrypted
   compressed files, solid compressed archives, SFX-prefixed archives, directory
-  entries, and stored/compressed multi-volume archives are implemented.
-- Write: stored files and encrypted stored files are implemented; compressed
-  output follows once the Unpack15 encoder is round-trip proven.
-- Defer: AV emission, packed comments, and byte-identical historical compressor
+  entries, stored/compressed multi-volume archives, archive comments, and file
+  comments are implemented.
+- Write: stored files, encrypted stored files, compressed files, encrypted
+  compressed files, and solid compressed files using Huff literals plus
+  ShortLZ/LongLZ matches are implemented. The compressed writer handles longer
+  literal runs by exiting StMode and is accepted by RAR 1.402 for the covered
+  paths.
+- Defer: AV emission and byte-identical historical compressor
   heuristics.
 
 ## Remaining RAR 1.3/1.4 gaps
 
 Read-side gaps:
 
-- File-level comments. RAR 1.402 documents `cf` as an interactive command
-  terminated by F10. Tested non-interactive variants using `=FCOMM.TXT`
-  (`rar cf archive file =comment`, `rar cf archive =comment file`, and
-  `rar cf archive =comment`) produced unchanged archives with no `LHD_COMMENT`
-  flag, no header extension, and no trailing comment bytes. Next step is either
-  DOSBox keyboard automation that can press F10, or reading the `cf` path in the
-  1.402 binary.
 - AV payload parsing/verification. The spec repository has structural notes, but
   `rars` does not expose or validate AV records yet.
 - Error typing. Current errors are structured enough for tests, but CLI messages
@@ -108,19 +111,12 @@ Read-side gaps:
 
 Write-side gaps:
 
-- Legal Unpack15 encoder. Start with literal-only output if the format allows it,
-  then add ShortLZ, LongLZ, and solid carry.
-- Compressed solid writer.
-- Archive and file comments. Keep blocked until comment payload formats are
-  decoded or explicitly scoped as stored-only where valid.
+- Archive and file comment writer support.
 - Old-style multi-volume writer.
 - SFX writer/stub support.
 - AV writer. Likely defer unless a concrete compatibility need appears.
 
-Recommended next task after compaction: pick either file-level comments or a
-minimal legal Unpack15 writer. The comment path closes the remaining normal
-RAR 1.4 read-side metadata gap; the writer path moves toward first real archive
-creation beyond stored mode.
+Recommended next task after compaction: add archive/file comment writing.
 
 ## Testing strategy
 
