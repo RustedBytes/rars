@@ -50,6 +50,17 @@ fn info_lists_packed_archive_comment() {
 }
 
 #[test]
+fn info_lists_file_comment() {
+    let output = rars()
+        .arg("info")
+        .arg(fixture("FCOMM.RAR"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(stdout(&output).contains("comment: FCOM"));
+}
+
+#[test]
 fn test_verifies_encrypted_stored_fixture() {
     let output = rars()
         .args(["test", "--password", "password"])

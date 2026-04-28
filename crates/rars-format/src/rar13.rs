@@ -42,6 +42,7 @@ pub struct FileHeader {
 pub struct Entry {
     pub header: FileHeader,
     pub name: Vec<u8>,
+    pub extra: Vec<u8>,
     pub packed_data: Vec<u8>,
 }
 
@@ -132,7 +133,7 @@ impl MainHeader {
 }
 
 impl FileHeader {
-    fn parse(input: &[u8]) -> Result<(Self, Vec<u8>, usize)> {
+    fn parse(input: &[u8]) -> Result<(Self, Vec<u8>, Vec<u8>, usize)> {
         if input.len() < FILE_HEAD_BASE_SIZE {
             return Err(Error::TooShort);
         }
@@ -159,6 +160,7 @@ impl FileHeader {
         }
 
         let name = input[FILE_HEAD_BASE_SIZE..FILE_HEAD_BASE_SIZE + name_size].to_vec();
+        let extra = input[minimum_size..head_size as usize].to_vec();
         Ok((
             Self {
                 flags,
@@ -172,6 +174,7 @@ impl FileHeader {
                 head_size,
             },
             name,
+            extra,
             head_size as usize,
         ))
     }
@@ -194,7 +197,7 @@ impl Archive {
                 break;
             }
 
-            let (header, name, consumed) = FileHeader::parse(&archive[pos..])?;
+            let (header, name, extra, consumed) = FileHeader::parse(&archive[pos..])?;
             let data_start = pos + consumed;
             let data_end =
                 data_start
@@ -209,6 +212,7 @@ impl Archive {
             entries.push(Entry {
                 header,
                 name,
+                extra,
                 packed_data: archive[data_start..data_end].to_vec(),
             });
             pos = data_end;
@@ -313,6 +317,25 @@ impl Entry {
 
     pub fn is_directory(&self) -> bool {
         self.header.file_attr & 0x10 != 0
+    }
+
+    pub fn has_file_comment(&self) -> bool {
+        self.header.flags & LHD_COMMENT != 0
+    }
+
+    pub fn file_comment(&self) -> Result<Option<Vec<u8>>> {
+        if !self.has_file_comment() {
+            return Ok(None);
+        }
+        let length = read_u16(&self.extra, 0)? as usize;
+        let comment_start = 2usize;
+        let comment_end = comment_start
+            .checked_add(length)
+            .ok_or(Error::InvalidHeader("RAR 1.3 file comment size overflows"))?;
+        if comment_end > self.extra.len() {
+            return Err(Error::TooShort);
+        }
+        Ok(Some(self.extra[comment_start..comment_end].to_vec()))
     }
 
     pub fn is_stored(&self) -> bool {
@@ -526,6 +549,7 @@ impl PendingSplit {
                 head_size: final_entry.header.head_size,
             },
             name: self.name,
+            extra: Vec::new(),
             packed_data: self.packed_data,
         };
         combined.extract_with_context(None, Some(unpack15), solid)

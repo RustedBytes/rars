@@ -74,6 +74,9 @@ fn cmd_info(args: &[String]) -> CliResult<()> {
                     entry.header.file_attr,
                     entry.header.file_crc
                 );
+                if let Some(comment) = entry.file_comment()? {
+                    println!("    comment: {}", String::from_utf8_lossy(&comment));
+                }
             }
         }
     }

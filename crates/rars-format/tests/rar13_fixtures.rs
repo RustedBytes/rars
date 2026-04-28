@@ -7,6 +7,7 @@ const MULTIFIL: &[u8] = include_bytes!("fixtures/rar13/MULTIFIL.RAR");
 const REPEATB: &[u8] = include_bytes!("fixtures/rar13/REPEATB.RAR");
 const WITHDIR: &[u8] = include_bytes!("fixtures/rar13/WITHDIR.RAR");
 const COMMENT: &[u8] = include_bytes!("fixtures/rar13/COMMENT.RAR");
+const FCOMM: &[u8] = include_bytes!("fixtures/rar13/FCOMM.RAR");
 const README_PASSWORD: &[u8] = include_bytes!("fixtures/rar13/README_password=password.rar");
 const README_COMPRESSED: &[u8] = include_bytes!("fixtures/rar13/README.RAR");
 const README_STORE: &[u8] = include_bytes!("fixtures/rar13/README_store.rar");
@@ -462,6 +463,31 @@ fn decodes_packed_archive_comment() {
         .expect("decode RAR 1.402 archive comment")
         .expect("archive comment");
     assert_eq!(comment, b"This is the archive comment.\r\n");
+}
+
+#[test]
+fn parses_and_decodes_file_comment_header_extension() {
+    let archive = Archive::parse(FCOMM).expect("parse file-comment RAR 1.402 archive");
+    assert_eq!(archive.entries.len(), 1);
+
+    let entry = &archive.entries[0];
+    assert_eq!(entry.name, b"HELLO.TXT");
+    assert_eq!(entry.header.flags, 0x08);
+    assert_eq!(entry.header.head_size, 38);
+    assert_eq!(entry.extra, b"\x06\x00FCOM\r\n");
+    assert_eq!(
+        entry
+            .file_comment()
+            .expect("decode file comment")
+            .expect("file comment"),
+        b"FCOM\r\n"
+    );
+    assert_eq!(
+        entry
+            .stored_data(None)
+            .expect("stored file-comment payload"),
+        b"Hello, file comment fixture.\r\n"
+    );
 }
 
 fn expected_repeatb() -> Vec<u8> {
