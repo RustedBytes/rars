@@ -1,3 +1,4 @@
+mod ppmd;
 pub mod rar13;
 pub mod rar20;
 pub mod rar29;

@@ -1,3 +1,4 @@
+use crate::ppmd::{PpmdByteReader, PpmdDecoder};
 use crate::{Error, Result};
 use std::io::{Read, Write};
 
@@ -53,11 +54,20 @@ pub struct Unpack29 {
     low_offset_repeats: usize,
     pending_match: Option<(usize, usize)>,
     in_lz_block: bool,
+    block_mode: BlockMode,
+    ppmd: PpmdDecoder,
+    ppmd_esc: u8,
     filters: Vec<VmFilter>,
     programs: Vec<VmProgram>,
     last_filter: usize,
     base_offset: usize,
     output: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockMode {
+    Lz,
+    Ppmd,
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +111,9 @@ impl Unpack29 {
             low_offset_repeats: 0,
             pending_match: None,
             in_lz_block: false,
+            block_mode: BlockMode::Lz,
+            ppmd: PpmdDecoder::new(),
+            ppmd_esc: 2,
             filters: Vec::new(),
             programs: Vec::new(),
             last_filter: 0,
@@ -249,7 +262,10 @@ impl Unpack29 {
                 self.read_tables()?;
                 self.in_lz_block = true;
             }
-            self.decode_lz(target)?;
+            match self.block_mode {
+                BlockMode::Lz => self.decode_lz(target)?,
+                BlockMode::Ppmd => self.decode_ppmd(target)?,
+            }
         }
         Ok(())
     }
@@ -257,11 +273,14 @@ impl Unpack29 {
     fn read_tables(&mut self) -> Result<()> {
         self.bits.align_byte();
         if self.bits.peek_bit()? != 0 {
-            return Err(Error::InvalidData(
-                "RAR 2.9 PPMd blocks are not implemented",
-            ));
+            let first_byte = self.bits.read_bits(8)? as u8;
+            self.ppmd
+                .decode_init(first_byte, &mut self.bits, &mut self.ppmd_esc)?;
+            self.block_mode = BlockMode::Ppmd;
+            return Ok(());
         }
         self.bits.read_bit()?;
+        self.block_mode = BlockMode::Lz;
         let keep_tables = self.bits.read_bit()? != 0;
         self.last_low_offset = 0;
         self.low_offset_repeats = 0;
@@ -408,6 +427,64 @@ impl Unpack29 {
             }
         }
         Ok(())
+    }
+
+    fn decode_ppmd(&mut self, output_size: usize) -> Result<()> {
+        while self.current_pos() < output_size {
+            let Some(symbol) = self.ppmd.decode_symbol(&mut self.bits)? else {
+                return Ok(());
+            };
+            if symbol != self.ppmd_esc {
+                self.output.push(symbol);
+                continue;
+            }
+
+            let Some(next) = self.ppmd.decode_symbol(&mut self.bits)? else {
+                return Ok(());
+            };
+            match next {
+                0 => {
+                    self.in_lz_block = false;
+                    return Ok(());
+                }
+                1 | 6..=u8::MAX => self.output.push(self.ppmd_esc),
+                2 => return Ok(()),
+                3 => {
+                    return Err(Error::InvalidData(
+                        "RAR 2.9 PPMd VM filters are not implemented",
+                    ));
+                }
+                4 => {
+                    let offset = self.read_ppmd_u32()? as usize + 2;
+                    let length = self.read_ppmd_required_byte()? as usize + 32;
+                    self.push_old_offset(offset);
+                    self.last_offset = offset;
+                    self.last_length = length;
+                    self.copy_match(length, offset, output_size)?;
+                }
+                5 => {
+                    let length = self.read_ppmd_required_byte()? as usize + 4;
+                    self.last_offset = 1;
+                    self.last_length = length;
+                    self.copy_match(length, 1, output_size)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn read_ppmd_required_byte(&mut self) -> Result<u8> {
+        self.ppmd
+            .decode_symbol(&mut self.bits)?
+            .ok_or(Error::InvalidData("RAR 2.9 PPMd stream ended early"))
+    }
+
+    fn read_ppmd_u32(&mut self) -> Result<u32> {
+        let b0 = self.read_ppmd_required_byte()? as u32;
+        let b1 = self.read_ppmd_required_byte()? as u32;
+        let b2 = self.read_ppmd_required_byte()? as u32;
+        let b3 = self.read_ppmd_required_byte()? as u32;
+        Ok(b0 | (b1 << 8) | (b2 << 16) | (b3 << 24))
     }
 
     fn read_offset(&mut self) -> Result<usize> {
@@ -847,6 +924,12 @@ impl BitReader {
             2 => self.read_bits(16),
             _ => self.read_bits(32),
         }
+    }
+}
+
+impl PpmdByteReader for BitReader {
+    fn read_ppmd_byte(&mut self) -> Result<u8> {
+        self.read_bits(8).map(|value| value as u8)
     }
 }
 

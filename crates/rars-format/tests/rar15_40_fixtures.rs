@@ -292,6 +292,26 @@ fn extracts_rar300_standard_rarvm_filter_fixtures() {
 }
 
 #[test]
+fn extracts_rar300_ppmd_text_file() {
+    let bytes = std::fs::read(fixture("ppmd/ppmd_lorem_rar300.rar")).unwrap();
+    let expected = std::fs::read(fixture("ppmd/lorem_127k.txt")).unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let file = archive.files().next().unwrap();
+
+    assert_eq!(file.name, b"lorem_127k.txt");
+    assert_eq!(file.method, 0x35);
+    assert_eq!(file.unp_ver, 29);
+    assert_eq!(file.pack_size, 13_276);
+    assert_eq!(file.unp_size, 130_048);
+
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].name, b"lorem_127k.txt");
+    assert_eq!(extracted[0].data, expected);
+    assert_eq!(crc32(&extracted[0].data), 0xc119b4e5);
+}
+
+#[test]
 fn rejects_rar300_rgb_and_audio_filter_fixtures_until_filter_parity_is_fixed() {
     for (name, expected, actual) in [
         (

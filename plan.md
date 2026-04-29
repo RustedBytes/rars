@@ -45,7 +45,8 @@ Keep this section short. Detailed behavioural claims belong in tests.
   and old-style stored/compressed volumes.
 - RAR 1.5-4.x can parse the container family, service headers, extended-time
   payloads, RAR 1.54 Unpack15 members, RAR 2.50 Unpack20 LZ-mode members, and
-  common RAR 2.9/3.x Unpack29 LZ members including the standard
+  common RAR 2.9/3.x Unpack29 members. Current Unpack29 coverage includes
+  LZ-mode members, a native Rust PPMd text fixture, and the standard
   E8/E8E9/DELTA/ITANIUM native RARVM filters.
 - RAR 3.x header-encrypted archives are detected from `MHD_PASSWORD` and
   rejected with a clear unsupported-feature error before encrypted block bytes
@@ -63,9 +64,11 @@ Keep this section short. Detailed behavioural claims belong in tests.
   - Add solid/multiblock fixture coverage for Unpack20.
   - Add more audio fixtures if examples with 1, 3, or 4 channels become
     available; current coverage pins normal 2-channel RAR 2.50 audio blocks.
-- Add PPMd for RAR 2.9+:
-  - Wire method/stream transition handling in Unpack29.
-  - Use the existing `fixtures/ppmd/ppmd_lorem_rar300.rar` as the first oracle.
+- Broaden PPMd coverage for RAR 2.9+:
+  - Current native Rust PPMd decode is pinned by
+    `ppmd_lorem_rar300.rar`.
+  - Add fixtures for PPMd blocks that transition back to LZ, PPMd-embedded
+    RARVM filters, escape-byte literal handling, and solid PPMd state reuse.
 - Fix the large solid RAR 3.x table edge case currently pinned by the
   `solid_rar300.rar` rejection test.
 - Fix remaining RARVM/filter parity:
