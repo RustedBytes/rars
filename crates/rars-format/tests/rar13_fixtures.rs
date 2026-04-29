@@ -303,6 +303,37 @@ fn decodes_real_rar1402_encrypted_compressed_file() {
 }
 
 #[test]
+fn extract_to_decodes_real_rar1402_encrypted_compressed_file() {
+    #[derive(Clone)]
+    struct SharedWriter(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+
+    impl std::io::Write for SharedWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let archive =
+        Archive::parse(README_PASSWORD).expect("parse encrypted compressed RAR 1.402 archive");
+    let extracted = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    archive
+        .extract_to(Some(b"password"), |meta| {
+            assert_eq!(meta.name, b"README");
+            Ok(Box::new(SharedWriter(extracted.clone())))
+        })
+        .expect("stream encrypted compressed archive");
+
+    let extracted = extracted.borrow();
+    assert_eq!(&*extracted, README_EXPECTED);
+    assert_eq!(file_checksum(&extracted), 0xe079);
+}
+
+#[test]
 fn rejects_wrong_password_for_encrypted_compressed_file() {
     let archive =
         Archive::parse(README_PASSWORD).expect("parse encrypted compressed RAR 1.402 archive");

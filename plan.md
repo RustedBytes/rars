@@ -100,9 +100,12 @@ This slice is now good enough to act as the first backend for a CLI:
   caller-provided writers. Stored entries can be copied and checksum-verified
   without materializing the file data, and Unpack15 now has a writer-backed
   decode path so compressed output does not need a full decoded-member buffer.
-  For unencrypted compressed entries, Unpack15 can also read packed input
-  incrementally from the archive range. Legacy encrypted stored entries are
-  decrypted, written, and checksum-verified in fixed-size chunks.
+  Unpack15 can also read packed input incrementally from the archive range.
+  Legacy encrypted entries are decrypted in fixed-size chunks on the way into
+  either the stored writer path or the compressed decoder. Volume-aware
+  `extract_volumes_to` streams old-style stored and compressed split members
+  across chained archive ranges without reassembling the packed stream in
+  memory.
 - Negative coverage: wrong password rejection, corrupt stored payload checksum
   rejection, truncated compressed payload rejection, and unsafe extraction path
   rejection. Positive fixture coverage includes packed archive-comment and
@@ -197,7 +200,9 @@ The first reader slice is implemented:
   blocks, and retain only the sliding history needed by later matches. Normal
   vector-returning extraction and direct-to-writer extraction now share the same
   per-archive decoder session, so solid/non-solid Unpack29 state ownership is
-  centralized instead of duplicated across extraction paths.
+  centralized instead of duplicated across extraction paths. Volume-aware
+  `extract_volumes_to` streams stored split members across chained archive
+  ranges without reassembling the packed stream in memory.
 
 Next RAR 1.5-4.x tasks:
 
@@ -214,16 +219,14 @@ Next RAR 1.5-4.x tasks:
 
 Architectural debt to address before the RAR 5.0 streaming slice:
 
-- Reduce the remaining legacy encrypted-compressed input buffering. RAR
-  1.3/1.4 unencrypted compressed extraction and RAR 1.5-4.x compressed
-  extraction can now stream packed bytes from file-backed archive ranges into
-  their codecs. RAR 1.3/1.4 encrypted compressed entries still decrypt into a
-  temporary packed-data buffer before codec input. RAR 5 should use offset-based
-  readers from the start rather than extending the slice-backed model.
-- Extend the same decoder-session model to compressed split-volume extraction.
-  Stored split volumes are supported, but compressed split volumes still buffer
-  concatenated packed fragments and are guarded by fixture tests until the split
-  stream semantics are wired through the session.
+- Keep RAR 5 reader-backed from the start. The older RAR 1.3/1.4 and RAR
+  1.5-4.x direct-to-writer paths now stream stored data, compressed output, and
+  packed codec input for file-backed archives, including legacy encrypted
+  RAR 1.3/1.4 entries.
+- Extend the same decoder-session model to RAR 1.5-4.x compressed split-volume
+  extraction. Stored split volumes stream through `extract_volumes_to`, but
+  compressed split volumes remain guarded by fixture tests until the split stream
+  semantics are wired through the session.
 - Enrich library errors with archive offsets and block context before treating
   the public API as stable.
 

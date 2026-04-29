@@ -32,7 +32,7 @@ const FHD_SALT: u16 = 0x0400;
 const FHD_EXTTIME: u16 = 0x1000;
 const FHD_DIRECTORY_MASK: u16 = 0x00e0;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Archive {
     pub sfx_offset: usize,
     pub main: MainHeader,
@@ -40,7 +40,7 @@ pub struct Archive {
     source: ArchiveSource,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 enum ArchiveSource {
     Memory(Arc<[u8]>),
     File(Arc<PathBuf>),
@@ -147,17 +147,6 @@ pub struct ExtractedEntryMeta {
     pub attr: u32,
     pub host_os: u8,
     pub is_directory: bool,
-}
-
-#[derive(Debug)]
-struct PendingSplit {
-    name: Vec<u8>,
-    data: Vec<u8>,
-    file_time: u32,
-    attr: u32,
-    host_os: u8,
-    method: u8,
-    encrypted: bool,
 }
 
 impl FileHeader {
@@ -759,85 +748,97 @@ impl DecoderSession {
 }
 
 pub fn extract_volumes(volumes: &[Archive]) -> Result<Vec<ExtractedEntry>> {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    struct SharedWriter(Rc<RefCell<Vec<u8>>>);
+
+    impl Write for SharedWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut captured: Vec<(ExtractedEntryMeta, Rc<RefCell<Vec<u8>>>)> = Vec::new();
+    extract_volumes_to(volumes, |meta| {
+        let data = Rc::new(RefCell::new(Vec::new()));
+        captured.push((meta.clone(), data.clone()));
+        Ok(Box::new(SharedWriter(data)))
+    })?;
+
+    let out = captured
+        .into_iter()
+        .map(|(meta, data)| ExtractedEntry {
+            name: meta.name,
+            data: data.borrow().clone(),
+            file_time: meta.file_time,
+            attr: meta.attr,
+            host_os: meta.host_os,
+            is_directory: meta.is_directory,
+        })
+        .collect();
+    Ok(out)
+}
+
+pub fn extract_volumes_to<F>(volumes: &[Archive], mut open: F) -> Result<()>
+where
+    F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
+{
     if volumes.is_empty() {
         return Err(Error::InvalidHeader("RAR 1.5 volume set is empty"));
     }
 
-    let mut out = Vec::new();
-    let mut pending: Option<PendingSplit> = None;
-    for archive in volumes {
+    let mut pending: Option<PendingSplitRefs> = None;
+    let mut session = DecoderSession::new(
+        volumes
+            .first()
+            .is_some_and(|archive| archive.main.is_solid()),
+    );
+    for (volume_index, archive) in volumes.iter().enumerate() {
         if archive.main.has_encrypted_headers() {
             return Err(Error::InvalidHeader(
                 "RAR 1.5 encrypted header extraction is not implemented",
             ));
         }
 
-        for file in archive.files() {
+        for (file_index, file) in archive.files().enumerate() {
             match (
                 pending.is_some(),
                 file.is_split_before(),
                 file.is_split_after(),
             ) {
-                (false, false, false) => out.push(file.extract(archive)?),
+                (false, false, false) => {
+                    let meta = file.metadata();
+                    if meta.is_directory {
+                        let _ = open(&meta)?;
+                    } else {
+                        let mut writer = open(&meta)?;
+                        if file.is_stored() {
+                            file.write_stored_to(archive, &mut writer)?;
+                        } else {
+                            session.write_file_to(archive, file, &mut writer)?;
+                        }
+                    }
+                }
                 (false, false, true) => {
                     validate_split_fragment(file)?;
-                    pending = Some(PendingSplit {
-                        name: file.name.clone(),
-                        data: file.packed_data(archive)?.to_vec(),
-                        file_time: file.file_time,
-                        attr: file.attr,
-                        host_os: file.host_os,
-                        method: file.method,
-                        encrypted: file.is_encrypted(),
-                    });
+                    pending = Some(PendingSplitRefs::new(file, volume_index, file_index));
                 }
                 (true, true, true) => {
                     let current = pending.as_mut().expect("pending split");
-                    validate_split_continuation(current, file)?;
-                    current.data.extend_from_slice(&file.packed_data(archive)?);
+                    validate_split_continuation_refs(current, file)?;
+                    current.append(file, volume_index, file_index);
                 }
                 (true, true, false) => {
                     let mut completed = pending.take().expect("pending split");
-                    validate_split_continuation(&completed, file)?;
-                    completed
-                        .data
-                        .extend_from_slice(&file.packed_data(archive)?);
-                    let data = if completed.method == 0x30 {
-                        let expected_len = usize::try_from(file.unp_size).map_err(|_| {
-                            Error::InvalidHeader("RAR 1.5 split unpacked size overflows usize")
-                        })?;
-                        if completed.data.len() != expected_len {
-                            return Err(Error::InvalidHeader(
-                                "RAR 1.5 split stored file has wrong reassembled size",
-                            ));
-                        }
-                        completed.data
-                    } else if file.unp_ver >= 29 {
-                        let mut decoder = Unpack29::new();
-                        decoder
-                            .decode_member(
-                                &completed.data,
-                                usize::try_from(file.unp_size).map_err(|_| {
-                                    Error::InvalidHeader(
-                                        "RAR 2.9 split unpacked size overflows usize",
-                                    )
-                                })?,
-                            )
-                            .map_err(Error::from)?
-                    } else {
-                        return Err(Error::InvalidHeader(
-                            "RAR 1.5 compressed file extraction is not implemented",
-                        ));
-                    };
-                    file.verify_crc32(&data)?;
-                    out.push(ExtractedEntry {
-                        name: completed.name,
-                        data,
-                        file_time: completed.file_time,
-                        attr: completed.attr,
-                        host_os: completed.host_os,
-                        is_directory: false,
-                    });
+                    validate_split_continuation_refs(&completed, file)?;
+                    completed.append(file, volume_index, file_index);
+                    completed.write_to(volumes, file, &mut session, &mut open)?;
                 }
                 (false, true, _) => {
                     return Err(Error::InvalidHeader(
@@ -857,7 +858,7 @@ pub fn extract_volumes(volumes: &[Archive]) -> Result<Vec<ExtractedEntry>> {
         return Err(Error::InvalidHeader("RAR 1.5 split entry is incomplete"));
     }
 
-    Ok(out)
+    Ok(())
 }
 
 fn validate_split_fragment(file: &FileHeader) -> Result<()> {
@@ -879,7 +880,7 @@ fn validate_split_fragment(file: &FileHeader) -> Result<()> {
     Ok(())
 }
 
-fn validate_split_continuation(pending: &PendingSplit, file: &FileHeader) -> Result<()> {
+fn validate_split_continuation_refs(pending: &PendingSplitRefs, file: &FileHeader) -> Result<()> {
     validate_split_fragment(file)?;
     if file.name != pending.name {
         return Err(Error::InvalidHeader("RAR 1.5 split entry name changed"));
@@ -889,12 +890,144 @@ fn validate_split_continuation(pending: &PendingSplit, file: &FileHeader) -> Res
             "RAR 1.5 split entry compression method changed",
         ));
     }
+    if file.unp_ver != pending.unp_ver {
+        return Err(Error::InvalidHeader(
+            "RAR 1.5 split entry unpack version changed",
+        ));
+    }
     if file.is_encrypted() != pending.encrypted {
         return Err(Error::InvalidHeader(
             "RAR 1.5 split entry encryption flag changed",
         ));
     }
     Ok(())
+}
+
+struct PendingSplitRefs {
+    name: Vec<u8>,
+    fragments: Vec<(usize, usize)>,
+    file_time: u32,
+    attr: u32,
+    host_os: u8,
+    method: u8,
+    unp_ver: u8,
+    encrypted: bool,
+}
+
+impl PendingSplitRefs {
+    fn new(file: &FileHeader, volume_index: usize, file_index: usize) -> Self {
+        Self {
+            name: file.name.clone(),
+            fragments: vec![(volume_index, file_index)],
+            file_time: file.file_time,
+            attr: file.attr,
+            host_os: file.host_os,
+            method: file.method,
+            unp_ver: file.unp_ver,
+            encrypted: file.is_encrypted(),
+        }
+    }
+
+    fn append(&mut self, _file: &FileHeader, volume_index: usize, file_index: usize) {
+        self.fragments.push((volume_index, file_index));
+    }
+
+    fn write_to<F>(
+        self,
+        volumes: &[Archive],
+        final_file: &FileHeader,
+        session: &mut DecoderSession,
+        open: &mut F,
+    ) -> Result<()>
+    where
+        F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
+    {
+        let expected_len = usize::try_from(final_file.unp_size)
+            .map_err(|_| Error::InvalidHeader("RAR 1.5 split unpacked size overflows usize"))?;
+        let actual_len =
+            self.fragments
+                .iter()
+                .try_fold(0usize, |total, &(volume_index, file_index)| {
+                    let archive = volumes
+                        .get(volume_index)
+                        .ok_or(Error::InvalidHeader("RAR 1.5 split volume is missing"))?;
+                    let file = archive
+                        .files()
+                        .nth(file_index)
+                        .ok_or(Error::InvalidHeader("RAR 1.5 split entry is missing"))?;
+                    total
+                        .checked_add(usize::try_from(file.pack_size).map_err(|_| {
+                            Error::InvalidHeader("RAR 1.5 split packed size overflows usize")
+                        })?)
+                        .ok_or(Error::InvalidHeader(
+                            "RAR 1.5 split packed size overflows usize",
+                        ))
+                })?;
+        if actual_len != expected_len {
+            return Err(Error::InvalidHeader(
+                "RAR 1.5 split stored file has wrong reassembled size",
+            ));
+        }
+
+        let meta = ExtractedEntryMeta {
+            name: self.name.clone(),
+            file_time: self.file_time,
+            attr: self.attr,
+            host_os: self.host_os,
+            is_directory: false,
+        };
+        let mut writer = open(&meta)?;
+        let mut crc = Crc32::new();
+        let mut crc_writer = CrcWriter {
+            inner: &mut writer,
+            crc: &mut crc,
+        };
+        let _ = session;
+        let mut reader = self.fragment_reader(volumes)?;
+        std::io::copy(&mut reader, &mut crc_writer)?;
+        let actual = crc.finish();
+        if actual == final_file.file_crc {
+            Ok(())
+        } else {
+            Err(Error::Crc32Mismatch {
+                expected: final_file.file_crc,
+                actual,
+            })
+        }
+    }
+
+    fn fragment_reader<'a>(&self, volumes: &'a [Archive]) -> Result<ChainedReader<'a>> {
+        let mut readers = Vec::with_capacity(self.fragments.len());
+        for &(volume_index, file_index) in &self.fragments {
+            let archive = volumes
+                .get(volume_index)
+                .ok_or(Error::InvalidHeader("RAR 1.5 split volume is missing"))?;
+            let file = archive
+                .files()
+                .nth(file_index)
+                .ok_or(Error::InvalidHeader("RAR 1.5 split entry is missing"))?;
+            readers.push(archive.range_reader(file.packed_range.clone())?);
+        }
+        Ok(ChainedReader { readers, index: 0 })
+    }
+}
+
+struct ChainedReader<'a> {
+    readers: Vec<Box<dyn Read + 'a>>,
+    index: usize,
+}
+
+impl Read for ChainedReader<'_> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        while let Some(reader) = self.readers.get_mut(self.index) {
+            let read = reader.read(out)?;
+            if read != 0 {
+                return Ok(read);
+            }
+            self.index += 1;
+        }
+        Ok(0)
+    }
 }
 
 fn classify_new_sub(name: &[u8]) -> NewSubKind {

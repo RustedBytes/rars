@@ -5,7 +5,7 @@ pub use rars_format::{
 use std::io::{Read, Write};
 use std::path::Path;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum Archive {
     Rar13(rar13::Archive),
     Rar15To40(rar15_40::Archive),
@@ -178,6 +178,61 @@ pub fn extract_volumes(
             }
             rar15_40::extract_volumes(&typed)
                 .map(|entries| entries.into_iter().map(Into::into).collect())
+        }
+        ArchiveFamily::Rar50Plus => Err(Error::UnsupportedVersion(ArchiveVersion::Rar50)),
+    }
+}
+
+pub fn extract_volumes_to<F>(
+    archives: &[Archive],
+    password: Option<&[u8]>,
+    mut open: F,
+) -> Result<()>
+where
+    F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
+{
+    let Some(first) = archives.first() else {
+        return Err(Error::InvalidHeader("volume set is empty"));
+    };
+
+    match first.family() {
+        ArchiveFamily::Rar13 => {
+            let mut typed = Vec::with_capacity(archives.len());
+            for archive in archives {
+                match archive {
+                    Archive::Rar13(archive) => typed.push(archive.clone()),
+                    Archive::Rar15To40(_) => {
+                        return Err(Error::InvalidHeader("mixed archive families in volume set"));
+                    }
+                }
+            }
+            rar13::extract_volumes_to(&typed, password, |meta| {
+                open(&ExtractedEntryMeta {
+                    name: meta.name.clone(),
+                    file_time: meta.file_time,
+                    file_attr: meta.file_attr as u32,
+                    is_directory: meta.is_directory,
+                })
+            })
+        }
+        ArchiveFamily::Rar15To40 => {
+            let mut typed = Vec::with_capacity(archives.len());
+            for archive in archives {
+                match archive {
+                    Archive::Rar15To40(archive) => typed.push(archive.clone()),
+                    Archive::Rar13(_) => {
+                        return Err(Error::InvalidHeader("mixed archive families in volume set"));
+                    }
+                }
+            }
+            rar15_40::extract_volumes_to(&typed, |meta| {
+                open(&ExtractedEntryMeta {
+                    name: meta.name.clone(),
+                    file_time: meta.file_time,
+                    file_attr: meta.attr,
+                    is_directory: meta.is_directory,
+                })
+            })
         }
         ArchiveFamily::Rar50Plus => Err(Error::UnsupportedVersion(ArchiveVersion::Rar50)),
     }

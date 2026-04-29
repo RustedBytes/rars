@@ -2,6 +2,11 @@ pub struct Rar13Cipher {
     key: [u8; 3],
 }
 
+pub struct Rar13DecryptReader<R> {
+    inner: R,
+    cipher: Rar13Cipher,
+}
+
 impl Rar13Cipher {
     pub fn new(password: &[u8]) -> Self {
         let mut key = [0u8; 3];
@@ -42,5 +47,21 @@ impl Rar13Cipher {
     fn advance(&mut self) {
         self.key[1] = self.key[1].wrapping_add(self.key[2]);
         self.key[0] = self.key[0].wrapping_add(self.key[1]);
+    }
+}
+
+impl<R> Rar13DecryptReader<R> {
+    pub fn new(inner: R, cipher: Rar13Cipher) -> Self {
+        Self { inner, cipher }
+    }
+}
+
+impl<R: std::io::Read> std::io::Read for Rar13DecryptReader<R> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.inner.read(out)?;
+        for byte in &mut out[..read] {
+            *byte = self.cipher.decrypt_byte(*byte);
+        }
+        Ok(read)
     }
 }

@@ -3,7 +3,7 @@ use crate::error::{Error, Result};
 use crate::features::FeatureSet;
 use crate::version::{ArchiveFamily, ArchiveVersion};
 use rars_codec::rar13::{unpack15_decode, unpack15_encode, Unpack15, Unpack15Encoder};
-use rars_crypto::rar13::Rar13Cipher;
+use rars_crypto::rar13::{Rar13Cipher, Rar13DecryptReader};
 use std::fs::File;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
@@ -56,7 +56,7 @@ pub struct Entry {
     pub packed_range: Range<usize>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Archive {
     pub sfx_offset: usize,
     pub main: MainHeader,
@@ -64,7 +64,7 @@ pub struct Archive {
     source: ArchiveSource,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 enum ArchiveSource {
     Memory(Arc<[u8]>),
     File(Arc<PathBuf>),
@@ -764,9 +764,11 @@ impl Entry {
             checksum: &mut checksum,
         };
         if self.is_encrypted() {
-            let packed = self.decrypt_packed_data(archive, password)?;
-            unpack15.decode_member_to(
-                &packed,
+            let password = password.ok_or(Error::NeedPassword)?;
+            let packed = archive.range_reader(self.packed_range.clone())?;
+            let mut packed = Rar13DecryptReader::new(packed, Rar13Cipher::new(password));
+            unpack15.decode_member_from_reader(
+                &mut packed,
                 self.header.unp_size as usize,
                 solid,
                 &mut checksum_writer,
@@ -883,6 +885,85 @@ pub fn extract_volumes(
     Ok(out)
 }
 
+pub fn extract_volumes_to<F>(
+    volumes: &[Archive],
+    password: Option<&[u8]>,
+    mut open: F,
+) -> Result<()>
+where
+    F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
+{
+    let mut pending: Option<PendingSplitRefs> = None;
+    let mut unpack15 = Unpack15::new();
+    let mut extracted_count = 0usize;
+
+    for (volume_index, archive) in volumes.iter().enumerate() {
+        for (entry_index, entry) in archive.entries.iter().enumerate() {
+            if !entry.is_split_before() && !entry.is_split_after() {
+                if pending.is_some() {
+                    return Err(Error::InvalidHeader(
+                        "RAR 1.3 split entry is interrupted by a regular entry",
+                    ));
+                }
+                let meta = entry.metadata();
+                if meta.is_directory {
+                    let _ = open(&meta)?;
+                    extracted_count += 1;
+                    continue;
+                }
+                let mut writer = open(&meta)?;
+                entry.write_compressed_to(
+                    archive,
+                    password,
+                    &mut unpack15,
+                    archive.main.is_solid() && extracted_count != 0,
+                    &mut writer,
+                )?;
+                extracted_count += 1;
+                continue;
+            }
+
+            match (
+                &mut pending,
+                entry.is_split_before(),
+                entry.is_split_after(),
+            ) {
+                (None, false, true) => {
+                    pending = Some(PendingSplitRefs::new(entry, volume_index, entry_index));
+                }
+                (Some(current), true, true) => {
+                    current.append(entry, volume_index, entry_index)?;
+                }
+                (Some(current), true, false) => {
+                    current.append(entry, volume_index, entry_index)?;
+                    let completed = pending.take().expect("pending split");
+                    let solid = archive.main.is_solid() && extracted_count != 0;
+                    completed.write_to(
+                        volumes,
+                        entry,
+                        password,
+                        &mut unpack15,
+                        solid,
+                        &mut open,
+                    )?;
+                    extracted_count += 1;
+                }
+                _ => {
+                    return Err(Error::InvalidHeader(
+                        "RAR 1.3 split entry flags are inconsistent",
+                    ));
+                }
+            }
+        }
+    }
+
+    if pending.is_some() {
+        return Err(Error::InvalidHeader("RAR 1.3 split entry is incomplete"));
+    }
+
+    Ok(())
+}
+
 pub fn extract_stored_volumes(
     volumes: &[Archive],
     password: Option<&[u8]>,
@@ -943,6 +1024,145 @@ struct PendingSplit {
     method: u8,
     unp_ver: u8,
     was_encrypted: bool,
+}
+
+struct PendingSplitRefs {
+    name: Vec<u8>,
+    fragments: Vec<(usize, usize)>,
+    file_time: u32,
+    file_attr: u8,
+    method: u8,
+    unp_ver: u8,
+    was_encrypted: bool,
+}
+
+impl PendingSplitRefs {
+    fn new(entry: &Entry, volume_index: usize, entry_index: usize) -> Self {
+        Self {
+            name: entry.name.clone(),
+            fragments: vec![(volume_index, entry_index)],
+            file_time: entry.header.file_time,
+            file_attr: entry.header.file_attr,
+            method: entry.header.method,
+            unp_ver: entry.header.unp_ver,
+            was_encrypted: entry.is_encrypted(),
+        }
+    }
+
+    fn append(&mut self, entry: &Entry, volume_index: usize, entry_index: usize) -> Result<()> {
+        if entry.name != self.name {
+            return Err(Error::InvalidHeader("RAR 1.3 split entry name changed"));
+        }
+        if entry.header.method != self.method {
+            return Err(Error::InvalidHeader(
+                "RAR 1.3 split entry compression method changed",
+            ));
+        }
+        if entry.header.unp_ver != self.unp_ver {
+            return Err(Error::InvalidHeader(
+                "RAR 1.3 split entry unpack version changed",
+            ));
+        }
+        if entry.is_encrypted() != self.was_encrypted {
+            return Err(Error::InvalidHeader(
+                "RAR 1.3 split entry encryption flag changed",
+            ));
+        }
+        self.fragments.push((volume_index, entry_index));
+        Ok(())
+    }
+
+    fn write_to<F>(
+        self,
+        volumes: &[Archive],
+        final_entry: &Entry,
+        password: Option<&[u8]>,
+        unpack15: &mut Unpack15,
+        solid: bool,
+        open: &mut F,
+    ) -> Result<()>
+    where
+        F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
+    {
+        let mut reader = self.fragment_reader(volumes, password)?;
+        let meta = ExtractedEntryMeta {
+            name: self.name,
+            file_time: self.file_time,
+            file_attr: self.file_attr,
+            is_directory: false,
+        };
+        let mut writer = open(&meta)?;
+        let mut checksum = Rar13Checksum::new();
+        let mut checksum_writer = Rar13ChecksumWriter {
+            inner: &mut writer,
+            checksum: &mut checksum,
+        };
+        if self.method == METHOD_STORE {
+            std::io::copy(&mut reader, &mut checksum_writer)?;
+        } else {
+            unpack15.decode_member_from_reader(
+                &mut reader,
+                final_entry.header.unp_size as usize,
+                solid,
+                &mut checksum_writer,
+            )?;
+        }
+        let actual = checksum.finish();
+        if actual == final_entry.header.file_crc {
+            Ok(())
+        } else {
+            Err(Error::CrcMismatch {
+                expected: final_entry.header.file_crc,
+                actual,
+            })
+        }
+    }
+
+    fn fragment_reader<'a>(
+        &self,
+        volumes: &'a [Archive],
+        password: Option<&'a [u8]>,
+    ) -> Result<ChainedReader<'a>> {
+        let mut readers = Vec::with_capacity(self.fragments.len());
+        for &(volume_index, entry_index) in &self.fragments {
+            let archive = volumes
+                .get(volume_index)
+                .ok_or(Error::InvalidHeader("RAR 1.3 split volume is missing"))?;
+            let entry = archive
+                .entries
+                .get(entry_index)
+                .ok_or(Error::InvalidHeader("RAR 1.3 split entry is missing"))?;
+            let reader = archive.range_reader(entry.packed_range.clone())?;
+            if entry.is_encrypted() {
+                let password = password.ok_or(Error::NeedPassword)?;
+                readers.push(
+                    Box::new(Rar13DecryptReader::new(reader, Rar13Cipher::new(password)))
+                        as Box<dyn Read + 'a>,
+                );
+            } else {
+                readers.push(reader);
+            }
+        }
+        Ok(ChainedReader { readers, index: 0 })
+    }
+}
+
+struct ChainedReader<'a> {
+    readers: Vec<Box<dyn Read + 'a>>,
+    index: usize,
+}
+
+impl Read for ChainedReader<'_> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        while let Some(reader) = self.readers.get_mut(self.index) {
+            let read = reader.read(out)?;
+            if read != 0 {
+                return Ok(read);
+            }
+            self.index += 1;
+        }
+        Ok(0)
+    }
 }
 
 impl PendingSplit {
@@ -1556,10 +1776,10 @@ mod tests {
         truncated_extra.push(0x80);
         assert_eq!(MainHeader::parse(&truncated_extra), Err(Error::TooShort));
 
-        assert_eq!(
+        assert!(matches!(
             Archive::parse(b"Rar!\x1a\x07\x00"),
             Err(Error::UnsupportedSignature)
-        );
+        ));
     }
 
     #[test]
@@ -1578,12 +1798,12 @@ mod tests {
         bytes.push(10);
         bytes.push(METHOD_STORE);
 
-        assert_eq!(
+        assert!(matches!(
             Archive::parse(&bytes),
             Err(Error::InvalidHeader(
                 "RAR 1.3 file header is shorter than its name"
             ))
-        );
+        ));
     }
 
     #[test]
@@ -1599,7 +1819,7 @@ mod tests {
         let mut bytes = write_stored_archive(&input, WriterOptions::default()).unwrap();
         bytes.pop();
 
-        assert_eq!(Archive::parse(&bytes), Err(Error::TooShort));
+        assert!(matches!(Archive::parse(&bytes), Err(Error::TooShort)));
     }
 
     #[test]
