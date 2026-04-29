@@ -58,8 +58,6 @@ Keep this section short. Detailed behavioural claims belong in tests.
 
 - Finish Unpack20:
   - Add solid/multiblock fixture coverage for Unpack20.
-  - Make `decode_member_from_reader` incremental; the initial LZ-mode port
-    buffers the packed stream before decoding.
   - Add more audio fixtures if examples with 1, 3, or 4 channels become
     available; current coverage pins normal 2-channel RAR 2.50 audio blocks.
 - Add PPMd for RAR 2.9+:

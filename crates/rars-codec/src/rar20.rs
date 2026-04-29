@@ -117,18 +117,41 @@ impl Unpack20 {
         output_size: usize,
         out: &mut impl Write,
     ) -> Result<()> {
-        let mut input_bytes = Vec::new();
+        let start = self.current_pos();
+        let target = start
+            .checked_add(output_size)
+            .ok_or(Error::InvalidData("RAR 2.0 output size overflows"))?;
+        self.bits = BitReader::new();
+        let mut input_done = false;
         let mut buffer = [0u8; INPUT_CHUNK];
-        loop {
-            let read = input
-                .read(&mut buffer)
-                .map_err(|_| Error::InvalidData("RAR 2.0 input read failed"))?;
-            if read == 0 {
-                break;
+
+        while self.current_pos() < target {
+            let checkpoint = self.clone();
+            match self.decode_until(target) {
+                Ok(()) => {}
+                Err(Error::NeedMoreInput) if !input_done => {
+                    *self = checkpoint;
+                    let read = input
+                        .read(&mut buffer)
+                        .map_err(|_| Error::InvalidData("RAR 2.0 input read failed"))?;
+                    if read == 0 {
+                        input_done = true;
+                    } else {
+                        self.bits.append(&buffer[..read]);
+                    }
+                }
+                Err(Error::NeedMoreInput) => {
+                    return Err(Error::InvalidData("RAR 2.0 bitstream is truncated"));
+                }
+                Err(error) => return Err(error),
             }
-            input_bytes.extend_from_slice(&buffer[..read]);
         }
-        self.decode_member_to(&input_bytes, output_size, out)
+
+        let decoded = self.raw_range(start, target)?;
+        out.write_all(decoded)
+            .map_err(|_| Error::InvalidData("RAR 2.0 output write failed"))?;
+        self.trim_history(target, target);
+        Ok(())
     }
 
     fn decode_until(&mut self, target: usize) -> Result<()> {
@@ -618,5 +641,59 @@ impl BitReader {
             value = (value << 1) | bit as u32;
         }
         Ok(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{unpack20_decode, Unpack20};
+
+    const AUTOREJ_PACKED: &[u8] = &[
+        0x09, 0x14, 0x0c, 0x94, 0x00, 0x00, 0x00, 0x00, 0x00, 0xce, 0xf8, 0x1f, 0xc1, 0xe6, 0x05,
+        0xfc, 0x39, 0xc3, 0x50, 0x65, 0x08, 0x41, 0x94, 0xc4, 0x1d, 0xf3, 0xcd, 0x0d, 0x8e, 0x20,
+        0xf5, 0x9d, 0x8e, 0x76, 0x1d, 0xc5, 0x19, 0xde, 0x16, 0x5b, 0x52, 0xb8, 0x8e, 0x75, 0xcd,
+        0xaf, 0x1f, 0xfc, 0x9e, 0xf7, 0x00, 0x01, 0xbe, 0x90,
+    ];
+
+    #[test]
+    fn decodes_rar20_lz_member() {
+        assert_eq!(
+            unpack20_decode(AUTOREJ_PACKED, expected_text().len()).unwrap(),
+            expected_text()
+        );
+    }
+
+    #[test]
+    fn decode_member_from_reader_accepts_incremental_input() {
+        struct TinyReader<'a> {
+            input: &'a [u8],
+        }
+
+        impl std::io::Read for TinyReader<'_> {
+            fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+                if self.input.is_empty() {
+                    return Ok(0);
+                }
+                let len = self.input.len().min(out.len()).min(3);
+                out[..len].copy_from_slice(&self.input[..len]);
+                self.input = &self.input[len..];
+                Ok(len)
+            }
+        }
+
+        let mut decoder = Unpack20::new();
+        let mut reader = TinyReader {
+            input: AUTOREJ_PACKED,
+        };
+        let mut output = Vec::new();
+        decoder
+            .decode_member_from_reader(&mut reader, expected_text().len(), &mut output)
+            .unwrap();
+
+        assert_eq!(output, expected_text());
+    }
+
+    fn expected_text() -> Vec<u8> {
+        b"Hello text not audio.\r\n".repeat(100)
     }
 }
