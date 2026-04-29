@@ -5,7 +5,6 @@ members = [
     "crates/rars-codec",
     "crates/rars-crypto",
     "crates/rars-format",
-    "crates/rars-testkit",
 ]
 resolver = "2"
 

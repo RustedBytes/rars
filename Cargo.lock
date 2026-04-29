@@ -31,7 +31,3 @@ dependencies = [
  "rars-codec",
  "rars-crypto",
 ]
-
-[[package]]
-name = "rars-testkit"
-version = "0.1.0"

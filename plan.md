@@ -18,7 +18,6 @@ rars/
     rars-codec/        LZ/Huffman/PPMd/RARVM/filter codecs (Unpack15 lives here)
     rars-crypto/       legacy ciphers, AES/KDF/HMAC (RAR 1.3 cipher lives here)
     rars-recovery/     RR/REV recovery data and repair logic
-    rars-testkit/      fixture helpers and reference-tool integration scaffold
 ```
 
 ## Version model
@@ -63,7 +62,8 @@ WinRAR-like heuristics.
 8. [done] Re-align the workspace with the intended crate boundaries after the
    RAR 1.3/1.4 vertical slice was proven: `rars-codec` owns Unpack15,
    `rars-crypto` owns the legacy RAR 1.3 cipher, `rars-format` owns container
-   parsing/writing, and `rars-testkit` is scaffolded for reference-tool checks.
+   parsing/writing, and fixture/reference-tool checks live in focused
+   integration tests or local support modules.
 9. [in progress] Expand to RAR 1.5-4.x container, then RAR 5.0. The first
    RAR 1.5-4.x reader slice parses marker/main/file/end blocks, RAR 3.x
    `NEWSUB` service headers, solid and volume flags, and RAR 4.x extended-time
@@ -233,8 +233,9 @@ Architectural debt to address before the RAR 5.0 streaming slice:
 ## Testing strategy
 
 Use the specification repository fixtures as black-box compatibility tests. The
-library should not require those fixtures at runtime; fixture-driven tests belong
-in `rars-testkit` or integration tests gated on a fixture path.
+library should not require those fixtures at runtime; fixture-driven tests should
+live in integration tests gated on a fixture path, with local support modules
+when shared setup is needed.
 
 Coverage reporting is available via `./scripts/coverage.sh`. It uses Rust's
 native LLVM source coverage (`-Cinstrument-coverage`) and writes the HTML report
