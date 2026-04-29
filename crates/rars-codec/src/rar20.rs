@@ -6,6 +6,9 @@ const OFFSET_COUNT: usize = 48;
 const LENGTH_COUNT: usize = 28;
 const LEVEL_COUNT: usize = 19;
 const TABLE_COUNT: usize = MAIN_COUNT + OFFSET_COUNT + LENGTH_COUNT;
+const AUDIO_COUNT: usize = 257;
+const MAX_CHANNELS: usize = 4;
+const OLD_LEVEL_COUNT: usize = AUDIO_COUNT * MAX_CHANNELS;
 const MAX_HISTORY: usize = 1024 * 1024;
 const INPUT_CHUNK: usize = 64 * 1024;
 
@@ -36,10 +39,16 @@ pub fn unpack20_decode(input: &[u8], output_size: usize) -> Result<Vec<u8>> {
 #[derive(Debug, Clone)]
 pub struct Unpack20 {
     bits: BitReader,
-    levels: [u8; TABLE_COUNT],
+    levels: [u8; OLD_LEVEL_COUNT],
     main: Huffman,
     offsets: Huffman,
     lengths: Huffman,
+    audio_tables: [Huffman; MAX_CHANNELS],
+    audio_block: bool,
+    channels: usize,
+    cur_channel: usize,
+    audio: [AudioState; MAX_CHANNELS],
+    channel_delta: i32,
     old_offsets: [usize; 4],
     last_offset: usize,
     last_length: usize,
@@ -53,10 +62,16 @@ impl Unpack20 {
     pub fn new() -> Self {
         Self {
             bits: BitReader::new(),
-            levels: [0; TABLE_COUNT],
+            levels: [0; OLD_LEVEL_COUNT],
             main: Huffman::empty(),
             offsets: Huffman::empty(),
             lengths: Huffman::empty(),
+            audio_tables: std::array::from_fn(|_| Huffman::empty()),
+            audio_block: false,
+            channels: 1,
+            cur_channel: 0,
+            audio: [AudioState::default(); MAX_CHANNELS],
+            channel_delta: 0,
             old_offsets: [0; 4],
             last_offset: 0,
             last_length: 0,
@@ -132,25 +147,30 @@ impl Unpack20 {
     }
 
     fn read_tables(&mut self) -> Result<()> {
-        self.bits.align_byte();
         let bit_field = self.bits.peek_bits(16)?;
-        let audio_block = bit_field & 0x8000 != 0;
+        self.audio_block = bit_field & 0x8000 != 0;
         let keep_tables = bit_field & 0x4000 != 0;
         self.bits.read_bits(2)?;
-        if audio_block {
-            return Err(Error::InvalidData(
-                "RAR 2.0 audio blocks are not implemented",
-            ));
-        }
         if !keep_tables {
-            self.levels = [0; TABLE_COUNT];
+            self.levels = [0; OLD_LEVEL_COUNT];
         }
+
+        let table_size = if self.audio_block {
+            self.channels = ((bit_field >> 12) as usize & 3) + 1;
+            if self.cur_channel >= self.channels {
+                self.cur_channel = 0;
+            }
+            self.bits.read_bits(2)?;
+            AUDIO_COUNT * self.channels
+        } else {
+            TABLE_COUNT
+        };
 
         let level_lengths = Self::read_level_lengths(&mut self.bits)?;
         let level_decoder = Huffman::from_lengths(&level_lengths)?;
-        let mut new_levels = [0u8; TABLE_COUNT];
+        let mut new_levels = [0u8; OLD_LEVEL_COUNT];
         let mut pos = 0usize;
-        while pos < TABLE_COUNT {
+        while pos < table_size {
             let symbol = level_decoder.decode(&mut self.bits)?;
             match symbol {
                 0..=15 => {
@@ -178,35 +198,39 @@ impl Unpack20 {
         }
 
         self.levels = new_levels;
-        self.main = Huffman::from_lengths(&self.levels[..MAIN_COUNT])?;
-        self.offsets = Huffman::from_lengths(&self.levels[MAIN_COUNT..MAIN_COUNT + OFFSET_COUNT])?;
-        self.lengths = Huffman::from_lengths(&self.levels[MAIN_COUNT + OFFSET_COUNT..])?;
+        if self.audio_block {
+            for channel in 0..self.channels {
+                let start = channel * AUDIO_COUNT;
+                self.audio_tables[channel] =
+                    Huffman::from_lengths(&self.levels[start..start + AUDIO_COUNT])?;
+            }
+        } else {
+            self.main = Huffman::from_lengths(&self.levels[..MAIN_COUNT])?;
+            self.offsets =
+                Huffman::from_lengths(&self.levels[MAIN_COUNT..MAIN_COUNT + OFFSET_COUNT])?;
+            self.lengths =
+                Huffman::from_lengths(&self.levels[MAIN_COUNT + OFFSET_COUNT..TABLE_COUNT])?;
+        }
         Ok(())
     }
 
     fn read_level_lengths(bits: &mut BitReader) -> Result<[u8; LEVEL_COUNT]> {
         let mut lengths = [0u8; LEVEL_COUNT];
-        let mut pos = 0usize;
-        while pos < LEVEL_COUNT {
-            let value = bits.read_bits(4)? as u8;
-            if value == 15 {
-                let zero_count = bits.read_bits(4)? as usize;
-                if zero_count == 0 {
-                    lengths[pos] = 15;
-                    pos += 1;
-                } else {
-                    pos = pos.saturating_add(zero_count + 2).min(LEVEL_COUNT);
-                }
-            } else {
-                lengths[pos] = value;
-                pos += 1;
-            }
+        for length in &mut lengths {
+            *length = bits.read_bits(4)? as u8;
         }
         Ok(lengths)
     }
 
     fn decode_lz(&mut self, output_size: usize) -> Result<()> {
         while self.current_pos() < output_size {
+            if self.audio_block {
+                self.decode_audio_byte()?;
+                if !self.in_block {
+                    return Ok(());
+                }
+                continue;
+            }
             let symbol = self.main.decode(&mut self.bits)?;
             match symbol {
                 0..=255 => self.output.push(symbol as u8),
@@ -276,6 +300,87 @@ impl Unpack20 {
             }
         }
         Ok(())
+    }
+
+    fn decode_audio_byte(&mut self) -> Result<()> {
+        let symbol = self.audio_tables[self.cur_channel].decode(&mut self.bits)?;
+        if symbol == 256 {
+            self.in_block = false;
+            return Ok(());
+        }
+        if symbol > 256 {
+            return Err(Error::InvalidData("RAR 2.0 invalid audio symbol"));
+        }
+        let byte = self.decode_audio(symbol as u8);
+        self.output.push(byte);
+        self.cur_channel += 1;
+        if self.cur_channel == self.channels {
+            self.cur_channel = 0;
+        }
+        Ok(())
+    }
+
+    fn decode_audio(&mut self, delta: u8) -> u8 {
+        let state = &mut self.audio[self.cur_channel];
+        state.byte_count = state.byte_count.wrapping_add(1);
+        state.d4 = state.d3;
+        state.d3 = state.d2;
+        state.d2 = state.last_delta - state.d1;
+        state.d1 = state.last_delta;
+
+        let predicted = 8 * state.last_char
+            + state.k[0] * state.d1
+            + state.k[1] * state.d2
+            + state.k[2] * state.d3
+            + state.k[3] * state.d4
+            + state.k[4] * self.channel_delta;
+        let predicted = (predicted >> 3) & 0xff;
+        let byte = predicted.wrapping_sub(delta as i32) as u8;
+
+        let d = (delta as i8 as i32) << 3;
+        state.dif[0] = state.dif[0].wrapping_add(d.unsigned_abs());
+        state.dif[1] = state.dif[1].wrapping_add((d - state.d1).unsigned_abs());
+        state.dif[2] = state.dif[2].wrapping_add((d + state.d1).unsigned_abs());
+        state.dif[3] = state.dif[3].wrapping_add((d - state.d2).unsigned_abs());
+        state.dif[4] = state.dif[4].wrapping_add((d + state.d2).unsigned_abs());
+        state.dif[5] = state.dif[5].wrapping_add((d - state.d3).unsigned_abs());
+        state.dif[6] = state.dif[6].wrapping_add((d + state.d3).unsigned_abs());
+        state.dif[7] = state.dif[7].wrapping_add((d - state.d4).unsigned_abs());
+        state.dif[8] = state.dif[8].wrapping_add((d + state.d4).unsigned_abs());
+        state.dif[9] = state.dif[9].wrapping_add((d - self.channel_delta).unsigned_abs());
+        state.dif[10] = state.dif[10].wrapping_add((d + self.channel_delta).unsigned_abs());
+
+        self.channel_delta = (byte.wrapping_sub(state.last_char as u8)) as i8 as i32;
+        state.last_delta = self.channel_delta;
+        state.last_char = byte as i32;
+
+        if state.byte_count & 0x1f == 0 {
+            let mut min_dif = state.dif[0];
+            let mut num_min_dif = 0usize;
+            state.dif[0] = 0;
+            for index in 1..state.dif.len() {
+                if state.dif[index] < min_dif {
+                    min_dif = state.dif[index];
+                    num_min_dif = index;
+                }
+                state.dif[index] = 0;
+            }
+            match num_min_dif {
+                1 if state.k[0] >= -16 => state.k[0] -= 1,
+                2 if state.k[0] < 16 => state.k[0] += 1,
+                3 if state.k[1] >= -16 => state.k[1] -= 1,
+                4 if state.k[1] < 16 => state.k[1] += 1,
+                5 if state.k[2] >= -16 => state.k[2] -= 1,
+                6 if state.k[2] < 16 => state.k[2] += 1,
+                7 if state.k[3] >= -16 => state.k[3] -= 1,
+                8 if state.k[3] < 16 => state.k[3] += 1,
+                9 if state.k[4] >= -16 => state.k[4] -= 1,
+                10 if state.k[4] < 16 => state.k[4] += 1,
+                _ => {}
+            }
+        }
+
+        byte
     }
 
     fn read_offset(&mut self) -> Result<usize> {
@@ -364,6 +469,19 @@ impl Unpack20 {
         self.output.drain(..drain);
         self.base_offset = keep_from;
     }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct AudioState {
+    k: [i32; 5],
+    d1: i32,
+    d2: i32,
+    d3: i32,
+    d4: i32,
+    last_delta: i32,
+    last_char: i32,
+    byte_count: u32,
+    dif: [u32; 11],
 }
 
 fn fill_levels(levels: &mut [u8], pos: &mut usize, count: usize, value: u8) -> Result<()> {
@@ -476,10 +594,6 @@ impl BitReader {
         }
         self.input.drain(..bytes);
         self.bit_pos -= bytes * 8;
-    }
-
-    fn align_byte(&mut self) {
-        self.bit_pos = (self.bit_pos + 7) & !7;
     }
 
     fn read_bit(&mut self) -> Result<u8> {

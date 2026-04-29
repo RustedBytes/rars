@@ -206,6 +206,25 @@ fn extracts_rar250_unp20_lz_file() {
 }
 
 #[test]
+fn extracts_rar250_unp20_audio_file() {
+    let bytes = std::fs::read(fixture("rar250/AUDIO.RAR")).unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let file = archive.files().next().unwrap();
+
+    assert_eq!(file.name, b"PCM_LR.WAV");
+    assert_eq!(file.method, 0x35);
+    assert_eq!(file.unp_ver, 20);
+    assert_eq!(file.pack_size, 1938);
+    assert_eq!(file.unp_size, 32768);
+
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].name, b"PCM_LR.WAV");
+    assert_eq!(extracted[0].data, expected_rar250_audio_payload());
+    assert_eq!(crc32(&extracted[0].data), 0x713ef34b);
+}
+
+#[test]
 fn extracts_rar300_standard_rarvm_filter_fixtures() {
     for (name, entry_name, size, expected_crc) in [
         (
@@ -412,4 +431,16 @@ fn expected_stored_volume_payload() -> Vec<u8> {
 
 fn expected_compressed_text_payload() -> Vec<u8> {
     "Hello, RAR 3.x fixture world.\n".repeat(80).into_bytes()
+}
+
+fn expected_rar250_audio_payload() -> Vec<u8> {
+    let mut pcm = Vec::with_capacity(32 * 1024);
+    for i in 0..8192 {
+        let left = (20000.0 * ((i as f64) * 2.0 * std::f64::consts::PI / 256.0).sin()) as i32;
+        let right =
+            (15000.0 * ((i as f64) * 2.0 * std::f64::consts::PI / 384.0 + 1.0).sin()) as i32;
+        pcm.extend_from_slice(&(left as u16).to_le_bytes());
+        pcm.extend_from_slice(&(right as u16).to_le_bytes());
+    }
+    pcm
 }
