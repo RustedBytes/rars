@@ -93,7 +93,9 @@ This slice is now good enough to act as the first backend for a CLI:
   while Unpack15 codec state now lives in `rars-codec` and the legacy password
   cipher lives in `rars-crypto`. The facade crate exposes `ArchiveReader`,
   `Archive`, and a small `ArchiveWriter` wrapper so callers have an auto-detect
-  path instead of only version-specific entry points.
+  path instead of only version-specific entry points. Parsed entries store
+  packed byte ranges into the archive backing buffer rather than cloning packed
+  payloads into every entry.
 - Negative coverage: wrong password rejection, corrupt stored payload checksum
   rejection, truncated compressed payload rejection, and unsafe extraction path
   rejection. Positive fixture coverage includes packed archive-comment and
@@ -175,7 +177,9 @@ The first reader slice is implemented:
 - The public facade dispatches `ArchiveReader::read` to RAR 1.5-4.x parsing,
   and `rars info`, `rars test`, and `rars x` work for stored and basic
   non-solid LZ-compressed RAR 1.5-4.x archives, including stored volume sets
-  when all parts are supplied in order.
+  when all parts are supplied in order. Parsed file/service headers store
+  packed byte ranges into the archive backing buffer rather than cloned
+  payloads, so parsing no longer duplicates the compressed data for each entry.
 
 Next RAR 1.5-4.x tasks:
 
@@ -192,9 +196,14 @@ Next RAR 1.5-4.x tasks:
 
 Architectural debt to address before the RAR 5.0 streaming slice:
 
-- Move parsed packed data from owned `Vec<u8>` fields toward byte ranges over
-  an archive reader, otherwise >4 GiB archives and streaming extraction are
-  structurally blocked.
+- Add path-backed parsing so `rars info`, `rars test`, and `rars x` do not need
+  `fs::read` of the entire archive before header parsing. The current archive
+  structs are range-backed, but the public parse helper still owns an in-memory
+  backing buffer for compatibility with fixture tests.
+- Add streaming extraction targets (`extract_to_writer` / CLI direct-to-file)
+  so large stored files can be copied without materializing output `Vec<u8>`.
+  Codec APIs still return `Vec<u8>` and need a streaming output interface before
+  compressed multi-gigabyte members are safe.
 - Introduce a per-archive-set decoder session so normal extraction and volume
   extraction share the same codec-state ownership model.
 - Enrich library errors with archive offsets and block context before treating

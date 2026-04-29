@@ -4,6 +4,8 @@ use crate::features::FeatureSet;
 use crate::version::{ArchiveFamily, ArchiveVersion};
 use rars_codec::rar13::{unpack15_decode, unpack15_encode, Unpack15, Unpack15Encoder};
 use rars_crypto::rar13::Rar13Cipher;
+use std::ops::Range;
+use std::sync::Arc;
 
 const MAIN_HEAD_SIZE: u16 = 7;
 const FILE_HEAD_BASE_SIZE: usize = 21;
@@ -47,7 +49,7 @@ pub struct Entry {
     pub header: FileHeader,
     pub name: Vec<u8>,
     pub extra: Vec<u8>,
-    pub packed_data: Vec<u8>,
+    pub packed_range: Range<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +57,7 @@ pub struct Archive {
     pub sfx_offset: usize,
     pub main: MainHeader,
     pub entries: Vec<Entry>,
+    data: Arc<[u8]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -214,7 +217,12 @@ impl FileHeader {
 
 impl Archive {
     pub fn parse(input: &[u8]) -> Result<Self> {
-        let sig = find_archive_start(input, 128 * 1024).ok_or(Error::UnsupportedSignature)?;
+        let data: Arc<[u8]> = Arc::from(input.to_vec().into_boxed_slice());
+        Self::parse_shared(data)
+    }
+
+    fn parse_shared(input: Arc<[u8]>) -> Result<Self> {
+        let sig = find_archive_start(&input, 128 * 1024).ok_or(Error::UnsupportedSignature)?;
         if sig.family != ArchiveFamily::Rar13 {
             return Err(Error::UnsupportedSignature);
         }
@@ -245,7 +253,7 @@ impl Archive {
                 header,
                 name,
                 extra,
-                packed_data: archive[data_start..data_end].to_vec(),
+                packed_range: sig.offset + data_start..sig.offset + data_end,
             });
             pos = data_end;
         }
@@ -254,6 +262,7 @@ impl Archive {
             sfx_offset: sig.offset,
             main,
             entries,
+            data: input,
         })
     }
 
@@ -265,7 +274,7 @@ impl Archive {
                     "RAR 1.3 split entry requires multivolume extraction",
                 ));
             }
-            out.push(entry.extract_stored(password)?);
+            out.push(entry.extract_stored(self, password)?);
         }
         Ok(out)
     }
@@ -280,6 +289,7 @@ impl Archive {
                 ));
             }
             out.push(entry.extract_with_context(
+                self,
                 password,
                 Some(&mut unpack15),
                 self.main.is_solid() && !out.is_empty(),
@@ -414,16 +424,23 @@ impl Entry {
         self.header.method == METHOD_STORE
     }
 
-    pub fn stored_data(&self, password: Option<&[u8]>) -> Result<Vec<u8>> {
+    pub fn packed_data<'a>(&self, archive: &'a Archive) -> Result<&'a [u8]> {
+        archive
+            .data
+            .get(self.packed_range.clone())
+            .ok_or(Error::TooShort)
+    }
+
+    pub fn stored_data(&self, archive: &Archive, password: Option<&[u8]>) -> Result<Vec<u8>> {
         if !self.is_stored() {
             return Err(Error::InvalidHeader("RAR 1.3 entry is not stored"));
         }
 
-        self.decrypt_packed_data(password)
+        self.decrypt_packed_data(archive, password)
     }
 
-    fn decrypt_packed_data(&self, password: Option<&[u8]>) -> Result<Vec<u8>> {
-        let mut data = self.packed_data.clone();
+    fn decrypt_packed_data(&self, archive: &Archive, password: Option<&[u8]>) -> Result<Vec<u8>> {
+        let mut data = self.packed_data(archive)?.to_vec();
         if self.is_encrypted() {
             let password = password.ok_or(Error::NeedPassword)?;
             Rar13Cipher::new(password).decrypt_in_place(&mut data);
@@ -444,7 +461,11 @@ impl Entry {
         }
     }
 
-    pub fn extract_stored(&self, password: Option<&[u8]>) -> Result<ExtractedEntry> {
+    pub fn extract_stored(
+        &self,
+        archive: &Archive,
+        password: Option<&[u8]>,
+    ) -> Result<ExtractedEntry> {
         if self.is_directory() {
             return Ok(ExtractedEntry {
                 name: self.name.clone(),
@@ -455,7 +476,7 @@ impl Entry {
             });
         }
 
-        let data = self.stored_data(password)?;
+        let data = self.stored_data(archive, password)?;
         self.verify_checksum(&data)?;
         Ok(ExtractedEntry {
             name: self.name.clone(),
@@ -466,21 +487,22 @@ impl Entry {
         })
     }
 
-    pub fn extract(&self, password: Option<&[u8]>) -> Result<ExtractedEntry> {
-        self.extract_with_context(password, None, false)
+    pub fn extract(&self, archive: &Archive, password: Option<&[u8]>) -> Result<ExtractedEntry> {
+        self.extract_with_context(archive, password, None, false)
     }
 
     fn extract_with_context(
         &self,
+        archive: &Archive,
         password: Option<&[u8]>,
         unpack15: Option<&mut Unpack15>,
         solid: bool,
     ) -> Result<ExtractedEntry> {
         if self.is_stored() || self.is_directory() {
-            return self.extract_stored(password);
+            return self.extract_stored(archive, password);
         }
 
-        let packed = self.decrypt_packed_data(password)?;
+        let packed = self.decrypt_packed_data(archive, password)?;
         let data = if let Some(unpack15) = unpack15 {
             unpack15.decode_member(&packed, self.header.unp_size as usize, solid)?
         } else {
@@ -514,11 +536,16 @@ pub fn extract_volumes(
                     ));
                 }
                 let solid = archive.main.is_solid() && !out.is_empty();
-                out.push(entry.extract_with_context(password, Some(&mut unpack15), solid)?);
+                out.push(entry.extract_with_context(
+                    archive,
+                    password,
+                    Some(&mut unpack15),
+                    solid,
+                )?);
                 continue;
             }
 
-            let data = entry.decrypt_packed_data(password)?;
+            let data = entry.decrypt_packed_data(archive, password)?;
             match (
                 &mut pending,
                 entry.is_split_before(),
@@ -607,24 +634,23 @@ impl PendingSplit {
         unpack15: &mut Unpack15,
         solid: bool,
     ) -> Result<ExtractedEntry> {
-        let combined = Entry {
-            header: FileHeader {
-                flags: final_entry.header.flags
-                    & !(LHD_SPLIT_BEFORE | LHD_SPLIT_AFTER | LHD_PASSWORD),
-                pack_size: self.packed_data.len() as u32,
-                unp_size: final_entry.header.unp_size,
-                file_crc: final_entry.header.file_crc,
-                file_time: self.file_time,
-                file_attr: self.file_attr,
-                unp_ver: self.unp_ver,
-                method: self.method,
-                head_size: final_entry.header.head_size,
-            },
-            name: self.name,
-            extra: Vec::new(),
-            packed_data: self.packed_data,
+        let data = if self.method == METHOD_STORE {
+            self.packed_data
+        } else {
+            unpack15.decode_member(
+                &self.packed_data,
+                final_entry.header.unp_size as usize,
+                solid,
+            )?
         };
-        combined.extract_with_context(None, Some(unpack15), solid)
+        final_entry.verify_checksum(&data)?;
+        Ok(ExtractedEntry {
+            name: self.name,
+            data,
+            file_time: self.file_time,
+            file_attr: self.file_attr,
+            is_directory: false,
+        })
     }
 }
 
@@ -1155,7 +1181,7 @@ mod tests {
         assert_eq!(archive.entries.len(), 2);
         assert_eq!(archive.entries[0].name_lossy(), "README.md");
         assert_eq!(
-            archive.entries[0].stored_data(None).unwrap(),
+            archive.entries[0].stored_data(&archive, None).unwrap(),
             b"hello rar 1.3"
         );
         assert!(archive.entries[1].is_directory());
@@ -1275,6 +1301,7 @@ mod tests {
                 extra: 1u16.to_le_bytes().to_vec(),
             },
             entries: Vec::new(),
+            data: Arc::new([]),
         };
         assert_eq!(
             packed_too_short.archive_comment(),
@@ -1291,6 +1318,7 @@ mod tests {
                 extra: 4u16.to_le_bytes().to_vec(),
             },
             entries: Vec::new(),
+            data: Arc::new([]),
         };
         assert_eq!(unpacked_too_short.archive_comment(), Err(Error::TooShort));
     }
@@ -1305,6 +1333,7 @@ mod tests {
                 extra: 5u16.to_le_bytes().to_vec(),
             },
             entries: Vec::new(),
+            data: Arc::new([]),
         };
         assert_eq!(
             too_short.authenticity_verification(),
@@ -1323,6 +1352,7 @@ mod tests {
                 },
             },
             entries: Vec::new(),
+            data: Arc::new([]),
         };
         assert_eq!(
             bad_prefix.authenticity_verification(),
@@ -1345,11 +1375,13 @@ mod tests {
         let archive = Archive::parse(&bytes).unwrap();
         assert!(archive.entries[0].is_encrypted());
         assert!(matches!(
-            archive.entries[0].stored_data(None),
+            archive.entries[0].stored_data(&archive, None),
             Err(Error::NeedPassword)
         ));
         assert_eq!(
-            archive.entries[0].stored_data(Some(b"pass")).unwrap(),
+            archive.entries[0]
+                .stored_data(&archive, Some(b"pass"))
+                .unwrap(),
             b"secret bytes"
         );
 

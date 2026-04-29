@@ -44,7 +44,10 @@ fn parses_rar300_comment_subblock_and_stored_file() {
     assert_eq!(files[0].pack_size, 30);
     assert_eq!(files[0].unp_size, 30);
     assert_eq!(files[0].file_crc, 0xa538535e);
-    assert_eq!(files[0].packed_data, b"Hello, RAR 3.x fixture world.\n");
+    assert_eq!(
+        files[0].packed_data(&archive).unwrap(),
+        b"Hello, RAR 3.x fixture world.\n"
+    );
 }
 
 #[test]
