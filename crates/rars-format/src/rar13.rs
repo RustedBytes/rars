@@ -5,7 +5,7 @@ use crate::version::{ArchiveFamily, ArchiveVersion};
 use rars_codec::rar13::{unpack15_decode, unpack15_encode, Unpack15, Unpack15Encoder};
 use rars_crypto::rar13::Rar13Cipher;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -19,6 +19,7 @@ const MHD_PACK_COMMENT: u8 = 0x10;
 const MHD_AV: u8 = 0x20;
 const MHD_ALWAYS_SET: u8 = 0x80;
 const RAR13_AV_PREFIX: &[u8; 6] = b"\x1ai\x6d\x02\xda\xae";
+const COPY_BUFFER_SIZE: usize = 64 * 1024;
 const LHD_SPLIT_BEFORE: u8 = 0x01;
 const LHD_SPLIT_AFTER: u8 = 0x02;
 const LHD_PASSWORD: u8 = 0x04;
@@ -371,6 +372,56 @@ impl Archive {
         Ok(())
     }
 
+    fn range_reader(&self, range: Range<usize>) -> Result<Box<dyn Read + '_>> {
+        match &self.source {
+            ArchiveSource::Memory(data) => {
+                let data = data.get(range).ok_or(Error::TooShort)?;
+                Ok(Box::new(Cursor::new(data)))
+            }
+            ArchiveSource::File(path) => {
+                let mut file = File::open(path.as_ref())?;
+                file.seek(SeekFrom::Start(range.start as u64))?;
+                Ok(Box::new(file.take(range.len() as u64)))
+            }
+        }
+    }
+
+    fn copy_decrypted_range_to(
+        &self,
+        range: Range<usize>,
+        mut cipher: Rar13Cipher,
+        out: &mut impl Write,
+    ) -> Result<()> {
+        let mut buffer = [0u8; COPY_BUFFER_SIZE];
+        match &self.source {
+            ArchiveSource::Memory(data) => {
+                let data = data.get(range).ok_or(Error::TooShort)?;
+                for chunk in data.chunks(COPY_BUFFER_SIZE) {
+                    buffer[..chunk.len()].copy_from_slice(chunk);
+                    for byte in &mut buffer[..chunk.len()] {
+                        *byte = cipher.decrypt_byte(*byte);
+                    }
+                    out.write_all(&buffer[..chunk.len()])?;
+                }
+            }
+            ArchiveSource::File(path) => {
+                let mut file = File::open(path.as_ref())?;
+                file.seek(SeekFrom::Start(range.start as u64))?;
+                let mut remaining = range.len();
+                while remaining > 0 {
+                    let to_read = remaining.min(buffer.len());
+                    file.read_exact(&mut buffer[..to_read])?;
+                    for byte in &mut buffer[..to_read] {
+                        *byte = cipher.decrypt_byte(*byte);
+                    }
+                    out.write_all(&buffer[..to_read])?;
+                    remaining -= to_read;
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn extract_stored(&self, password: Option<&[u8]>) -> Result<Vec<ExtractedEntry>> {
         let mut out = Vec::new();
         for entry in &self.entries {
@@ -658,10 +709,26 @@ impl Entry {
             return Err(Error::InvalidHeader("RAR 1.3 entry is not stored"));
         }
         if self.is_encrypted() {
-            let data = self.stored_data(archive, password)?;
-            self.verify_checksum(&data)?;
-            out.write_all(&data)?;
-            return Ok(());
+            let password = password.ok_or(Error::NeedPassword)?;
+            let mut checksum = Rar13Checksum::new();
+            let mut checksum_writer = Rar13ChecksumWriter {
+                inner: out,
+                checksum: &mut checksum,
+            };
+            archive.copy_decrypted_range_to(
+                self.packed_range.clone(),
+                Rar13Cipher::new(password),
+                &mut checksum_writer,
+            )?;
+            let actual = checksum.finish();
+            return if actual == self.header.file_crc {
+                Ok(())
+            } else {
+                Err(Error::CrcMismatch {
+                    expected: self.header.file_crc,
+                    actual,
+                })
+            };
         }
         let mut checksum = Rar13Checksum::new();
         let mut checksum_writer = Rar13ChecksumWriter {
@@ -691,18 +758,28 @@ impl Entry {
         if self.is_stored() || self.is_directory() {
             return self.write_stored_to(archive, password, out);
         }
-        let packed = self.decrypt_packed_data(archive, password)?;
         let mut checksum = Rar13Checksum::new();
         let mut checksum_writer = Rar13ChecksumWriter {
             inner: out,
             checksum: &mut checksum,
         };
-        unpack15.decode_member_to(
-            &packed,
-            self.header.unp_size as usize,
-            solid,
-            &mut checksum_writer,
-        )?;
+        if self.is_encrypted() {
+            let packed = self.decrypt_packed_data(archive, password)?;
+            unpack15.decode_member_to(
+                &packed,
+                self.header.unp_size as usize,
+                solid,
+                &mut checksum_writer,
+            )?;
+        } else {
+            let mut packed = archive.range_reader(self.packed_range.clone())?;
+            unpack15.decode_member_from_reader(
+                &mut packed,
+                self.header.unp_size as usize,
+                solid,
+                &mut checksum_writer,
+            )?;
+        }
         let actual = checksum.finish();
         if actual == self.header.file_crc {
             Ok(())

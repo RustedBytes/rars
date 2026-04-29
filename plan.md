@@ -100,6 +100,9 @@ This slice is now good enough to act as the first backend for a CLI:
   caller-provided writers. Stored entries can be copied and checksum-verified
   without materializing the file data, and Unpack15 now has a writer-backed
   decode path so compressed output does not need a full decoded-member buffer.
+  For unencrypted compressed entries, Unpack15 can also read packed input
+  incrementally from the archive range. Legacy encrypted stored entries are
+  decrypted, written, and checksum-verified in fixed-size chunks.
 - Negative coverage: wrong password rejection, corrupt stored payload checksum
   rejection, truncated compressed payload rejection, and unsafe extraction path
   rejection. Positive fixture coverage includes packed archive-comment and
@@ -188,9 +191,13 @@ The first reader slice is implemented:
   archive, and the CLI uses the path-backed facade for read-side commands.
   `Archive::extract_to` writes entries to caller-provided writers, so stored
   entries can be copied and CRC32-verified without materializing the file data.
-  Unpack29 also has a writer-backed extraction path; it decodes compressed
-  output in bounded chunks while retaining only the sliding history needed by
-  later matches.
+  Unpack29 also has a reader/writer-backed extraction path; file-backed
+  archives feed packed bytes to the decoder incrementally, decode compressed
+  output in bounded chunks, delay flushing across incomplete RARVM filter
+  blocks, and retain only the sliding history needed by later matches. Normal
+  vector-returning extraction and direct-to-writer extraction now share the same
+  per-archive decoder session, so solid/non-solid Unpack29 state ownership is
+  centralized instead of duplicated across extraction paths.
 
 Next RAR 1.5-4.x tasks:
 
@@ -207,17 +214,16 @@ Next RAR 1.5-4.x tasks:
 
 Architectural debt to address before the RAR 5.0 streaming slice:
 
-- Reduce the remaining input-side buffering. Path-backed parsing avoids a full
-  archive read and parsed entries hold byte ranges, but codec calls still borrow
-  each member's packed byte range as a slice. Encrypted legacy entries also
-  decrypt into a temporary buffer. RAR 5 should use offset-based readers from the
-  start rather than extending the slice-backed model.
-- Harden Unpack29 chunking around RARVM filters whose transformed block spans a
-  caller-selected output chunk. Current fixture coverage passes, but the
-  streaming path should grow an explicit pending-filter flush model before this
-  is treated as a stable large-file contract.
-- Introduce a per-archive-set decoder session so normal extraction and volume
-  extraction share the same codec-state ownership model.
+- Reduce the remaining legacy encrypted-compressed input buffering. RAR
+  1.3/1.4 unencrypted compressed extraction and RAR 1.5-4.x compressed
+  extraction can now stream packed bytes from file-backed archive ranges into
+  their codecs. RAR 1.3/1.4 encrypted compressed entries still decrypt into a
+  temporary packed-data buffer before codec input. RAR 5 should use offset-based
+  readers from the start rather than extending the slice-backed model.
+- Extend the same decoder-session model to compressed split-volume extraction.
+  Stored split volumes are supported, but compressed split volumes still buffer
+  concatenated packed fragments and are guarded by fixture tests until the split
+  stream semantics are wired through the session.
 - Enrich library errors with archive offsets and block context before treating
   the public API as stable.
 

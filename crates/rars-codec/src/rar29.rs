@@ -1,5 +1,5 @@
 use crate::{Error, Result};
-use std::io::Write;
+use std::io::{Read, Write};
 
 const MAIN_COUNT: usize = 299;
 const OFFSET_COUNT: usize = 60;
@@ -8,6 +8,7 @@ const LENGTH_COUNT: usize = 28;
 const LEVEL_COUNT: usize = 20;
 const TABLE_COUNT: usize = MAIN_COUNT + OFFSET_COUNT + LOW_OFFSET_COUNT + LENGTH_COUNT;
 const MAX_HISTORY: usize = 4 * 1024 * 1024;
+const INPUT_CHUNK: usize = 64 * 1024;
 const STREAM_CHUNK: usize = 1024 * 1024;
 
 const LENGTH_BASES: [usize; LENGTH_COUNT] = [
@@ -117,6 +118,128 @@ impl Unpack29 {
             self.bits = BitReader::new();
         }
         self.bits.append(input);
+        self.decode_until(target).map_err(|error| match error {
+            Error::NeedMoreInput => Error::InvalidData("RAR 2.9 bitstream is truncated"),
+            error => error,
+        })?;
+        let out = self.filtered_range(start, target)?;
+        self.trim_history(target, target);
+        Ok(out)
+    }
+
+    pub fn decode_member_to(
+        &mut self,
+        input: &[u8],
+        output_size: usize,
+        out: &mut impl Write,
+    ) -> Result<()> {
+        let start = self.current_pos();
+        let final_target = start
+            .checked_add(output_size)
+            .ok_or(Error::InvalidData("RAR 2.9 output size overflows"))?;
+        if !input.is_empty() {
+            self.bits = BitReader::new();
+        }
+        self.bits.append(input);
+
+        let mut flushed = start;
+        let mut target = start.saturating_add(STREAM_CHUNK).min(final_target);
+        while flushed < final_target {
+            self.decode_until(target)?;
+            let safe_end = self.safe_flush_end(flushed, target, final_target)?;
+            if safe_end <= flushed {
+                if target == final_target {
+                    return Err(Error::InvalidData(
+                        "RAR 2.9 VM filter extends beyond output",
+                    ));
+                }
+                target = self
+                    .current_pos()
+                    .saturating_add(STREAM_CHUNK)
+                    .min(final_target);
+                continue;
+            }
+
+            let decoded = self.filtered_range(flushed, safe_end)?;
+            out.write_all(&decoded)
+                .map_err(|_| Error::InvalidData("RAR 2.9 output write failed"))?;
+            flushed = safe_end;
+            self.trim_history(flushed, self.current_pos());
+            target = self
+                .current_pos()
+                .saturating_add(STREAM_CHUNK)
+                .min(final_target);
+        }
+        Ok(())
+    }
+
+    pub fn decode_member_from_reader(
+        &mut self,
+        input: &mut impl Read,
+        output_size: usize,
+        out: &mut impl Write,
+    ) -> Result<()> {
+        self.bits = BitReader::new();
+        let start = self.current_pos();
+        let final_target = start
+            .checked_add(output_size)
+            .ok_or(Error::InvalidData("RAR 2.9 output size overflows"))?;
+        let mut flushed = start;
+        let mut target = start.saturating_add(STREAM_CHUNK).min(final_target);
+        let mut input_done = false;
+        let mut buffer = [0u8; INPUT_CHUNK];
+
+        while flushed < final_target {
+            loop {
+                let checkpoint = self.clone();
+                match self.decode_until(target) {
+                    Ok(()) => break,
+                    Err(Error::NeedMoreInput) if !input_done => {
+                        *self = checkpoint;
+                        let read = input
+                            .read(&mut buffer)
+                            .map_err(|_| Error::InvalidData("RAR 2.9 input read failed"))?;
+                        if read == 0 {
+                            input_done = true;
+                        } else {
+                            self.bits.append(&buffer[..read]);
+                        }
+                    }
+                    Err(Error::NeedMoreInput) => {
+                        return Err(Error::InvalidData("RAR 2.9 bitstream is truncated"));
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+
+            let safe_end = self.safe_flush_end(flushed, target, final_target)?;
+            if safe_end <= flushed {
+                if target == final_target {
+                    return Err(Error::InvalidData(
+                        "RAR 2.9 VM filter extends beyond output",
+                    ));
+                }
+                target = self
+                    .current_pos()
+                    .saturating_add(STREAM_CHUNK)
+                    .min(final_target);
+                continue;
+            }
+
+            let decoded = self.filtered_range(flushed, safe_end)?;
+            out.write_all(&decoded)
+                .map_err(|_| Error::InvalidData("RAR 2.9 output write failed"))?;
+            flushed = safe_end;
+            self.trim_history(flushed, self.current_pos());
+            target = self
+                .current_pos()
+                .saturating_add(STREAM_CHUNK)
+                .min(final_target);
+        }
+        Ok(())
+    }
+
+    fn decode_until(&mut self, target: usize) -> Result<()> {
         while self.current_pos() < target {
             self.drain_pending_match(target)?;
             if self.current_pos() >= target {
@@ -127,31 +250,6 @@ impl Unpack29 {
                 self.in_lz_block = true;
             }
             self.decode_lz(target)?;
-        }
-        let out = self.filtered_range(start, target)?;
-        self.trim_history(target);
-        Ok(out)
-    }
-
-    pub fn decode_member_to(
-        &mut self,
-        input: &[u8],
-        output_size: usize,
-        out: &mut impl Write,
-    ) -> Result<()> {
-        let mut remaining = output_size;
-        let mut first = true;
-        while remaining > 0 {
-            let chunk = remaining.min(STREAM_CHUNK);
-            let decoded = if first {
-                first = false;
-                self.decode_member(input, chunk)?
-            } else {
-                self.decode_member(&[], chunk)?
-            };
-            out.write_all(&decoded)
-                .map_err(|_| Error::InvalidData("RAR 2.9 output write failed"))?;
-            remaining -= chunk;
         }
         Ok(())
     }
@@ -482,6 +580,29 @@ impl Unpack29 {
         Ok(out)
     }
 
+    fn safe_flush_end(&self, start: usize, end: usize, final_target: usize) -> Result<usize> {
+        let current = self.current_pos();
+        let mut safe_end = end;
+        for filter in &self.filters {
+            let filter_end = filter
+                .start
+                .checked_add(filter.size)
+                .ok_or(Error::InvalidData("RAR 2.9 VM filter size overflows"))?;
+            if filter.start >= safe_end || filter_end <= start {
+                continue;
+            }
+            if filter_end > final_target {
+                return Err(Error::InvalidData(
+                    "RAR 2.9 VM filter extends beyond output",
+                ));
+            }
+            if filter_end > current {
+                safe_end = safe_end.min(filter.start);
+            }
+        }
+        Ok(safe_end)
+    }
+
     fn copy_match(&mut self, length: usize, offset: usize, output_size: usize) -> Result<()> {
         let offset = if offset == 0 { 1 } else { offset };
         let current = self.current_pos();
@@ -547,8 +668,9 @@ impl Unpack29 {
             ))
     }
 
-    fn trim_history(&mut self, current_pos: usize) {
+    fn trim_history(&mut self, flushed_pos: usize, current_pos: usize) {
         let keep_from = current_pos.saturating_sub(MAX_HISTORY);
+        let keep_from = keep_from.min(flushed_pos);
         if keep_from <= self.base_offset {
             return;
         }
@@ -666,7 +788,17 @@ impl BitReader {
     }
 
     fn append(&mut self, input: &[u8]) {
+        self.compact();
         self.input.extend_from_slice(input);
+    }
+
+    fn compact(&mut self) {
+        let bytes = self.bit_pos / 8;
+        if bytes == 0 {
+            return;
+        }
+        self.input.drain(..bytes);
+        self.bit_pos -= bytes * 8;
     }
 
     fn align_byte(&mut self) {
@@ -694,10 +826,7 @@ impl BitReader {
         let mut value = 0u32;
         for i in 0..count as usize {
             let bit_index = self.bit_pos + i;
-            let byte = *self
-                .input
-                .get(bit_index / 8)
-                .ok_or(Error::InvalidData("RAR 2.9 bitstream is truncated"))?;
+            let byte = *self.input.get(bit_index / 8).ok_or(Error::NeedMoreInput)?;
             let bit = (byte >> (7 - (bit_index % 8))) & 1;
             value = (value << 1) | bit as u32;
         }
@@ -997,6 +1126,36 @@ mod tests {
         combined.extend(second);
 
         assert_eq!(combined, expected_text());
+    }
+
+    #[test]
+    fn decode_member_from_reader_accepts_incremental_input() {
+        struct TinyReader<'a> {
+            input: &'a [u8],
+        }
+
+        impl std::io::Read for TinyReader<'_> {
+            fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+                if self.input.is_empty() {
+                    return Ok(0);
+                }
+                let len = self.input.len().min(out.len()).min(3);
+                out[..len].copy_from_slice(&self.input[..len]);
+                self.input = &self.input[len..];
+                Ok(len)
+            }
+        }
+
+        let mut decoder = Unpack29::new();
+        let mut reader = TinyReader {
+            input: COMPRESSED_TEXT,
+        };
+        let mut output = Vec::new();
+        decoder
+            .decode_member_from_reader(&mut reader, 2400, &mut output)
+            .unwrap();
+
+        assert_eq!(output, expected_text());
     }
 
     fn expected_text() -> Vec<u8> {

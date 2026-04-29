@@ -19,16 +19,24 @@ impl Rar13Cipher {
 
     pub fn encrypt_in_place(mut self, data: &mut [u8]) {
         for byte in data {
-            self.advance();
-            *byte = byte.wrapping_add(self.key[0]);
+            *byte = self.encrypt_byte(*byte);
         }
     }
 
     pub fn decrypt_in_place(mut self, data: &mut [u8]) {
         for byte in data {
-            self.advance();
-            *byte = byte.wrapping_sub(self.key[0]);
+            *byte = self.decrypt_byte(*byte);
         }
+    }
+
+    pub fn encrypt_byte(&mut self, byte: u8) -> u8 {
+        self.advance();
+        byte.wrapping_add(self.key[0])
+    }
+
+    pub fn decrypt_byte(&mut self, byte: u8) -> u8 {
+        self.advance();
+        byte.wrapping_sub(self.key[0])
     }
 
     fn advance(&mut self) {

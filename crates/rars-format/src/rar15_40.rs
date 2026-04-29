@@ -3,7 +3,7 @@ use crate::error::{Error, Result};
 use crate::version::ArchiveFamily;
 use rars_codec::rar29::Unpack29;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -388,15 +388,15 @@ impl FileHeader {
             ));
         }
 
-        let packed = self.packed_data(archive)?;
+        let mut packed = archive.range_reader(self.packed_range.clone())?;
         let mut crc = Crc32::new();
         let mut crc_writer = CrcWriter {
             inner: out,
             crc: &mut crc,
         };
         decoder
-            .decode_member_to(
-                &packed,
+            .decode_member_from_reader(
+                &mut packed,
                 usize::try_from(self.unp_size)
                     .map_err(|_| Error::InvalidHeader("RAR 1.5 unpacked size overflows usize"))?,
                 &mut crc_writer,
@@ -599,6 +599,20 @@ impl Archive {
         Ok(())
     }
 
+    fn range_reader(&self, range: Range<usize>) -> Result<Box<dyn Read + '_>> {
+        match &self.source {
+            ArchiveSource::Memory(data) => {
+                let data = data.get(range).ok_or(Error::TooShort)?;
+                Ok(Box::new(Cursor::new(data)))
+            }
+            ArchiveSource::File(path) => {
+                let mut file = File::open(path.as_ref())?;
+                file.seek(SeekFrom::Start(range.start as u64))?;
+                Ok(Box::new(file.take(range.len() as u64)))
+            }
+        }
+    }
+
     pub fn files(&self) -> impl Iterator<Item = &FileHeader> {
         self.blocks.iter().filter_map(|block| match block {
             Block::File(file) => Some(file),
@@ -640,20 +654,14 @@ impl Archive {
         }
 
         let mut out = Vec::new();
-        let mut rar29 = Unpack29::new();
-        let shared_rar29 = self.main.is_solid();
+        let mut session = DecoderSession::new(self.main.is_solid());
         for file in self.files() {
             if file.is_split_before() || file.is_split_after() {
                 return Err(Error::InvalidHeader(
                     "RAR 1.5 split entry requires multivolume extraction",
                 ));
             }
-            if shared_rar29 && !file.is_stored() {
-                out.push(extract_with_rar29(self, file, &mut rar29)?);
-            } else {
-                rar29 = Unpack29::new();
-                out.push(file.extract(self)?);
-            }
+            out.push(session.extract_file(self, file)?);
         }
         Ok(out)
     }
@@ -668,8 +676,7 @@ impl Archive {
             ));
         }
 
-        let mut rar29 = Unpack29::new();
-        let shared_rar29 = self.main.is_solid();
+        let mut session = DecoderSession::new(self.main.is_solid());
         for file in self.files() {
             if file.is_split_before() || file.is_split_after() {
                 return Err(Error::InvalidHeader(
@@ -684,11 +691,8 @@ impl Archive {
             let mut writer = open(&meta)?;
             if file.is_stored() {
                 file.write_stored_to(self, &mut writer)?;
-            } else if shared_rar29 {
-                file.write_rar29_to(self, &mut rar29, &mut writer)?;
             } else {
-                rar29 = Unpack29::new();
-                file.write_rar29_to(self, &mut rar29, &mut writer)?;
+                session.write_file_to(self, file, &mut writer)?;
             }
         }
         Ok(())
@@ -707,31 +711,51 @@ impl Archive {
     }
 }
 
-fn extract_with_rar29(
-    archive: &Archive,
-    file: &FileHeader,
-    decoder: &mut Unpack29,
-) -> Result<ExtractedEntry> {
-    if file.is_directory() {
-        return Ok(ExtractedEntry {
+struct DecoderSession {
+    rar29: Unpack29,
+    solid: bool,
+}
+
+impl DecoderSession {
+    fn new(solid: bool) -> Self {
+        Self {
+            rar29: Unpack29::new(),
+            solid,
+        }
+    }
+
+    fn extract_file(&mut self, archive: &Archive, file: &FileHeader) -> Result<ExtractedEntry> {
+        if file.is_directory() || file.is_stored() {
+            return file.extract(archive);
+        }
+        self.prepare_for(file);
+        let data = file.unpacked_data_with_rar29(archive, &mut self.rar29)?;
+        file.verify_crc32(&data)?;
+        Ok(ExtractedEntry {
             name: file.name.clone(),
-            data: Vec::new(),
+            data,
             file_time: file.file_time,
             attr: file.attr,
             host_os: file.host_os,
-            is_directory: true,
-        });
+            is_directory: false,
+        })
     }
-    let data = file.unpacked_data_with_rar29(archive, decoder)?;
-    file.verify_crc32(&data)?;
-    Ok(ExtractedEntry {
-        name: file.name.clone(),
-        data,
-        file_time: file.file_time,
-        attr: file.attr,
-        host_os: file.host_os,
-        is_directory: false,
-    })
+
+    fn write_file_to(
+        &mut self,
+        archive: &Archive,
+        file: &FileHeader,
+        out: &mut impl Write,
+    ) -> Result<()> {
+        self.prepare_for(file);
+        file.write_rar29_to(archive, &mut self.rar29, out)
+    }
+
+    fn prepare_for(&mut self, file: &FileHeader) {
+        if !self.solid && !file.is_stored() {
+            self.rar29 = Unpack29::new();
+        }
+    }
 }
 
 pub fn extract_volumes(volumes: &[Archive]) -> Result<Vec<ExtractedEntry>> {

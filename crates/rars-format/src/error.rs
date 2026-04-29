@@ -64,6 +64,7 @@ impl From<rars_codec::Error> for Error {
     fn from(error: rars_codec::Error) -> Self {
         match error {
             rars_codec::Error::InvalidData(message) => Self::InvalidHeader(message),
+            rars_codec::Error::NeedMoreInput => Self::InvalidHeader("codec input is truncated"),
         }
     }
 }
