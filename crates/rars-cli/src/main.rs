@@ -1,7 +1,7 @@
-use rars::rar13::{self, Archive, ExtractedEntry, FileEntry, StoredEntry, WriterOptions};
+use rars::rar13::{self, Archive, FileEntry, StoredEntry, WriterOptions};
 use rars::{
-    detect_archive_family, Archive as DetectedArchive, ArchiveFamily, ArchiveReader,
-    ArchiveVersion, Error, FeatureSet,
+    detect_archive_family, Archive as DetectedArchive, ArchiveReader, ArchiveVersion, Error,
+    ExtractedEntry, FeatureSet,
 };
 use std::env;
 use std::fs;
@@ -55,41 +55,41 @@ fn cmd_info(args: &[String]) -> CliResult<()> {
             )
         })?;
         println!("{path}: {:?} at offset {}", sig.family, sig.offset);
-        if sig.family == ArchiveFamily::Rar13 {
-            let archive = Archive::parse(&bytes)
-                .map_err(|err| format!("failed to parse archive '{path}': {err}"))?;
-            println!(
-                "  rar13 main: flags={:#04x} head_size={} sfx_offset={}",
-                archive.main.flags, archive.main.head_size, archive.sfx_offset
-            );
-            if archive.main.has_archive_comment() {
+        match ArchiveReader::read(&bytes)
+            .map_err(|err| format!("failed to parse archive '{path}': {err}"))?
+        {
+            DetectedArchive::Rar13(archive) => {
                 println!(
-                    "  archive comment extension: {} bytes{}",
-                    archive.main.extra.len(),
-                    if archive.main.has_packed_comment() {
-                        " (packed)"
-                    } else {
-                        ""
-                    }
+                    "  rar13 main: flags={:#04x} head_size={} sfx_offset={}",
+                    archive.main.flags, archive.main.head_size, archive.sfx_offset
                 );
-                if let Some(comment) = archive
-                    .archive_comment()
-                    .map_err(|err| format!("failed to decode archive comment '{path}': {err}"))?
-                {
-                    println!("  comment: {}", String::from_utf8_lossy(&comment));
+                if archive.main.has_archive_comment() {
+                    println!(
+                        "  archive comment extension: {} bytes{}",
+                        archive.main.extra.len(),
+                        if archive.main.has_packed_comment() {
+                            " (packed)"
+                        } else {
+                            ""
+                        }
+                    );
+                    if let Some(comment) = archive.archive_comment().map_err(|err| {
+                        format!("failed to decode archive comment '{path}': {err}")
+                    })? {
+                        println!("  comment: {}", String::from_utf8_lossy(&comment));
+                    }
                 }
-            }
-            if let Some(av) = archive.authenticity_verification().map_err(|err| {
-                format!("failed to parse authenticity verification in '{path}': {err}")
-            })? {
-                println!(
+                if let Some(av) = archive.authenticity_verification().map_err(|err| {
+                    format!("failed to parse authenticity verification in '{path}': {err}")
+                })? {
+                    println!(
                     "  authenticity verification: structural size={} cipher_body={} status=not-cryptographically-verified",
                     av.size,
                     av.cipher_body.len()
                 );
-            }
-            for (index, entry) in archive.entries.iter().enumerate() {
-                println!(
+                }
+                for (index, entry) in archive.entries.iter().enumerate() {
+                    println!(
                     "  #{index}: {} pack={} unp={} method={} flags={:#04x} attr={:#04x} checksum={:#06x}",
                     entry.name_lossy(),
                     entry.header.pack_size,
@@ -99,13 +99,44 @@ fn cmd_info(args: &[String]) -> CliResult<()> {
                     entry.header.file_attr,
                     entry.header.file_crc
                 );
-                if let Some(comment) = entry.file_comment().map_err(|err| {
-                    format!(
-                        "failed to decode file comment '{}' in '{path}': {err}",
-                        entry.name_lossy()
-                    )
-                })? {
-                    println!("    comment: {}", String::from_utf8_lossy(&comment));
+                    if let Some(comment) = entry.file_comment().map_err(|err| {
+                        format!(
+                            "failed to decode file comment '{}' in '{path}': {err}",
+                            entry.name_lossy()
+                        )
+                    })? {
+                        println!("    comment: {}", String::from_utf8_lossy(&comment));
+                    }
+                }
+            }
+            DetectedArchive::Rar15To40(archive) => {
+                println!(
+                    "  rar15-40 main: flags={:#06x} head_size={} sfx_offset={}",
+                    archive.main.flags, archive.main.head_size, archive.sfx_offset
+                );
+                for (index, file) in archive.files().enumerate() {
+                    println!(
+                        "  #{index}: {} pack={} unp={} method={:#04x} flags={:#06x} attr={:#010x} crc={:#010x} ver={}",
+                        file.name_lossy(),
+                        file.pack_size,
+                        file.unp_size,
+                        file.method,
+                        file.block.flags,
+                        file.attr,
+                        file.file_crc,
+                        file.unp_ver
+                    );
+                }
+                for sub in archive.new_subs() {
+                    println!(
+                        "  subblock: {:?} {} pack={} unp={} method={:#04x} flags={:#06x}",
+                        sub.kind,
+                        sub.name_lossy(),
+                        sub.file.pack_size,
+                        sub.file.unp_size,
+                        sub.file.method,
+                        sub.file.block.flags
+                    );
                 }
             }
         }
@@ -120,13 +151,16 @@ fn cmd_test(args: &[String]) -> CliResult<()> {
         return Err("usage: rars test [--password <password>] <archive> [parts...]".into());
     }
 
-    let archives = parse_rar13_archives(&paths)?;
-    let extracted = if archives.len() == 1 {
-        archives[0]
+    let extracted = if paths.len() == 1 {
+        let bytes = read_file(Path::new(&paths[0]), "archive")?;
+        ArchiveReader::read(&bytes)
+            .map_err(|err| format!("failed to parse archive '{}': {err}", paths[0]))?
             .extract(password.as_deref())
             .map_err(|err| format!("failed to test archive '{}': {err}", paths[0]))?
     } else {
+        let archives = parse_rar13_archives(&paths)?;
         rar13::extract_volumes(&archives, password.as_deref())
+            .map(|entries| entries.into_iter().map(Into::into).collect())
             .map_err(|err| format!("failed to test volume set '{}': {err}", paths.join(", ")))?
     };
 
@@ -147,13 +181,16 @@ fn cmd_extract(args: &[String]) -> CliResult<()> {
     }
     let out_dir = PathBuf::from(paths.pop().expect("outdir"));
 
-    let archives = parse_rar13_archives(&paths)?;
-    let extracted = if archives.len() == 1 {
-        archives[0]
+    let extracted = if paths.len() == 1 {
+        let bytes = read_file(Path::new(&paths[0]), "archive")?;
+        ArchiveReader::read(&bytes)
+            .map_err(|err| format!("failed to parse archive '{}': {err}", paths[0]))?
             .extract(password.as_deref())
             .map_err(|err| format!("failed to extract archive '{}': {err}", paths[0]))?
     } else {
+        let archives = parse_rar13_archives(&paths)?;
         rar13::extract_volumes(&archives, password.as_deref())
+            .map(|entries| entries.into_iter().map(Into::into).collect())
             .map_err(|err| format!("failed to extract volume set '{}': {err}", paths.join(", ")))?
     };
 
@@ -353,6 +390,12 @@ fn parse_rar13_archives(paths: &[String]) -> CliResult<Vec<Archive>> {
                 .map_err(|err| format!("failed to parse archive '{path}': {err}"))?
             {
                 DetectedArchive::Rar13(archive) => archive,
+                DetectedArchive::Rar15To40(_) => {
+                    return Err(format!(
+                        "failed to parse archive '{path}': RAR 1.5-4.x extraction is not implemented"
+                    )
+                    .into());
+                }
             },
         );
     }

@@ -10,6 +10,12 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
+fn fixture_rar15_40(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../rars-format/tests/fixtures/rar15_40")
+        .join(name)
+}
+
 fn scratch(name: &str) -> PathBuf {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -71,6 +77,48 @@ fn info_reports_inline_av_shape_fixture() {
     let stdout = stdout(&output);
     assert!(stdout.contains("authenticity verification: structural"));
     assert!(stdout.contains("status=not-cryptographically-verified"));
+}
+
+#[test]
+fn info_lists_rar15_40_metadata() {
+    let output = rars()
+        .arg("info")
+        .arg(fixture_rar15_40("rar300/with_comment_rar300.rar"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let stdout = stdout(&output);
+    assert!(stdout.contains("Rar15To40"));
+    assert!(stdout.contains("rar15-40 main"));
+    assert!(stdout.contains("hello.txt"));
+    assert!(stdout.contains("subblock: ArchiveComment CMT"));
+}
+
+#[test]
+fn test_verifies_rar15_40_stored_fixture() {
+    let output = rars()
+        .arg("test")
+        .arg(fixture_rar15_40("rar300/with_comment_rar300.rar"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(stdout(&output).contains("OK hello.txt"));
+}
+
+#[test]
+fn extracts_rar15_40_stored_fixture() {
+    let out_dir = scratch("extract-rar15-40");
+    let output = rars()
+        .arg("x")
+        .arg(fixture_rar15_40("rar300/with_comment_rar300.rar"))
+        .arg(&out_dir)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(
+        fs::read(out_dir.join("hello.txt")).unwrap(),
+        b"Hello, RAR 3.x fixture world.\n"
+    );
 }
 
 #[test]

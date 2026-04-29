@@ -64,7 +64,10 @@ WinRAR-like heuristics.
    RAR 1.3/1.4 vertical slice was proven: `rars-codec` owns Unpack15,
    `rars-crypto` owns the legacy RAR 1.3 cipher, `rars-format` owns container
    parsing/writing, and `rars-testkit` is scaffolded for reference-tool checks.
-9. Expand to RAR 1.5-4.x container, then RAR 5.0.
+9. [in progress] Expand to RAR 1.5-4.x container, then RAR 5.0. The first
+   RAR 1.5-4.x reader slice parses marker/main/file/end blocks, RAR 3.x
+   `NEWSUB` service headers, solid and volume flags, and RAR 4.x extended-time
+   header payloads.
 
 ## Current RAR 1.3/1.4 status
 
@@ -132,6 +135,37 @@ Write-side gaps:
 
 Recommended next task after compaction: decide whether to polish RAR 1.3/1.4
 error/reporting edges or move on to the RAR 1.5-4.x container slice.
+
+## Current RAR 1.5-4.x status
+
+The first reader slice is implemented:
+
+- `rars-format::rar15_40::Archive::parse` handles `Rar!\x1a\x07\x00` marker
+  blocks, main headers, file headers, `NEWSUB` service headers, end headers,
+  and unknown-block skipping by `HEAD_SIZE + ADD_SIZE`.
+- Parsed metadata includes file names, packed/unpacked sizes, host OS, CRC32,
+  DOS mtime, method, `UNP_VER`, attributes, salt presence, and raw extended-time
+  bytes.
+- Stored files can be extracted through the public facade and CLI, with full
+  file-data CRC32 verification.
+- Non-AV/SIGN block headers are validated with `HEAD_CRC = CRC32(header[2..]) &
+  0xFFFF`.
+- `NEWSUB` service headers are classified at parse time. The current typed
+  cases are archive comments (`CMT`) and recovery records (`RR`), with other
+  names preserved as unknown service headers.
+- Fixture coverage includes RAR 3.00 archive comments (`NEWSUB` name `CMT`),
+  stored file metadata, solid archive flags, old/new multivolume numbering,
+  split-after flags, RAR 4.20 extended-time headers, corrupt header checksum
+  rejection, and corrupt stored-payload CRC32 rejection.
+- The public facade dispatches `ArchiveReader::read` to RAR 1.5-4.x parsing,
+  and `rars info`, `rars test`, and `rars x` work for stored RAR 1.5-4.x
+  archives.
+
+Next RAR 1.5-4.x tasks:
+
+- Decode RAR 3.x archive-comment payloads once the Unpack20/29 codec exists.
+- Add stored-file multivolume reassembly.
+- Start Unpack20/29 decompression in `rars-codec`.
 
 ## Testing strategy
 

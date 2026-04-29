@@ -17,6 +17,10 @@ pub enum Error {
         expected: u16,
         actual: u16,
     },
+    Crc32Mismatch {
+        expected: u32,
+        actual: u32,
+    },
 }
 
 impl std::fmt::Display for Error {
@@ -34,6 +38,12 @@ impl std::fmt::Display for Error {
                 write!(
                     f,
                     "checksum mismatch: expected {expected:#06x}, got {actual:#06x}"
+                )
+            }
+            Self::Crc32Mismatch { expected, actual } => {
+                write!(
+                    f,
+                    "checksum mismatch: expected {expected:#010x}, got {actual:#010x}"
                 )
             }
         }
