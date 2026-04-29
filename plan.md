@@ -153,18 +153,20 @@ The first reader slice is implemented:
 - `NEWSUB` service headers are classified at parse time. The current typed
   cases are archive comments (`CMT`) and recovery records (`RR`), with other
   names preserved as unknown service headers.
+- Stored split files can be reassembled across RAR 3.x volume sets, including
+  old-style `.r00` numbering, with final full-data CRC32 verification.
 - Fixture coverage includes RAR 3.00 archive comments (`NEWSUB` name `CMT`),
   stored file metadata, solid archive flags, old/new multivolume numbering,
   split-after flags, RAR 4.20 extended-time headers, corrupt header checksum
-  rejection, and corrupt stored-payload CRC32 rejection.
+  rejection, corrupt stored-payload CRC32 rejection, incomplete stored-volume
+  rejection, and compressed-volume rejection pending the codec.
 - The public facade dispatches `ArchiveReader::read` to RAR 1.5-4.x parsing,
   and `rars info`, `rars test`, and `rars x` work for stored RAR 1.5-4.x
-  archives.
+  archives, including stored volume sets when all parts are supplied in order.
 
 Next RAR 1.5-4.x tasks:
 
 - Decode RAR 3.x archive-comment payloads once the Unpack20/29 codec exists.
-- Add stored-file multivolume reassembly.
 - Start Unpack20/29 decompression in `rars-codec`.
 
 ## Testing strategy

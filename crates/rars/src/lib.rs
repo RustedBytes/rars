@@ -94,6 +94,45 @@ impl ArchiveReader {
     }
 }
 
+pub fn extract_volumes(
+    archives: &[Archive],
+    password: Option<&[u8]>,
+) -> Result<Vec<ExtractedEntry>> {
+    let Some(first) = archives.first() else {
+        return Err(Error::InvalidHeader("volume set is empty"));
+    };
+
+    match first.family() {
+        ArchiveFamily::Rar13 => {
+            let mut typed = Vec::with_capacity(archives.len());
+            for archive in archives {
+                match archive {
+                    Archive::Rar13(archive) => typed.push(archive.clone()),
+                    Archive::Rar15To40(_) => {
+                        return Err(Error::InvalidHeader("mixed archive families in volume set"));
+                    }
+                }
+            }
+            rar13::extract_volumes(&typed, password)
+                .map(|entries| entries.into_iter().map(Into::into).collect())
+        }
+        ArchiveFamily::Rar15To40 => {
+            let mut typed = Vec::with_capacity(archives.len());
+            for archive in archives {
+                match archive {
+                    Archive::Rar15To40(archive) => typed.push(archive.clone()),
+                    Archive::Rar13(_) => {
+                        return Err(Error::InvalidHeader("mixed archive families in volume set"));
+                    }
+                }
+            }
+            rar15_40::extract_volumes(&typed)
+                .map(|entries| entries.into_iter().map(Into::into).collect())
+        }
+        ArchiveFamily::Rar50Plus => Err(Error::UnsupportedVersion(ArchiveVersion::Rar50)),
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ArchiveWriter {
     options: rar13::WriterOptions,

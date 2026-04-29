@@ -1,7 +1,7 @@
-use rars::rar13::{self, Archive, FileEntry, StoredEntry, WriterOptions};
+use rars::rar13::{self, FileEntry, StoredEntry, WriterOptions};
 use rars::{
-    detect_archive_family, Archive as DetectedArchive, ArchiveReader, ArchiveVersion, Error,
-    ExtractedEntry, FeatureSet,
+    detect_archive_family, extract_volumes, Archive as DetectedArchive, ArchiveReader,
+    ArchiveVersion, Error, ExtractedEntry, FeatureSet,
 };
 use std::env;
 use std::fs;
@@ -158,9 +158,8 @@ fn cmd_test(args: &[String]) -> CliResult<()> {
             .extract(password.as_deref())
             .map_err(|err| format!("failed to test archive '{}': {err}", paths[0]))?
     } else {
-        let archives = parse_rar13_archives(&paths)?;
-        rar13::extract_volumes(&archives, password.as_deref())
-            .map(|entries| entries.into_iter().map(Into::into).collect())
+        let archives = parse_archives(&paths)?;
+        extract_volumes(&archives, password.as_deref())
             .map_err(|err| format!("failed to test volume set '{}': {err}", paths.join(", ")))?
     };
 
@@ -188,9 +187,8 @@ fn cmd_extract(args: &[String]) -> CliResult<()> {
             .extract(password.as_deref())
             .map_err(|err| format!("failed to extract archive '{}': {err}", paths[0]))?
     } else {
-        let archives = parse_rar13_archives(&paths)?;
-        rar13::extract_volumes(&archives, password.as_deref())
-            .map(|entries| entries.into_iter().map(Into::into).collect())
+        let archives = parse_archives(&paths)?;
+        extract_volumes(&archives, password.as_deref())
             .map_err(|err| format!("failed to extract volume set '{}': {err}", paths.join(", ")))?
     };
 
@@ -381,22 +379,13 @@ fn parse_password(args: &[String]) -> CliResult<(Option<Vec<u8>>, Vec<String>)> 
     Ok((password, rest))
 }
 
-fn parse_rar13_archives(paths: &[String]) -> CliResult<Vec<Archive>> {
+fn parse_archives(paths: &[String]) -> CliResult<Vec<DetectedArchive>> {
     let mut archives = Vec::new();
     for path in paths {
         let bytes = read_file(Path::new(path), "archive")?;
         archives.push(
-            match ArchiveReader::read(&bytes)
-                .map_err(|err| format!("failed to parse archive '{path}': {err}"))?
-            {
-                DetectedArchive::Rar13(archive) => archive,
-                DetectedArchive::Rar15To40(_) => {
-                    return Err(format!(
-                        "failed to parse archive '{path}': RAR 1.5-4.x extraction is not implemented"
-                    )
-                    .into());
-                }
-            },
+            ArchiveReader::read(&bytes)
+                .map_err(|err| format!("failed to parse archive '{path}': {err}"))?,
         );
     }
     Ok(archives)

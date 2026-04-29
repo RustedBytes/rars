@@ -1,4 +1,4 @@
-use rars_format::rar15_40::{crc32, Archive, Block, NewSubKind};
+use rars_format::rar15_40::{crc32, extract_volumes, Archive, Block, NewSubKind};
 use rars_format::{detect_archive_family, ArchiveFamily, Error};
 use std::path::{Path, PathBuf};
 
@@ -120,6 +120,59 @@ fn rejects_split_rar15_40_entries_until_volume_reassembly_exists() {
 }
 
 #[test]
+fn extracts_stored_rar300_old_numbered_volume_set() {
+    let archives: Vec<_> = [
+        "rar300/stored_multivol_rar300.rar",
+        "rar300/stored_multivol_rar300.r00",
+        "rar300/stored_multivol_rar300.r01",
+        "rar300/stored_multivol_rar300.r02",
+    ]
+    .into_iter()
+    .map(|name| Archive::parse(&std::fs::read(fixture(name)).unwrap()).unwrap())
+    .collect();
+
+    let extracted = extract_volumes(&archives).unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].name, b"stored-volume.txt");
+    assert_eq!(extracted[0].data, expected_stored_volume_payload());
+    assert_eq!(crc32(&extracted[0].data), 0x4a832ebd);
+}
+
+#[test]
+fn rejects_incomplete_rar300_stored_volume_set() {
+    let archives: Vec<_> = [
+        "rar300/stored_multivol_rar300.rar",
+        "rar300/stored_multivol_rar300.r00",
+    ]
+    .into_iter()
+    .map(|name| Archive::parse(&std::fs::read(fixture(name)).unwrap()).unwrap())
+    .collect();
+
+    assert!(matches!(
+        extract_volumes(&archives),
+        Err(Error::InvalidHeader("RAR 1.5 split entry is incomplete"))
+    ));
+}
+
+#[test]
+fn rejects_compressed_rar300_volume_set_until_codec_exists() {
+    let archives: Vec<_> = [
+        "rar300/multivol_oldnaming_rar300.rar",
+        "rar300/multivol_oldnaming_rar300.r00",
+    ]
+    .into_iter()
+    .map(|name| Archive::parse(&std::fs::read(fixture(name)).unwrap()).unwrap())
+    .collect();
+
+    assert!(matches!(
+        extract_volumes(&archives),
+        Err(Error::InvalidHeader(
+            "RAR 1.5 compressed file extraction is not implemented"
+        ))
+    ));
+}
+
+#[test]
 fn parses_rar300_solid_flags() {
     let bytes = std::fs::read(fixture("rar300/solid_rar300.rar")).unwrap();
     let archive = Archive::parse(&bytes).unwrap();
@@ -172,4 +225,10 @@ fn parses_end_of_archive_block() {
 fn crc32_matches_standard_check_value() {
     assert_eq!(crc32(b""), 0x00000000);
     assert_eq!(crc32(b"123456789"), 0xcbf43926);
+}
+
+fn expected_stored_volume_payload() -> Vec<u8> {
+    "RAR 3.00 stored multivolume fixture line.\n"
+        .repeat(80)
+        .into_bytes()
 }

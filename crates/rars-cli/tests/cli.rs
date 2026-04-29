@@ -165,6 +165,39 @@ fn test_reassembles_compressed_multivolume_fixture() {
 }
 
 #[test]
+fn test_reassembles_rar15_40_stored_multivolume_fixture() {
+    let output = rars()
+        .arg("test")
+        .arg(fixture_rar15_40("rar300/stored_multivol_rar300.rar"))
+        .arg(fixture_rar15_40("rar300/stored_multivol_rar300.r00"))
+        .arg(fixture_rar15_40("rar300/stored_multivol_rar300.r01"))
+        .arg(fixture_rar15_40("rar300/stored_multivol_rar300.r02"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(stdout(&output).contains("OK stored-volume.txt"));
+}
+
+#[test]
+fn extracts_rar15_40_stored_multivolume_fixture() {
+    let out_dir = scratch("extract-rar15-40-multivol");
+    let output = rars()
+        .arg("x")
+        .arg(fixture_rar15_40("rar300/stored_multivol_rar300.rar"))
+        .arg(fixture_rar15_40("rar300/stored_multivol_rar300.r00"))
+        .arg(fixture_rar15_40("rar300/stored_multivol_rar300.r01"))
+        .arg(fixture_rar15_40("rar300/stored_multivol_rar300.r02"))
+        .arg(&out_dir)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(
+        fs::read(out_dir.join("stored-volume.txt")).unwrap(),
+        expected_rar15_40_stored_volume_payload()
+    );
+}
+
+#[test]
 fn test_verifies_compressed_fixture() {
     let output = rars()
         .arg("test")
@@ -675,4 +708,10 @@ fn stdout(output: &std::process::Output) -> String {
 
 fn stderr(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+fn expected_rar15_40_stored_volume_payload() -> Vec<u8> {
+    "RAR 3.00 stored multivolume fixture line.\n"
+        .repeat(80)
+        .into_bytes()
 }

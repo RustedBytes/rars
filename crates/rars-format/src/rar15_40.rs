@@ -127,6 +127,17 @@ pub struct ExtractedEntry {
     pub is_directory: bool,
 }
 
+#[derive(Debug)]
+struct PendingSplit {
+    name: Vec<u8>,
+    data: Vec<u8>,
+    file_time: u32,
+    attr: u32,
+    host_os: u8,
+    method: u8,
+    encrypted: bool,
+}
+
 impl FileHeader {
     pub fn name_lossy(&self) -> String {
         String::from_utf8_lossy(&self.name).into_owned()
@@ -316,6 +327,124 @@ impl Archive {
         }
         Ok(out)
     }
+}
+
+pub fn extract_volumes(volumes: &[Archive]) -> Result<Vec<ExtractedEntry>> {
+    if volumes.is_empty() {
+        return Err(Error::InvalidHeader("RAR 1.5 volume set is empty"));
+    }
+
+    let mut out = Vec::new();
+    let mut pending: Option<PendingSplit> = None;
+    for archive in volumes {
+        if archive.main.has_encrypted_headers() {
+            return Err(Error::InvalidHeader(
+                "RAR 1.5 encrypted header extraction is not implemented",
+            ));
+        }
+
+        for file in archive.files() {
+            match (
+                pending.is_some(),
+                file.is_split_before(),
+                file.is_split_after(),
+            ) {
+                (false, false, false) => out.push(file.extract_stored()?),
+                (false, false, true) => {
+                    validate_split_stored_fragment(file)?;
+                    pending = Some(PendingSplit {
+                        name: file.name.clone(),
+                        data: file.packed_data.clone(),
+                        file_time: file.file_time,
+                        attr: file.attr,
+                        host_os: file.host_os,
+                        method: file.method,
+                        encrypted: file.is_encrypted(),
+                    });
+                }
+                (true, true, true) => {
+                    let current = pending.as_mut().expect("pending split");
+                    validate_split_continuation(current, file)?;
+                    current.data.extend_from_slice(&file.packed_data);
+                }
+                (true, true, false) => {
+                    let mut completed = pending.take().expect("pending split");
+                    validate_split_continuation(&completed, file)?;
+                    completed.data.extend_from_slice(&file.packed_data);
+                    let expected_len = usize::try_from(file.unp_size).map_err(|_| {
+                        Error::InvalidHeader("RAR 1.5 split unpacked size overflows usize")
+                    })?;
+                    if completed.data.len() != expected_len {
+                        return Err(Error::InvalidHeader(
+                            "RAR 1.5 split stored file has wrong reassembled size",
+                        ));
+                    }
+                    file.verify_crc32(&completed.data)?;
+                    out.push(ExtractedEntry {
+                        name: completed.name,
+                        data: completed.data,
+                        file_time: completed.file_time,
+                        attr: completed.attr,
+                        host_os: completed.host_os,
+                        is_directory: false,
+                    });
+                }
+                (false, true, _) => {
+                    return Err(Error::InvalidHeader(
+                        "RAR 1.5 split entry is missing its first part",
+                    ));
+                }
+                (true, false, _) => {
+                    return Err(Error::InvalidHeader(
+                        "RAR 1.5 split entry is interrupted by a regular entry",
+                    ));
+                }
+            }
+        }
+    }
+
+    if pending.is_some() {
+        return Err(Error::InvalidHeader("RAR 1.5 split entry is incomplete"));
+    }
+
+    Ok(out)
+}
+
+fn validate_split_stored_fragment(file: &FileHeader) -> Result<()> {
+    if file.is_directory() {
+        return Err(Error::InvalidHeader(
+            "RAR 1.5 split directory entry is invalid",
+        ));
+    }
+    if file.is_encrypted() {
+        return Err(Error::InvalidHeader(
+            "RAR 1.5 encrypted file extraction is not implemented",
+        ));
+    }
+    if !file.is_stored() {
+        return Err(Error::InvalidHeader(
+            "RAR 1.5 compressed file extraction is not implemented",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_split_continuation(pending: &PendingSplit, file: &FileHeader) -> Result<()> {
+    validate_split_stored_fragment(file)?;
+    if file.name != pending.name {
+        return Err(Error::InvalidHeader("RAR 1.5 split entry name changed"));
+    }
+    if file.method != pending.method {
+        return Err(Error::InvalidHeader(
+            "RAR 1.5 split entry compression method changed",
+        ));
+    }
+    if file.is_encrypted() != pending.encrypted {
+        return Err(Error::InvalidHeader(
+            "RAR 1.5 split entry encryption flag changed",
+        ));
+    }
+    Ok(())
 }
 
 fn classify_new_sub(name: &[u8]) -> NewSubKind {
