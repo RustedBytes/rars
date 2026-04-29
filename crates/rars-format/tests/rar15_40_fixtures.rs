@@ -129,7 +129,24 @@ fn rejects_corrupt_rar15_40_stored_payload_checksum() {
 fn rejects_large_solid_rar300_until_table_edge_case_is_fixed() {
     let bytes = std::fs::read(fixture("rar300/solid_rar300.rar")).unwrap();
     let archive = Archive::parse(&bytes).unwrap();
+    let files: Vec<_> = archive.files().collect();
 
+    assert!(archive.main.is_solid());
+    assert_eq!(files.len(), 3);
+    assert_eq!(files[0].name, b"hello.txt");
+    assert_eq!(files[1].name, b"tiny.txt");
+    assert_eq!(files[2].name, b"bigtext_64k.bin");
+    assert_eq!(files[0].pack_size, 45);
+    assert_eq!(files[1].pack_size, 3);
+    assert_eq!(files[2].pack_size, 9_753);
+    assert_eq!(files[0].unp_size, 30);
+    assert_eq!(files[1].unp_size, 9);
+    assert_eq!(files[2].unp_size, 65_536);
+    assert!(!files[0].is_solid());
+    assert!(files[1].is_solid());
+    assert!(files[2].is_solid());
+    assert!(files.iter().all(|file| file.method == 0x33));
+    assert!(files.iter().all(|file| file.unp_ver == 29));
     assert!(matches!(
         archive.extract(),
         Err(Error::InvalidHeader("RAR 2.9 bitstream is truncated"))
