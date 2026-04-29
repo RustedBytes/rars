@@ -48,6 +48,8 @@ Keep this section short. Detailed behavioural claims belong in tests.
   common RAR 2.9/3.x Unpack29 members. Current Unpack29 coverage includes
   LZ-mode members, a native Rust PPMd text fixture, and the standard
   E8/E8E9/DELTA/ITANIUM/RGB/AUDIO native RARVM filters.
+  Current Unpack20 coverage includes plain LZ, 2-channel audio, solid member
+  state carry-over, and a larger LZ history/table-stress fixture.
 - RAR 3.x header-encrypted archives are detected from `MHD_PASSWORD` and
   rejected with a clear unsupported-feature error before encrypted block bytes
   are parsed.
@@ -61,7 +63,8 @@ Keep this section short. Detailed behavioural claims belong in tests.
 ### 1. RAR 1.5-4.x Decoder Coverage
 
 - Finish Unpack20:
-  - Add solid/multiblock fixture coverage for Unpack20.
+  - Add an explicitly observed multiblock/table-refresh fixture for Unpack20
+    if RAR 2.50 can be induced to emit one.
   - Add more audio fixtures if examples with 1, 3, or 4 channels become
     available; current coverage pins normal 2-channel RAR 2.50 audio blocks.
 - Broaden PPMd coverage for RAR 2.9+:
@@ -130,7 +133,7 @@ Keep this section short. Detailed behavioural claims belong in tests.
 - Add failing tests before changing format or codec behaviour.
 - Add coverage for:
   - RAR 1.54 multi-file and multivolume fixtures,
-  - RAR 2.0 solid/multiblock fixtures,
+  - RAR 2.0 explicitly observed multiblock fixtures,
   - RAR 3.x PPMd,
   - RAR 3.x encrypted file/header cases,
   - RAR 5 stored, compressed, encrypted, service-heavy, and recovery cases.

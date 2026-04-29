@@ -95,6 +95,7 @@ impl Unpack20 {
             Error::NeedMoreInput => Error::InvalidData("RAR 2.0 bitstream is truncated"),
             error => error,
         })?;
+        self.read_last_tables()?;
         let out = self.raw_range(start, target)?.to_vec();
         self.trim_history(target, target);
         Ok(out)
@@ -146,6 +147,17 @@ impl Unpack20 {
                 Err(error) => return Err(error),
             }
         }
+
+        loop {
+            let read = input
+                .read(&mut buffer)
+                .map_err(|_| Error::InvalidData("RAR 2.0 input read failed"))?;
+            if read == 0 {
+                break;
+            }
+            self.bits.append(&buffer[..read]);
+        }
+        self.read_last_tables()?;
 
         let decoded = self.raw_range(start, target)?;
         out.write_all(decoded)
@@ -259,7 +271,10 @@ impl Unpack20 {
                 0..=255 => self.output.push(symbol as u8),
                 256 => {
                     if self.last_length != 0 {
-                        self.copy_match(self.last_length, self.last_offset, output_size)?;
+                        let length = self.last_length;
+                        let offset = self.last_offset;
+                        self.push_old_offset(offset);
+                        self.copy_match(length, offset, output_size)?;
                     }
                 }
                 257..=260 => {
@@ -282,7 +297,7 @@ impl Unpack20 {
                     if offset >= 0x40000 {
                         length += 1;
                     }
-                    self.rotate_old_offset(index);
+                    self.push_old_offset(offset);
                     self.last_offset = offset;
                     self.last_length = length;
                     self.copy_match(length, offset, output_size)?;
@@ -293,6 +308,7 @@ impl Unpack20 {
                     if SHORT_BITS[index] != 0 {
                         offset += self.bits.read_bits(SHORT_BITS[index])? as usize;
                     }
+                    self.push_old_offset(offset);
                     self.last_offset = offset;
                     self.last_length = 2;
                     self.copy_match(2, offset, output_size)?;
@@ -445,19 +461,27 @@ impl Unpack20 {
         self.copy_match(length, offset, output_size)
     }
 
+    fn read_last_tables(&mut self) -> Result<()> {
+        if self.bits.remaining_bytes_from_current() < 5 {
+            return Ok(());
+        }
+        if self.audio_block {
+            if self.audio_tables[self.cur_channel].decode(&mut self.bits)? == 256 {
+                self.read_tables()?;
+                self.in_block = true;
+            }
+        } else if self.main.decode(&mut self.bits)? == 269 {
+            self.read_tables()?;
+            self.in_block = true;
+        }
+        Ok(())
+    }
+
     fn push_old_offset(&mut self, offset: usize) {
         self.old_offsets[3] = self.old_offsets[2];
         self.old_offsets[2] = self.old_offsets[1];
         self.old_offsets[1] = self.old_offsets[0];
         self.old_offsets[0] = offset;
-    }
-
-    fn rotate_old_offset(&mut self, index: usize) {
-        let value = self.old_offsets[index];
-        for i in (1..=index).rev() {
-            self.old_offsets[i] = self.old_offsets[i - 1];
-        }
-        self.old_offsets[0] = value;
     }
 
     fn current_pos(&self) -> usize {
@@ -641,6 +665,10 @@ impl BitReader {
             value = (value << 1) | bit as u32;
         }
         Ok(value)
+    }
+
+    fn remaining_bytes_from_current(&self) -> usize {
+        self.input.len().saturating_sub(self.bit_pos / 8)
     }
 }
 

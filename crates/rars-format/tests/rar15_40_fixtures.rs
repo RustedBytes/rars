@@ -254,6 +254,47 @@ fn extracts_rar250_unp20_audio_file() {
 }
 
 #[test]
+fn extracts_rar250_unp20_solid_members() {
+    let bytes = std::fs::read(fixture("rar250/SOLID.RAR")).unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let files: Vec<_> = archive.files().collect();
+
+    assert!(archive.main.is_solid());
+    assert_eq!(files.len(), 2);
+    assert_eq!(files[0].name, b"SOLID1.TXT");
+    assert_eq!(files[1].name, b"SOLID2.TXT");
+    assert_eq!(files[0].unp_ver, 20);
+    assert_eq!(files[1].unp_ver, 20);
+    assert!(!files[0].is_solid());
+    assert!(files[1].is_solid());
+
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted.len(), 2);
+    assert_eq!(extracted[0].data, expected_rar250_solid1_payload());
+    assert_eq!(extracted[1].data, expected_rar250_solid2_payload());
+    assert_eq!(crc32(&extracted[0].data), 0x97668cf2);
+    assert_eq!(crc32(&extracted[1].data), 0x28833332);
+}
+
+#[test]
+fn extracts_rar250_unp20_large_lz_file() {
+    let bytes = std::fs::read(fixture("rar250/BIGLZ.RAR")).unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let file = archive.files().next().unwrap();
+
+    assert_eq!(file.name, b"BIGLZ.BIN");
+    assert_eq!(file.method, 0x35);
+    assert_eq!(file.unp_ver, 20);
+    assert_eq!(file.unp_size, 167_936);
+
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].name, b"BIGLZ.BIN");
+    assert_eq!(extracted[0].data, expected_rar250_big_lz_payload());
+    assert_eq!(crc32(&extracted[0].data), 0x46ce9077);
+}
+
+#[test]
 fn extracts_rar300_standard_rarvm_filter_fixtures() {
     for (name, entry_name, size, expected_crc) in [
         (
@@ -493,4 +534,31 @@ fn expected_rar250_audio_payload() -> Vec<u8> {
         pcm.extend_from_slice(&(right as u16).to_le_bytes());
     }
     pcm
+}
+
+fn expected_rar250_solid1_payload() -> Vec<u8> {
+    rar250_solid_shared_line().repeat(180).into_bytes()
+}
+
+fn expected_rar250_solid2_payload() -> Vec<u8> {
+    let mut data = rar250_solid_shared_line().repeat(90).into_bytes();
+    data.extend_from_slice(
+        "second member unique tail after shared history.\r\n"
+            .repeat(120)
+            .as_bytes(),
+    );
+    data
+}
+
+fn rar250_solid_shared_line() -> &'static str {
+    "RAR 2.50 solid dictionary carry-over line with repeated tokens alpha beta gamma delta.\r\n"
+}
+
+fn expected_rar250_big_lz_payload() -> Vec<u8> {
+    let mut data = Vec::with_capacity(167_936);
+    for i in 0..4096 {
+        data.extend_from_slice(format!("{i:04x}: unpack20 block refresh fixture ").as_bytes());
+        data.extend_from_slice(&[(i * 17) as u8, (i * 31) as u8, b'\r', b'\n']);
+    }
+    data
 }
