@@ -365,6 +365,65 @@ fn extracts_rar300_ppmd_text_file() {
 }
 
 #[test]
+fn extracts_rar300_ppmd_escape_literal_file() {
+    let bytes = std::fs::read(fixture("ppmd/ppmd_escape_rar300.rar")).unwrap();
+    let expected = std::fs::read(fixture("ppmd/escape_64k.bin")).unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let file = archive.files().next().unwrap();
+
+    assert_eq!(file.name, b"escape_64k.bin");
+    assert_eq!(file.method, 0x35);
+    assert_eq!(file.unp_ver, 29);
+    assert_eq!(file.unp_size, 65_536);
+
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].name, b"escape_64k.bin");
+    assert_eq!(extracted[0].data, expected);
+    assert_eq!(crc32(&extracted[0].data), 0x9a945756);
+}
+
+#[test]
+fn extracts_rar300_ppmd_mixed_archive() {
+    let bytes = std::fs::read(fixture("ppmd/ppmd_mixed_rar300.rar")).unwrap();
+    let expected_text = std::fs::read(fixture("ppmd/lorem_127k.txt")).unwrap();
+    let expected_binary = std::fs::read(fixture("ppmd/binary_64k.bin")).unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let files: Vec<_> = archive.files().collect();
+
+    assert_eq!(files.len(), 2);
+    assert_eq!(files[0].name, b"lorem_127k.txt");
+    assert_eq!(files[1].name, b"binary_64k.bin");
+    assert_eq!(files[0].unp_ver, 29);
+    assert_eq!(files[1].unp_ver, 29);
+
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted.len(), 2);
+    assert_eq!(extracted[0].data, expected_text);
+    assert_eq!(extracted[1].data, expected_binary);
+    assert_eq!(crc32(&extracted[0].data), 0xc119b4e5);
+    assert_eq!(crc32(&extracted[1].data), 0x9d672acd);
+}
+
+#[test]
+fn rejects_rar300_solid_ppmd_until_model_reuse_is_fixed() {
+    let bytes = std::fs::read(fixture("ppmd/ppmd_solid_rar300.rar")).unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let files: Vec<_> = archive.files().collect();
+
+    assert!(archive.main.is_solid());
+    assert_eq!(files.len(), 2);
+    assert_eq!(files[0].name, b"solid_lorem_a.txt");
+    assert_eq!(files[1].name, b"solid_lorem_b.txt");
+    assert!(!files[0].is_solid());
+    assert!(files[1].is_solid());
+    assert!(matches!(
+        archive.extract(),
+        Err(Error::InvalidHeader("RAR PPMd escape symbol is invalid"))
+    ));
+}
+
+#[test]
 fn decodes_rar300_compressed_archive_comment() {
     let bytes = std::fs::read(fixture("rar300/with_comment_rar300.rar")).unwrap();
     let archive = Archive::parse(&bytes).unwrap();

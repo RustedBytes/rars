@@ -50,6 +50,8 @@ Keep this section short. Detailed behavioural claims belong in tests.
   E8/E8E9/DELTA/ITANIUM/RGB/AUDIO native RARVM filters.
   Current Unpack20 coverage includes plain LZ, 2-channel audio, solid member
   state carry-over, and a larger LZ history/table-stress fixture.
+  Current PPMd coverage includes a normal text member, literal escape-byte
+  handling, and a mixed text/binary multi-file archive.
 - RAR 3.x header-encrypted archives are detected from `MHD_PASSWORD` and
   rejected with a clear unsupported-feature error before encrypted block bytes
   are parsed.
@@ -68,10 +70,10 @@ Keep this section short. Detailed behavioural claims belong in tests.
   - Add more audio fixtures if examples with 1, 3, or 4 channels become
     available; current coverage pins normal 2-channel RAR 2.50 audio blocks.
 - Broaden PPMd coverage for RAR 2.9+:
-  - Current native Rust PPMd decode is pinned by
-    `ppmd_lorem_rar300.rar`.
-  - Add fixtures for PPMd blocks that transition back to LZ, PPMd-embedded
-    RARVM filters, escape-byte literal handling, and solid PPMd state reuse.
+  - Fix solid PPMd model reuse, currently pinned by the
+    `ppmd_solid_rar300.rar` rejection test.
+  - Add fixtures for PPMd blocks that transition back to LZ and
+    PPMd-embedded RARVM filters when examples can be generated.
 - Fix the large solid RAR 3.x table edge case currently pinned by the
   `solid_rar300.rar` rejection test.
 - Decide whether to support generic RARVM bytecode execution or continue to
