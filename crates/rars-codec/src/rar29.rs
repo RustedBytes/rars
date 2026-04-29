@@ -135,6 +135,8 @@ impl Unpack29 {
         }
         self.bits.read_bit()?;
         let keep_tables = self.bits.read_bit()? != 0;
+        self.last_low_offset = 0;
+        self.low_offset_repeats = 0;
         if !keep_tables {
             self.levels = [0; TABLE_COUNT];
         }
@@ -200,12 +202,7 @@ impl Unpack29 {
                     lengths[pos] = 15;
                     pos += 1;
                 } else {
-                    pos = pos
-                        .checked_add(zero_count + 2)
-                        .ok_or(Error::InvalidData("RAR 2.9 level length run overflows"))?;
-                    if pos > LEVEL_COUNT {
-                        return Err(Error::InvalidData("RAR 2.9 level length run is too long"));
-                    }
+                    pos = pos.saturating_add(zero_count + 2).min(LEVEL_COUNT);
                 }
             } else {
                 lengths[pos] = value;
@@ -455,7 +452,8 @@ impl Unpack29 {
     }
 
     fn copy_match(&mut self, length: usize, offset: usize, output_size: usize) -> Result<()> {
-        if offset == 0 || offset > self.output.len() {
+        let offset = if offset == 0 { 1 } else { offset };
+        if offset > self.output.len() {
             return Err(Error::InvalidData("RAR 2.9 match distance is out of range"));
         }
         for index in 0..length {
@@ -497,9 +495,7 @@ fn fill_levels(levels: &mut [u8], pos: &mut usize, count: usize, value: u8) -> R
     let end = pos
         .checked_add(count)
         .ok_or(Error::InvalidData("RAR 2.9 table run overflows"))?;
-    if end > levels.len() {
-        return Err(Error::InvalidData("RAR 2.9 table run is too long"));
-    }
+    let end = end.min(levels.len());
     for item in &mut levels[*pos..end] {
         *item = value;
     }
@@ -689,7 +685,7 @@ fn apply_standard_filter(
             *data = delta_decode(data, channels)?;
         }
         StandardFilter::Rgb => {
-            let width = regs[0] as usize;
+            let width = (regs[0] as usize).saturating_sub(3);
             let pos_r = regs[1] as usize;
             *data = rgb_decode(data, width, pos_r)?;
         }
@@ -784,7 +780,7 @@ fn delta_decode(data: &[u8], channels: usize) -> Result<Vec<u8>> {
 }
 
 fn rgb_decode(data: &[u8], width: usize, pos_r: usize) -> Result<Vec<u8>> {
-    if data.len() < 3 || width < 3 || pos_r > 2 {
+    if data.len() < 3 || width > data.len() || pos_r > 2 {
         return Err(Error::InvalidData(
             "RAR 2.9 RGB filter parameters are invalid",
         ));
@@ -795,9 +791,7 @@ fn rgb_decode(data: &[u8], width: usize, pos_r: usize) -> Result<Vec<u8>> {
         let mut prev = 0u8;
         let mut i = channel;
         while i < data.len() {
-            let predicted = if i < width {
-                prev
-            } else {
+            let predicted = if i >= width + 3 {
                 let upper_left = out[i - width];
                 let upper = out[i - width + 3];
                 let pred = prev.wrapping_add(upper).wrapping_sub(upper_left);
@@ -811,6 +805,8 @@ fn rgb_decode(data: &[u8], width: usize, pos_r: usize) -> Result<Vec<u8>> {
                 } else {
                     upper_left
                 }
+            } else {
+                prev
             };
             let encoded = *data
                 .get(src)
@@ -854,7 +850,7 @@ fn audio_decode(data: &[u8], channels: usize) -> Result<Vec<u8>> {
             src += 1;
             let decoded = (predicted as u8).wrapping_sub(encoded);
             out[i] = decoded;
-            prev_delta = (decoded as i8).wrapping_sub(prev_byte as u8 as i8) as i32;
+            prev_delta = decoded.wrapping_sub(prev_byte as u8) as i8 as i32;
             prev_byte = decoded as u32;
             let d = (encoded as i8 as i32) << 3;
             dif[0] += d.unsigned_abs();

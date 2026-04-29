@@ -100,7 +100,7 @@ fn rejects_large_solid_rar300_until_table_edge_case_is_fixed() {
 
     assert!(matches!(
         archive.extract(),
-        Err(Error::InvalidHeader("RAR 2.9 level length run is too long"))
+        Err(Error::InvalidHeader("RAR 2.9 bitstream is truncated"))
     ));
 }
 
@@ -189,18 +189,27 @@ fn extracts_rar300_standard_rarvm_filter_fixtures() {
 }
 
 #[test]
-fn rejects_rar300_rgb_and_audio_filter_fixtures_until_lz_edge_case_is_fixed() {
-    for name in [
-        "rar300/rarvm_rgb_gradient_rar300.rar",
-        "rar300/rarvm_audio_stereo_rar300.rar",
+fn rejects_rar300_rgb_and_audio_filter_fixtures_until_filter_parity_is_fixed() {
+    for (name, expected, actual) in [
+        (
+            "rar300/rarvm_rgb_gradient_rar300.rar",
+            0xbf03aa49,
+            0xf3a01e32,
+        ),
+        (
+            "rar300/rarvm_audio_stereo_rar300.rar",
+            0x8ad44141,
+            0x83af746b,
+        ),
     ] {
         let bytes = std::fs::read(fixture(name)).unwrap();
         let archive = Archive::parse(&bytes).unwrap();
         assert!(matches!(
             archive.extract(),
-            Err(Error::InvalidHeader(
-                "RAR 2.9 match distance is out of range"
-            ))
+            Err(Error::Crc32Mismatch {
+                expected: observed_expected,
+                actual: observed_actual,
+            }) if observed_expected == expected && observed_actual == actual
         ));
     }
 }

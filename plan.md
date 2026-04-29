@@ -161,15 +161,17 @@ The first reader slice is implemented:
   pending matches, and unread bits across caller-selected output slices. It
   parses RARVM filter records, recognizes standard bytecode by length+CRC32,
   and applies native E8/E8E9/DELTA/ITANIUM transforms to returned data while
-  keeping raw dictionary history separate.
+  keeping raw dictionary history separate. It also clamps RAR3 Huffman table
+  run lengths to the table boundary, matching the reference readers, and handles
+  the early zero repeat-distance slot as a one-byte-back match.
 - Fixture coverage includes RAR 3.00 archive comments (`NEWSUB` name `CMT`),
   stored file metadata, solid archive flags, old/new multivolume numbering,
   split-after flags, RAR 4.20 extended-time headers, corrupt header checksum
   rejection, corrupt stored-payload CRC32 rejection, incomplete stored-volume
   rejection, standalone Unpack29 LZ extraction, reusable decoder-state
   regression coverage, compressed archive-comment decode, four standard RARVM
-  filter fixtures, RGB/AUDIO edge-case guards, and compressed-volume rejection
-  pending cross-volume codec state.
+  filter fixtures, RGB/AUDIO CRC-mismatch guards, and compressed-volume
+  rejection pending cross-volume codec state.
 - The public facade dispatches `ArchiveReader::read` to RAR 1.5-4.x parsing,
   and `rars info`, `rars test`, and `rars x` work for stored and basic
   non-solid LZ-compressed RAR 1.5-4.x archives, including stored volume sets
@@ -177,11 +179,26 @@ The first reader slice is implemented:
 
 Next RAR 1.5-4.x tasks:
 
-- Fix the remaining Unpack29 edge case hit by the RGB and AUDIO RARVM fixtures,
-  then enable their native filters.
+- Finish RARVM/LZ parity for the RGB and AUDIO fixture archives. The old
+  match-distance failure is fixed; these archives now decode to the requested
+  size and fail only at final CRC32 verification, so the remaining work is byte
+  parity in the LZ/filter output.
 - Finish compressed split-volume extraction; the current guard shows additional
   split stream semantics beyond simple packed-byte concatenation.
-- Add PPMd and RAR 2.0/Unpack20 coverage.
+- Add `UNP_VER` dispatch for RAR 1.5-4.x compressed files, then add RAR
+  2.0/Unpack20 coverage.
+- Add PPMd coverage for RAR 2.9+ method 0x35.
+- Add RAR 1.5-4.x file/header encryption modules.
+
+Architectural debt to address before the RAR 5.0 streaming slice:
+
+- Move parsed packed data from owned `Vec<u8>` fields toward byte ranges over
+  an archive reader, otherwise >4 GiB archives and streaming extraction are
+  structurally blocked.
+- Introduce a per-archive-set decoder session so normal extraction and volume
+  extraction share the same codec-state ownership model.
+- Enrich library errors with archive offsets and block context before treating
+  the public API as stable.
 
 ## Testing strategy
 
