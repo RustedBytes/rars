@@ -2,6 +2,7 @@ use crate::detect::{find_archive_start, RAR15_SIGNATURE};
 use crate::error::{Error, Result};
 use crate::version::ArchiveFamily;
 use rars_codec::rar13::Unpack15;
+use rars_codec::rar20::Unpack20;
 use rars_codec::rar29::Unpack29;
 use std::fs::File;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
@@ -274,6 +275,33 @@ impl FileHeader {
             .map_err(Into::into)
     }
 
+    pub fn unpacked_data_with_unpack20(
+        &self,
+        archive: &Archive,
+        decoder: &mut Unpack20,
+    ) -> Result<Vec<u8>> {
+        if self.is_stored() {
+            return self.stored_data(archive);
+        }
+        if self.is_encrypted() {
+            return Err(Error::InvalidHeader(
+                "RAR 2.0 encrypted file extraction is not implemented",
+            ));
+        }
+        if self.unp_ver != 20 && self.unp_ver != 26 {
+            return Err(Error::InvalidHeader(
+                "RAR 2.0 compressed file extraction is not implemented",
+            ));
+        }
+        decoder
+            .decode_member(
+                &self.packed_data(archive)?,
+                usize::try_from(self.unp_size)
+                    .map_err(|_| Error::InvalidHeader("RAR 2.0 unpacked size overflows usize"))?,
+            )
+            .map_err(Into::into)
+    }
+
     pub fn verify_crc32(&self, data: &[u8]) -> Result<()> {
         let actual = crc32(data);
         if actual == self.file_crc {
@@ -455,6 +483,51 @@ impl FileHeader {
                 usize::try_from(self.unp_size)
                     .map_err(|_| Error::InvalidHeader("RAR 1.5 unpacked size overflows usize"))?,
                 solid,
+                &mut crc_writer,
+            )
+            .map_err(Error::from)?;
+        let actual = crc.finish();
+        if actual == self.file_crc {
+            Ok(())
+        } else {
+            Err(Error::Crc32Mismatch {
+                expected: self.file_crc,
+                actual,
+            })
+        }
+    }
+
+    fn write_unpack20_to(
+        &self,
+        archive: &Archive,
+        decoder: &mut Unpack20,
+        out: &mut impl Write,
+    ) -> Result<()> {
+        if self.is_stored() {
+            return self.write_stored_to(archive, out);
+        }
+        if self.is_encrypted() {
+            return Err(Error::InvalidHeader(
+                "RAR 2.0 encrypted file extraction is not implemented",
+            ));
+        }
+        if self.unp_ver != 20 && self.unp_ver != 26 {
+            return Err(Error::InvalidHeader(
+                "RAR 2.0 compressed file extraction is not implemented",
+            ));
+        }
+
+        let mut packed = archive.range_reader(self.packed_range.clone())?;
+        let mut crc = Crc32::new();
+        let mut crc_writer = CrcWriter {
+            inner: out,
+            crc: &mut crc,
+        };
+        decoder
+            .decode_member_from_reader(
+                &mut packed,
+                usize::try_from(self.unp_size)
+                    .map_err(|_| Error::InvalidHeader("RAR 2.0 unpacked size overflows usize"))?,
                 &mut crc_writer,
             )
             .map_err(Error::from)?;
@@ -773,7 +846,7 @@ impl Archive {
 
 enum CodecState {
     Unpack15(Unpack15),
-    Unpack20Unsupported,
+    Unpack20(Unpack20),
     Unpack29(Unpack29),
 }
 
@@ -787,8 +860,8 @@ impl CodecState {
         if file.unp_ver >= 29 {
             return Ok(Self::Unpack29(Unpack29::new()));
         }
-        if file.unp_ver == 20 {
-            return Ok(Self::Unpack20Unsupported);
+        if file.unp_ver == 20 || file.unp_ver == 26 {
+            return Ok(Self::Unpack20(Unpack20::new()));
         }
         if file.unp_ver == 15 {
             return Ok(Self::Unpack15(Unpack15::new()));
@@ -801,7 +874,7 @@ impl CodecState {
     fn supports(&self, file: &FileHeader) -> bool {
         match self {
             Self::Unpack15(_) => !file.is_encrypted() && file.unp_ver == 15,
-            Self::Unpack20Unsupported => !file.is_encrypted() && file.unp_ver == 20,
+            Self::Unpack20(_) => !file.is_encrypted() && (file.unp_ver == 20 || file.unp_ver == 26),
             Self::Unpack29(_) => !file.is_encrypted() && file.unp_ver >= 29,
         }
     }
@@ -814,9 +887,7 @@ impl CodecState {
     ) -> Result<Vec<u8>> {
         match self {
             Self::Unpack15(decoder) => file.unpacked_data_with_unpack15(archive, decoder, solid),
-            Self::Unpack20Unsupported => Err(Error::InvalidHeader(
-                "RAR 2.0 compressed file extraction is not implemented",
-            )),
+            Self::Unpack20(decoder) => file.unpacked_data_with_unpack20(archive, decoder),
             Self::Unpack29(decoder) => file.unpacked_data_with_rar29(archive, decoder),
         }
     }
@@ -830,9 +901,7 @@ impl CodecState {
     ) -> Result<()> {
         match self {
             Self::Unpack15(decoder) => file.write_unpack15_to(archive, decoder, solid, out),
-            Self::Unpack20Unsupported => Err(Error::InvalidHeader(
-                "RAR 2.0 compressed file extraction is not implemented",
-            )),
+            Self::Unpack20(decoder) => file.write_unpack20_to(archive, decoder, out),
             Self::Unpack29(decoder) => file.write_rar29_to(archive, decoder, out),
         }
     }

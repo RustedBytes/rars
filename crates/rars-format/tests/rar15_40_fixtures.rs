@@ -187,7 +187,7 @@ fn extracts_rar154_unp15_solid_flagged_file() {
 }
 
 #[test]
-fn rejects_rar250_unp20_until_codec_is_ported() {
+fn extracts_rar250_unp20_lz_file() {
     let bytes = std::fs::read(fixture("rar250/AUTOREJ.RAR")).unwrap();
     let archive = Archive::parse(&bytes).unwrap();
     let file = archive.files().next().unwrap();
@@ -197,12 +197,12 @@ fn rejects_rar250_unp20_until_codec_is_ported() {
     assert_eq!(file.unp_ver, 20);
     assert_eq!(file.pack_size, 54);
     assert_eq!(file.unp_size, 2300);
-    assert!(matches!(
-        archive.extract(),
-        Err(Error::InvalidHeader(
-            "RAR 2.0 compressed file extraction is not implemented"
-        ))
-    ));
+
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].name, b"PLAIN.TXT");
+    assert_eq!(extracted[0].data.len(), 2300);
+    assert_eq!(crc32(&extracted[0].data), 0xafc0db74);
 }
 
 #[test]

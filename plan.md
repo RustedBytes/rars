@@ -182,8 +182,8 @@ The first reader slice is implemented:
   run lengths to the table boundary, matching the reference readers, and handles
   the early zero repeat-distance slot as a one-byte-back match.
 - Fixture coverage includes RAR 1.54 Unpack15 extraction, RAR 2.50 Unpack20
-  dispatch-to-explicit-unsupported, RAR 3.00 archive comments (`NEWSUB` name
-  `CMT`), stored file metadata, solid archive flags, old/new multivolume
+  LZ-mode extraction, RAR 3.00 archive comments (`NEWSUB` name `CMT`), stored
+  file metadata, solid archive flags, old/new multivolume
   numbering, split-after flags, RAR 4.20 extended-time headers, corrupt header
   checksum rejection, corrupt stored-payload CRC32 rejection, incomplete
   stored-volume rejection, standalone Unpack29 LZ extraction, reusable
@@ -207,10 +207,10 @@ The first reader slice is implemented:
   blocks, and retain only the sliding history needed by later matches. Normal
   vector-returning extraction and direct-to-writer extraction now share the same
   per-archive decoder session. That session owns a codec-state enum rather than
-  a dedicated Unpack29 field: `UNP_VER=15` uses Unpack15, `UNP_VER=20` is routed
-  to an explicit Unpack20-not-ported state, and `UNP_VER>=29` uses Unpack29.
-  Volume-aware `extract_volumes_to` streams stored split members across chained
-  archive ranges without reassembling the packed stream in memory.
+  a dedicated Unpack29 field: `UNP_VER=15` uses Unpack15, `UNP_VER=20/26` uses
+  Unpack20 LZ mode, and `UNP_VER>=29` uses Unpack29. Volume-aware
+  `extract_volumes_to` streams stored split members across chained archive
+  ranges without reassembling the packed stream in memory.
 
 Next RAR 1.5-4.x tasks:
 
@@ -220,8 +220,8 @@ Next RAR 1.5-4.x tasks:
   parity in the LZ/filter output.
 - Finish compressed split-volume extraction; the current guard shows additional
   split stream semantics beyond simple packed-byte concatenation.
-- Port RAR 2.0/Unpack20 and replace the current explicit unsupported
-  `UNP_VER=20` codec-state placeholder with a real decoder.
+- Extend RAR 2.0/Unpack20 beyond the initial LZ-mode decoder: add audio-block
+  mode and more fixtures for solid/multiblock state.
 - Add PPMd coverage for RAR 2.9+ method 0x35.
 - Add RAR 1.5-4.x file/header encryption modules.
 
