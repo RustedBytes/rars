@@ -32,7 +32,7 @@ impl Archive {
                 .extract(password)
                 .map(|entries| entries.into_iter().map(Into::into).collect()),
             Self::Rar15To40(archive) => archive
-                .extract_stored()
+                .extract()
                 .map(|entries| entries.into_iter().map(Into::into).collect()),
         }
     }

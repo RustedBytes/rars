@@ -94,8 +94,34 @@ fn rejects_corrupt_rar15_40_stored_payload_checksum() {
 }
 
 #[test]
-fn rejects_compressed_rar15_40_entries_until_codec_exists() {
+fn rejects_filter_using_solid_rar300_until_rarvm_exists() {
     let bytes = std::fs::read(fixture("rar300/solid_rar300.rar")).unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+
+    assert!(matches!(
+        archive.extract(),
+        Err(Error::InvalidHeader(
+            "RAR 2.9 VM filters are not implemented"
+        ))
+    ));
+}
+
+#[test]
+fn rejects_simple_solid_rar300_until_solid_state_is_complete() {
+    let bytes = std::fs::read(fixture("rar300/solid_simple_rar300.rar")).unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+
+    assert!(matches!(
+        archive.extract(),
+        Err(Error::InvalidHeader(
+            "RAR 2.9 VM filters are not implemented"
+        ))
+    ));
+}
+
+#[test]
+fn stored_only_extract_rejects_compressed_rar300_lz_file() {
+    let bytes = std::fs::read(fixture("rar300/compressed_text_rar300.rar")).unwrap();
     let archive = Archive::parse(&bytes).unwrap();
 
     assert!(matches!(
@@ -104,6 +130,29 @@ fn rejects_compressed_rar15_40_entries_until_codec_exists() {
             "RAR 1.5 compressed file extraction is not implemented"
         ))
     ));
+}
+
+#[test]
+fn extracts_compressed_rar300_lz_file() {
+    let bytes = std::fs::read(fixture("rar300/compressed_text_rar300.rar")).unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].name, b"text.txt");
+    assert_eq!(extracted[0].data, expected_compressed_text_payload());
+    assert_eq!(crc32(&extracted[0].data), 0x6a0d746d);
+}
+
+#[test]
+fn decodes_rar300_compressed_archive_comment() {
+    let bytes = std::fs::read(fixture("rar300/with_comment_rar300.rar")).unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+
+    assert_eq!(
+        archive.archive_comment().unwrap().as_deref(),
+        Some(b"This is the archive comment.\n".as_slice())
+    );
 }
 
 #[test]
@@ -155,10 +204,13 @@ fn rejects_incomplete_rar300_stored_volume_set() {
 }
 
 #[test]
-fn rejects_compressed_rar300_volume_set_until_codec_exists() {
+fn rejects_compressed_rar300_old_numbered_volume_set_until_split_codec_state_exists() {
     let archives: Vec<_> = [
-        "rar300/multivol_oldnaming_rar300.rar",
-        "rar300/multivol_oldnaming_rar300.r00",
+        "rar300/compressed_multivol_prng_rar300.rar",
+        "rar300/compressed_multivol_prng_rar300.r00",
+        "rar300/compressed_multivol_prng_rar300.r01",
+        "rar300/compressed_multivol_prng_rar300.r02",
+        "rar300/compressed_multivol_prng_rar300.r03",
     ]
     .into_iter()
     .map(|name| Archive::parse(&std::fs::read(fixture(name)).unwrap()).unwrap())
@@ -231,4 +283,8 @@ fn expected_stored_volume_payload() -> Vec<u8> {
     "RAR 3.00 stored multivolume fixture line.\n"
         .repeat(80)
         .into_bytes()
+}
+
+fn expected_compressed_text_payload() -> Vec<u8> {
+    "Hello, RAR 3.x fixture world.\n".repeat(80).into_bytes()
 }

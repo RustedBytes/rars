@@ -1,6 +1,7 @@
 use crate::detect::{find_archive_start, RAR15_SIGNATURE};
 use crate::error::{Error, Result};
 use crate::version::ArchiveFamily;
+use rars_codec::rar29::Unpack29;
 
 const MARK_HEAD: u8 = 0x72;
 const MAIN_HEAD: u8 = 0x73;
@@ -190,6 +191,47 @@ impl FileHeader {
         Ok(self.packed_data.clone())
     }
 
+    pub fn unpacked_data(&self) -> Result<Vec<u8>> {
+        if self.is_stored() {
+            return self.stored_data();
+        }
+        if self.is_encrypted() {
+            return Err(Error::InvalidHeader(
+                "RAR 1.5 encrypted file extraction is not implemented",
+            ));
+        }
+        if self.unp_ver >= 29 {
+            let mut decoder = Unpack29::new();
+            return self.unpacked_data_with_rar29(&mut decoder);
+        }
+        Err(Error::InvalidHeader(
+            "RAR 1.5 compressed file extraction is not implemented",
+        ))
+    }
+
+    pub fn unpacked_data_with_rar29(&self, decoder: &mut Unpack29) -> Result<Vec<u8>> {
+        if self.is_stored() {
+            return self.stored_data();
+        }
+        if self.is_encrypted() {
+            return Err(Error::InvalidHeader(
+                "RAR 1.5 encrypted file extraction is not implemented",
+            ));
+        }
+        if self.unp_ver < 29 {
+            return Err(Error::InvalidHeader(
+                "RAR 1.5 compressed file extraction is not implemented",
+            ));
+        }
+        decoder
+            .decode_member(
+                &self.packed_data,
+                usize::try_from(self.unp_size)
+                    .map_err(|_| Error::InvalidHeader("RAR 2.9 unpacked size overflows usize"))?,
+            )
+            .map_err(Into::into)
+    }
+
     pub fn verify_crc32(&self, data: &[u8]) -> Result<()> {
         let actual = crc32(data);
         if actual == self.file_crc {
@@ -215,6 +257,30 @@ impl FileHeader {
         }
 
         let data = self.stored_data()?;
+        self.verify_crc32(&data)?;
+        Ok(ExtractedEntry {
+            name: self.name.clone(),
+            data,
+            file_time: self.file_time,
+            attr: self.attr,
+            host_os: self.host_os,
+            is_directory: false,
+        })
+    }
+
+    pub fn extract(&self) -> Result<ExtractedEntry> {
+        if self.is_directory() {
+            return Ok(ExtractedEntry {
+                name: self.name.clone(),
+                data: Vec::new(),
+                file_time: self.file_time,
+                attr: self.attr,
+                host_os: self.host_os,
+                is_directory: true,
+            });
+        }
+
+        let data = self.unpacked_data()?;
         self.verify_crc32(&data)?;
         Ok(ExtractedEntry {
             name: self.name.clone(),
@@ -327,6 +393,67 @@ impl Archive {
         }
         Ok(out)
     }
+
+    pub fn extract(&self) -> Result<Vec<ExtractedEntry>> {
+        if self.main.has_encrypted_headers() {
+            return Err(Error::InvalidHeader(
+                "RAR 1.5 encrypted header extraction is not implemented",
+            ));
+        }
+
+        let mut out = Vec::new();
+        let mut rar29 = Unpack29::new();
+        let shared_rar29 = self.main.is_solid();
+        for file in self.files() {
+            if file.is_split_before() || file.is_split_after() {
+                return Err(Error::InvalidHeader(
+                    "RAR 1.5 split entry requires multivolume extraction",
+                ));
+            }
+            if shared_rar29 && !file.is_stored() {
+                out.push(extract_with_rar29(file, &mut rar29)?);
+            } else {
+                rar29 = Unpack29::new();
+                out.push(file.extract()?);
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn archive_comment(&self) -> Result<Option<Vec<u8>>> {
+        let Some(comment) = self
+            .new_subs()
+            .find(|sub| sub.kind == NewSubKind::ArchiveComment)
+        else {
+            return Ok(None);
+        };
+        let data = comment.file.unpacked_data()?;
+        comment.file.verify_crc32(&data)?;
+        Ok(Some(data))
+    }
+}
+
+fn extract_with_rar29(file: &FileHeader, decoder: &mut Unpack29) -> Result<ExtractedEntry> {
+    if file.is_directory() {
+        return Ok(ExtractedEntry {
+            name: file.name.clone(),
+            data: Vec::new(),
+            file_time: file.file_time,
+            attr: file.attr,
+            host_os: file.host_os,
+            is_directory: true,
+        });
+    }
+    let data = file.unpacked_data_with_rar29(decoder)?;
+    file.verify_crc32(&data)?;
+    Ok(ExtractedEntry {
+        name: file.name.clone(),
+        data,
+        file_time: file.file_time,
+        attr: file.attr,
+        host_os: file.host_os,
+        is_directory: false,
+    })
 }
 
 pub fn extract_volumes(volumes: &[Archive]) -> Result<Vec<ExtractedEntry>> {
@@ -349,9 +476,9 @@ pub fn extract_volumes(volumes: &[Archive]) -> Result<Vec<ExtractedEntry>> {
                 file.is_split_before(),
                 file.is_split_after(),
             ) {
-                (false, false, false) => out.push(file.extract_stored()?),
+                (false, false, false) => out.push(file.extract()?),
                 (false, false, true) => {
-                    validate_split_stored_fragment(file)?;
+                    validate_split_fragment(file)?;
                     pending = Some(PendingSplit {
                         name: file.name.clone(),
                         data: file.packed_data.clone(),
@@ -371,18 +498,37 @@ pub fn extract_volumes(volumes: &[Archive]) -> Result<Vec<ExtractedEntry>> {
                     let mut completed = pending.take().expect("pending split");
                     validate_split_continuation(&completed, file)?;
                     completed.data.extend_from_slice(&file.packed_data);
-                    let expected_len = usize::try_from(file.unp_size).map_err(|_| {
-                        Error::InvalidHeader("RAR 1.5 split unpacked size overflows usize")
-                    })?;
-                    if completed.data.len() != expected_len {
+                    let data = if completed.method == 0x30 {
+                        let expected_len = usize::try_from(file.unp_size).map_err(|_| {
+                            Error::InvalidHeader("RAR 1.5 split unpacked size overflows usize")
+                        })?;
+                        if completed.data.len() != expected_len {
+                            return Err(Error::InvalidHeader(
+                                "RAR 1.5 split stored file has wrong reassembled size",
+                            ));
+                        }
+                        completed.data
+                    } else if file.unp_ver >= 29 {
+                        let mut decoder = Unpack29::new();
+                        decoder
+                            .decode_member(
+                                &completed.data,
+                                usize::try_from(file.unp_size).map_err(|_| {
+                                    Error::InvalidHeader(
+                                        "RAR 2.9 split unpacked size overflows usize",
+                                    )
+                                })?,
+                            )
+                            .map_err(Error::from)?
+                    } else {
                         return Err(Error::InvalidHeader(
-                            "RAR 1.5 split stored file has wrong reassembled size",
+                            "RAR 1.5 compressed file extraction is not implemented",
                         ));
-                    }
-                    file.verify_crc32(&completed.data)?;
+                    };
+                    file.verify_crc32(&data)?;
                     out.push(ExtractedEntry {
                         name: completed.name,
-                        data: completed.data,
+                        data,
                         file_time: completed.file_time,
                         attr: completed.attr,
                         host_os: completed.host_os,
@@ -410,7 +556,7 @@ pub fn extract_volumes(volumes: &[Archive]) -> Result<Vec<ExtractedEntry>> {
     Ok(out)
 }
 
-fn validate_split_stored_fragment(file: &FileHeader) -> Result<()> {
+fn validate_split_fragment(file: &FileHeader) -> Result<()> {
     if file.is_directory() {
         return Err(Error::InvalidHeader(
             "RAR 1.5 split directory entry is invalid",
@@ -430,7 +576,7 @@ fn validate_split_stored_fragment(file: &FileHeader) -> Result<()> {
 }
 
 fn validate_split_continuation(pending: &PendingSplit, file: &FileHeader) -> Result<()> {
-    validate_split_stored_fragment(file)?;
+    validate_split_fragment(file)?;
     if file.name != pending.name {
         return Err(Error::InvalidHeader("RAR 1.5 split entry name changed"));
     }

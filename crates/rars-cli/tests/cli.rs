@@ -91,6 +91,7 @@ fn info_lists_rar15_40_metadata() {
     assert!(stdout.contains("Rar15To40"));
     assert!(stdout.contains("rar15-40 main"));
     assert!(stdout.contains("hello.txt"));
+    assert!(stdout.contains("comment: This is the archive comment."));
     assert!(stdout.contains("subblock: ArchiveComment CMT"));
 }
 
@@ -118,6 +119,22 @@ fn extracts_rar15_40_stored_fixture() {
     assert_eq!(
         fs::read(out_dir.join("hello.txt")).unwrap(),
         b"Hello, RAR 3.x fixture world.\n"
+    );
+}
+
+#[test]
+fn extracts_rar15_40_compressed_fixture() {
+    let out_dir = scratch("extract-rar15-40-compressed");
+    let output = rars()
+        .arg("x")
+        .arg(fixture_rar15_40("rar300/compressed_text_rar300.rar"))
+        .arg(&out_dir)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(
+        fs::read(out_dir.join("text.txt")).unwrap(),
+        expected_rar15_40_compressed_text_payload()
     );
 }
 
@@ -714,4 +731,8 @@ fn expected_rar15_40_stored_volume_payload() -> Vec<u8> {
     "RAR 3.00 stored multivolume fixture line.\n"
         .repeat(80)
         .into_bytes()
+}
+
+fn expected_rar15_40_compressed_text_payload() -> Vec<u8> {
+    "Hello, RAR 3.x fixture world.\n".repeat(80).into_bytes()
 }

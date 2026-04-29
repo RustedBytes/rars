@@ -1,4 +1,5 @@
 pub mod rar13;
+pub mod rar29;
 
 pub type Result<T> = std::result::Result<T, Error>;
 

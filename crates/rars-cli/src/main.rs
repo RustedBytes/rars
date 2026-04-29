@@ -114,6 +114,12 @@ fn cmd_info(args: &[String]) -> CliResult<()> {
                     "  rar15-40 main: flags={:#06x} head_size={} sfx_offset={}",
                     archive.main.flags, archive.main.head_size, archive.sfx_offset
                 );
+                if let Some(comment) = archive
+                    .archive_comment()
+                    .map_err(|err| format!("failed to decode archive comment '{path}': {err}"))?
+                {
+                    println!("  comment: {}", String::from_utf8_lossy(&comment));
+                }
                 for (index, file) in archive.files().enumerate() {
                     println!(
                         "  #{index}: {} pack={} unp={} method={:#04x} flags={:#06x} attr={:#010x} crc={:#010x} ver={}",

@@ -146,28 +146,40 @@ The first reader slice is implemented:
 - Parsed metadata includes file names, packed/unpacked sizes, host OS, CRC32,
   DOS mtime, method, `UNP_VER`, attributes, salt presence, and raw extended-time
   bytes.
-- Stored files can be extracted through the public facade and CLI, with full
-  file-data CRC32 verification.
+- Stored files and basic non-solid RAR 2.9/3.x LZ-compressed files can be
+  extracted through the public facade and CLI, with full file-data CRC32
+  verification.
 - Non-AV/SIGN block headers are validated with `HEAD_CRC = CRC32(header[2..]) &
   0xFFFF`.
 - `NEWSUB` service headers are classified at parse time. The current typed
   cases are archive comments (`CMT`) and recovery records (`RR`), with other
-  names preserved as unknown service headers.
+  names preserved as unknown service headers. RAR 3.x compressed archive
+  comments are decoded through the same Unpack29 path.
 - Stored split files can be reassembled across RAR 3.x volume sets, including
   old-style `.r00` numbering, with final full-data CRC32 verification.
+- `rars-codec::rar29::Unpack29` is reusable and preserves table/history,
+  pending matches, and unread bits across caller-selected output slices. The
+  archive layer still treats solid and compressed split archives as unsupported
+  until the remaining RARVM/split semantics are implemented.
 - Fixture coverage includes RAR 3.00 archive comments (`NEWSUB` name `CMT`),
   stored file metadata, solid archive flags, old/new multivolume numbering,
   split-after flags, RAR 4.20 extended-time headers, corrupt header checksum
   rejection, corrupt stored-payload CRC32 rejection, incomplete stored-volume
-  rejection, and compressed-volume rejection pending the codec.
+  rejection, standalone Unpack29 LZ extraction, reusable decoder-state
+  regression coverage, compressed archive-comment decode, RARVM-filter
+  rejection, and compressed-volume rejection pending cross-volume codec state.
 - The public facade dispatches `ArchiveReader::read` to RAR 1.5-4.x parsing,
-  and `rars info`, `rars test`, and `rars x` work for stored RAR 1.5-4.x
-  archives, including stored volume sets when all parts are supplied in order.
+  and `rars info`, `rars test`, and `rars x` work for stored and basic
+  non-solid LZ-compressed RAR 1.5-4.x archives, including stored volume sets
+  when all parts are supplied in order.
 
 Next RAR 1.5-4.x tasks:
 
-- Decode RAR 3.x archive-comment payloads once the Unpack20/29 codec exists.
-- Start Unpack20/29 decompression in `rars-codec`.
+- Implement enough RARVM filter execution to decode filter-bearing RAR 3.x
+  streams.
+- Finish compressed split-volume and solid archive extraction once the filter
+  path and split stream semantics are pinned.
+- Add PPMd and RAR 2.0/Unpack20 coverage.
 
 ## Testing strategy
 
