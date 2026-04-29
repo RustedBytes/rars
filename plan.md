@@ -75,8 +75,8 @@ Keep this section short. Detailed behavioural claims belong in tests.
   - Add more audio fixtures if examples with 1, 3, or 4 channels become
     available; current coverage pins normal 2-channel RAR 2.50 audio blocks.
 - Broaden PPMd coverage for RAR 2.9+:
-  - Add fixtures for PPMd blocks that transition back to LZ and
-    PPMd-embedded RARVM filters when examples can be generated.
+  - Add fixtures for PPMd-embedded RARVM filters when examples can be
+    generated.
 - Decide whether to support generic RARVM bytecode execution or continue to
   accept only recognized standard filters by bytecode identity.
 - Finish compressed split-volume extraction:

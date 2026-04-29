@@ -8,21 +8,26 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 #[test]
-fn solid_exe_e8e9_filters_use_member_relative_offsets() {
-    let archive = Archive::parse_path(fixture("solid_exe_e8e9_offsets.rar")).unwrap();
+fn solid_e8_filters_use_member_relative_offsets() {
+    let expected_lead = std::fs::read(fixture("solid_e8_filter_lead.txt")).unwrap();
+    let expected_exe = std::fs::read(fixture("solid_e8_filter_payload.exe")).unwrap();
+    let archive = Archive::parse_path(fixture("solid_e8_filter_member_offset.rar")).unwrap();
+    let files: Vec<_> = archive.files().collect();
+
     assert!(archive.main.is_solid());
+    assert_eq!(files.len(), 2);
+    assert_eq!(files[0].name, b"lead.txt");
+    assert_eq!(files[0].pack_size, 76);
+    assert_eq!(files[0].unp_size, 800);
+    assert_eq!(files[1].name, b"tiny_e8e9.exe");
+    assert_eq!(files[1].pack_size, 295);
+    assert_eq!(files[1].unp_size, 5_884);
+    assert!(files[1].is_solid());
 
-    let mut saw_exe = false;
-    archive
-        .extract_to(|meta| {
-            if meta.name == b"Far.exe" {
-                saw_exe = true;
-            }
-            Ok(Box::new(std::io::sink()))
-        })
-        .unwrap();
-
-    assert!(saw_exe);
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted.len(), 2);
+    assert_eq!(extracted[0].data, expected_lead);
+    assert_eq!(extracted[1].data, expected_exe);
 }
 
 #[test]
