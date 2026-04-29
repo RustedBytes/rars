@@ -18,6 +18,7 @@ const ENDARC_HEAD: u8 = 0x7b;
 
 const LONG_BLOCK: u16 = 0x8000;
 const MHD_VOLUME: u16 = 0x0001;
+const MHD_COMMENT: u16 = 0x0002;
 const MHD_SOLID: u16 = 0x0008;
 const MHD_NEWNUMBERING: u16 = 0x0010;
 const MHD_PROTECT: u16 = 0x0040;
@@ -28,6 +29,7 @@ const MHD_ENCRYPTVER: u16 = 0x0200;
 const FHD_SPLIT_BEFORE: u16 = 0x0001;
 const FHD_SPLIT_AFTER: u16 = 0x0002;
 const FHD_PASSWORD: u16 = 0x0004;
+const FHD_COMMENT: u16 = 0x0008;
 const FHD_SOLID: u16 = 0x0010;
 const FHD_LARGE: u16 = 0x0100;
 const FHD_SALT: u16 = 0x0400;
@@ -1516,7 +1518,7 @@ fn parse_block_header(input: &[u8], offset: usize) -> Result<BlockHeader> {
         return Err(Error::TooShort);
     }
     if head_type != MARK_HEAD && should_validate_header_crc(head_type) {
-        let header_end = offset + head_size as usize;
+        let header_end = header_crc_end(input, offset, head_type, flags, head_size)?;
         let actual = (crc32(&input[offset + 2..header_end]) & 0xffff) as u16;
         if actual != head_crc {
             return Err(Error::CrcMismatch {
@@ -1534,6 +1536,45 @@ fn parse_block_header(input: &[u8], offset: usize) -> Result<BlockHeader> {
         add_size,
         offset,
     })
+}
+
+fn header_crc_end(
+    input: &[u8],
+    offset: usize,
+    head_type: u8,
+    flags: u16,
+    head_size: u16,
+) -> Result<usize> {
+    let full_end = offset + head_size as usize;
+    let fixed_end = match head_type {
+        MAIN_HEAD if flags & MHD_COMMENT != 0 => Some(offset + 13),
+        FILE_HEAD if flags & FHD_COMMENT != 0 => Some(file_header_comment_crc_end(input, offset)?),
+        _ => None,
+    };
+    Ok(fixed_end.unwrap_or(full_end).min(full_end))
+}
+
+fn file_header_comment_crc_end(input: &[u8], offset: usize) -> Result<usize> {
+    if input.len() < offset + 32 {
+        return Err(Error::TooShort);
+    }
+    let flags = read_u16(input, offset + 3)?;
+    let name_size = read_u16(input, offset + 26)? as usize;
+    let mut end = offset + 32;
+    if flags & FHD_LARGE != 0 {
+        end = end
+            .checked_add(8)
+            .ok_or(Error::InvalidHeader("RAR 1.5 file header size overflows"))?;
+    }
+    end = end
+        .checked_add(name_size)
+        .ok_or(Error::InvalidHeader("RAR 1.5 file header size overflows"))?;
+    if flags & FHD_SALT != 0 {
+        end = end
+            .checked_add(8)
+            .ok_or(Error::InvalidHeader("RAR 1.5 file header size overflows"))?;
+    }
+    Ok(end)
 }
 
 fn should_validate_header_crc(head_type: u8) -> bool {

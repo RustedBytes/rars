@@ -51,6 +51,23 @@ fn parses_rar300_comment_subblock_and_stored_file() {
 }
 
 #[test]
+fn parses_rar202_main_header_with_embedded_comment_subblock() {
+    let bytes = std::fs::read(fixture("rar202/comment_nopsw.rar")).unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+
+    assert_eq!(archive.main.head_crc, 0x01bd);
+    assert_eq!(archive.main.head_size, 51);
+    assert!(archive.main.flags & 0x0002 != 0);
+    let files: Vec<_> = archive.files().collect();
+    assert_eq!(files.len(), 2);
+    assert_eq!(files[0].name, b"FILE1.TXT");
+    assert_eq!(files[1].name, b"FILE2.TXT");
+    assert_eq!(files[0].unp_ver, 20);
+    assert_eq!(files[1].unp_ver, 20);
+    assert!(files.iter().all(|file| file.block.flags & 0x0008 != 0));
+}
+
+#[test]
 fn extracts_rar300_stored_file_and_verifies_crc32() {
     let bytes = std::fs::read(fixture("rar300/with_comment_rar300.rar")).unwrap();
     let archive = Archive::parse(&bytes).unwrap();
