@@ -126,8 +126,9 @@ fn rejects_corrupt_rar15_40_stored_payload_checksum() {
 }
 
 #[test]
-fn rejects_large_solid_rar300_until_table_edge_case_is_fixed() {
+fn extracts_large_solid_rar300_with_reused_tables() {
     let bytes = std::fs::read(fixture("rar300/solid_rar300.rar")).unwrap();
+    let expected_big = std::fs::read(fixture("rar300/bigtext_64k.bin")).unwrap();
     let archive = Archive::parse(&bytes).unwrap();
     let files: Vec<_> = archive.files().collect();
 
@@ -147,10 +148,18 @@ fn rejects_large_solid_rar300_until_table_edge_case_is_fixed() {
     assert!(files[2].is_solid());
     assert!(files.iter().all(|file| file.method == 0x33));
     assert!(files.iter().all(|file| file.unp_ver == 29));
-    assert!(matches!(
-        archive.extract(),
-        Err(Error::InvalidHeader("RAR 2.9 bitstream is truncated"))
-    ));
+
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted.len(), 3);
+    assert_eq!(extracted[0].name, b"hello.txt");
+    assert_eq!(extracted[0].data, b"Hello, RAR 3.x fixture world.\n");
+    assert_eq!(crc32(&extracted[0].data), 0xa538535e);
+    assert_eq!(extracted[1].name, b"tiny.txt");
+    assert_eq!(extracted[1].data, b"AAAAAAAA\n");
+    assert_eq!(crc32(&extracted[1].data), 0xd27b5891);
+    assert_eq!(extracted[2].name, b"bigtext_64k.bin");
+    assert_eq!(extracted[2].data, expected_big);
+    assert_eq!(crc32(&extracted[2].data), 0xddc95682);
 }
 
 #[test]
