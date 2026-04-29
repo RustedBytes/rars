@@ -68,6 +68,18 @@ fn parses_rar202_main_header_with_embedded_comment_subblock() {
 }
 
 #[test]
+fn rejects_rar3_header_encryption_with_clear_error() {
+    let bytes = std::fs::read(fixture("encrypted/header_enc_1234.rar")).unwrap();
+
+    assert!(matches!(
+        Archive::parse(&bytes),
+        Err(Error::InvalidHeader(
+            "RAR 1.5 encrypted headers are not implemented"
+        ))
+    ));
+}
+
+#[test]
 fn extracts_rar300_stored_file_and_verifies_crc32() {
     let bytes = std::fs::read(fixture("rar300/with_comment_rar300.rar")).unwrap();
     let archive = Archive::parse(&bytes).unwrap();

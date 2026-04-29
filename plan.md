@@ -47,6 +47,9 @@ Keep this section short. Detailed behavioural claims belong in tests.
   payloads, RAR 1.54 Unpack15 members, RAR 2.50 Unpack20 LZ-mode members, and
   common RAR 2.9/3.x Unpack29 LZ members including the standard
   E8/E8E9/DELTA/ITANIUM native RARVM filters.
+- RAR 3.x header-encrypted archives are detected from `MHD_PASSWORD` and
+  rejected with a clear unsupported-feature error before encrypted block bytes
+  are parsed.
 - Extraction is reader-backed for normal archive paths and avoids cloning packed
   payloads into parsed entries. Stored RAR 3.x volume sets stream through
   `extract_volumes_to`.
@@ -80,7 +83,8 @@ Keep this section short. Detailed behavioural claims belong in tests.
 - Add RAR 1.5-4.x encryption:
   - RAR 2.0 Feistel file encryption.
   - RAR 3.x/4.x AES file encryption.
-  - Header encryption (`MHD_PASSWORD`) and salt/KDF handling.
+  - Header encryption (`MHD_PASSWORD`) decryption, including salt/KDF handling
+    and parsing decrypted block streams.
 
 ### 2. RAR 5.0/7.x Reader
 

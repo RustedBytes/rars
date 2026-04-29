@@ -592,6 +592,7 @@ impl Archive {
             return Err(Error::InvalidHeader("RAR 1.5 main header is missing"));
         }
         let main = parse_main_header(archive, &main_block)?;
+        reject_encrypted_headers(&main)?;
         let mut pos = main_block.offset + main_block.head_size as usize;
         let mut blocks = Vec::new();
 
@@ -657,6 +658,7 @@ impl Archive {
             main_block.head_size as usize,
         )?;
         let main = parse_main_header(&main_header, &relative_block(&main_block))?;
+        reject_encrypted_headers(&main)?;
         let mut pos = main_block.offset + main_block.head_size as usize;
         let mut blocks = Vec::new();
 
@@ -1292,6 +1294,15 @@ fn parse_main_header(input: &[u8], block: &BlockHeader) -> Result<MainHeader> {
         reserved2: read_u32(input, start + 9)?,
         encrypt_version,
     })
+}
+
+fn reject_encrypted_headers(main: &MainHeader) -> Result<()> {
+    if main.has_encrypted_headers() {
+        return Err(Error::InvalidHeader(
+            "RAR 1.5 encrypted headers are not implemented",
+        ));
+    }
+    Ok(())
 }
 
 fn parse_file_like_header(
