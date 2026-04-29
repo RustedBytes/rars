@@ -139,7 +139,7 @@ impl Unpack29 {
             Error::NeedMoreInput => Error::InvalidData("RAR 2.9 bitstream is truncated"),
             error => error,
         })?;
-        let out = self.filtered_range(start, target)?;
+        let out = self.filtered_range(start, target, start)?;
         self.trim_history(target, target);
         Ok(out)
     }
@@ -177,7 +177,7 @@ impl Unpack29 {
                 continue;
             }
 
-            let decoded = self.filtered_range(flushed, safe_end)?;
+            let decoded = self.filtered_range(flushed, safe_end, start)?;
             out.write_all(&decoded)
                 .map_err(|_| Error::InvalidData("RAR 2.9 output write failed"))?;
             flushed = safe_end;
@@ -244,7 +244,7 @@ impl Unpack29 {
                 continue;
             }
 
-            let decoded = self.filtered_range(flushed, safe_end)?;
+            let decoded = self.filtered_range(flushed, safe_end, start)?;
             out.write_all(&decoded)
                 .map_err(|_| Error::InvalidData("RAR 2.9 output write failed"))?;
             flushed = safe_end;
@@ -705,7 +705,7 @@ impl Unpack29 {
         Ok(())
     }
 
-    fn filtered_range(&self, start: usize, end: usize) -> Result<Vec<u8>> {
+    fn filtered_range(&self, start: usize, end: usize, member_start: usize) -> Result<Vec<u8>> {
         let mut out = Vec::with_capacity(end - start);
         let mut pos = start;
         for filter in self
@@ -727,7 +727,11 @@ impl Unpack29 {
             apply_standard_filter(
                 program.filter,
                 &mut block,
-                filter.start as u32,
+                filter
+                    .start
+                    .checked_sub(member_start)
+                    .ok_or(Error::InvalidData("RAR 2.9 VM filter starts before file"))?
+                    as u32,
                 &filter.regs,
             )?;
             out.extend_from_slice(&block);
@@ -1002,7 +1006,7 @@ impl BitReader {
                 }
             }
             2 => self.read_bits(16),
-            _ => self.read_bits(32),
+            _ => Ok((self.read_bits(16)? << 16) | self.read_bits(16)?),
         }
     }
 }
@@ -1263,7 +1267,7 @@ fn crc32(input: &[u8]) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{unpack29_decode, Unpack29};
+    use super::{unpack29_decode, StandardFilter, Unpack29, VmFilter, VmProgram};
 
     const COMPRESSED_TEXT: &[u8] = &[
         0x09, 0x10, 0x10, 0x93, 0xe4, 0xce, 0x7f, 0xa2, 0xba, 0x80, 0x46, 0x16, 0x82, 0x63, 0xe9,
@@ -1308,6 +1312,50 @@ mod tests {
             .unwrap();
 
         assert_eq!(output, expected_text());
+    }
+
+    #[test]
+    fn e8_filter_uses_member_relative_offset_in_solid_stream() {
+        let mut decoder = Unpack29::new();
+        let member_start = 1000usize;
+        let filter_start = member_start + 100;
+        decoder.output.resize(filter_start + 8, 0);
+        decoder.output[filter_start] = 0xe8;
+
+        let call_operand_pos = 1u32;
+        let member_relative_filter_start = (filter_start - member_start) as u32;
+        let decoded_addr = 0x2000u32;
+        let encoded_addr = decoded_addr
+            .wrapping_add(member_relative_filter_start)
+            .wrapping_add(call_operand_pos);
+        decoder.output[filter_start + 1..filter_start + 5]
+            .copy_from_slice(&encoded_addr.to_le_bytes());
+        decoder.programs.push(VmProgram {
+            filter: StandardFilter::E8,
+            block_size: 5,
+            exec_count: 0,
+        });
+        decoder.filters.push(VmFilter {
+            program: 0,
+            start: filter_start,
+            size: 5,
+            regs: [0; 7],
+        });
+
+        let filtered = decoder
+            .filtered_range(member_start, filter_start + 5, member_start)
+            .unwrap();
+        let operand =
+            u32::from_le_bytes([filtered[101], filtered[102], filtered[103], filtered[104]]);
+
+        assert_eq!(operand, decoded_addr);
+    }
+
+    #[test]
+    fn vm_encoded_u32_accepts_32_bit_form() {
+        let mut bits = super::BitReader::from_bytes(&[0xff; 5]);
+
+        assert_eq!(bits.read_encoded_u32().unwrap(), 0xffff_ffff);
     }
 
     fn expected_text() -> Vec<u8> {
