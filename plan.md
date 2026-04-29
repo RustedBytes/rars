@@ -42,6 +42,10 @@ The facade crate should expose stable concepts:
 - `FeatureSet`: solid mode, encryption, comments, recovery, SFX, filters, etc.
 - `EncoderPolicy`: compression decisions independent of format serialization.
 
+Extraction APIs should keep streaming as the primary path: `extract_to` and
+`extract_volumes_to` write to caller-provided sinks, while Vec-returning
+`extract` helpers are convenience wrappers for tests and small archives.
+
 Encoder policy is intentionally pluggable. A conservative `StoreOnlyPolicy`
 should be available immediately. Later policies can add LZ, PPMd, filters, and
 WinRAR-like heuristics.
@@ -158,9 +162,10 @@ The first reader slice is implemented:
 - Parsed metadata includes file names, packed/unpacked sizes, host OS, CRC32,
   DOS mtime, method, `UNP_VER`, attributes, salt presence, and raw extended-time
   bytes.
-- Stored files, basic non-solid RAR 2.9/3.x LZ-compressed files, and the
-  standard RARVM E8/E8E9/DELTA/ITANIUM filter fixtures can be extracted
-  through the public facade and CLI, with full file-data CRC32 verification.
+- Stored files, RAR 1.5 `UNP_VER=15` Unpack15-compressed files, basic non-solid
+  RAR 2.9/3.x LZ-compressed files, and the standard RARVM
+  E8/E8E9/DELTA/ITANIUM filter fixtures can be extracted through the public
+  facade and CLI, with full file-data CRC32 verification.
 - Non-AV/SIGN block headers are validated with `HEAD_CRC = CRC32(header[2..]) &
   0xFFFF`.
 - `NEWSUB` service headers are classified at parse time. The current typed
@@ -176,18 +181,20 @@ The first reader slice is implemented:
   keeping raw dictionary history separate. It also clamps RAR3 Huffman table
   run lengths to the table boundary, matching the reference readers, and handles
   the early zero repeat-distance slot as a one-byte-back match.
-- Fixture coverage includes RAR 3.00 archive comments (`NEWSUB` name `CMT`),
-  stored file metadata, solid archive flags, old/new multivolume numbering,
-  split-after flags, RAR 4.20 extended-time headers, corrupt header checksum
-  rejection, corrupt stored-payload CRC32 rejection, incomplete stored-volume
-  rejection, standalone Unpack29 LZ extraction, reusable decoder-state
-  regression coverage, compressed archive-comment decode, four standard RARVM
-  filter fixtures, RGB/AUDIO CRC-mismatch guards, and compressed-volume
-  rejection pending cross-volume codec state.
+- Fixture coverage includes RAR 1.54 Unpack15 extraction, RAR 2.50 Unpack20
+  dispatch-to-explicit-unsupported, RAR 3.00 archive comments (`NEWSUB` name
+  `CMT`), stored file metadata, solid archive flags, old/new multivolume
+  numbering, split-after flags, RAR 4.20 extended-time headers, corrupt header
+  checksum rejection, corrupt stored-payload CRC32 rejection, incomplete
+  stored-volume rejection, standalone Unpack29 LZ extraction, reusable
+  decoder-state regression coverage, compressed archive-comment decode, four
+  standard RARVM filter fixtures, RGB/AUDIO CRC-mismatch guards, and
+  compressed-volume rejection pending cross-volume codec state.
 - The public facade dispatches `ArchiveReader::read` to RAR 1.5-4.x parsing,
-  and `rars info`, `rars test`, and `rars x` work for stored and basic
-  non-solid LZ-compressed RAR 1.5-4.x archives, including stored volume sets
-  when all parts are supplied in order. Parsed file/service headers store
+  and `rars info`, `rars test`, and `rars x` work for stored, RAR 1.5
+  Unpack15, and basic non-solid LZ-compressed RAR 2.9/3.x archives, including
+  stored volume sets when all parts are supplied in order. Parsed file/service
+  headers store
   packed byte ranges into the archive backing source rather than cloned
   payloads, so parsing no longer duplicates the compressed data for each entry.
   `Archive::parse_path` supports file-backed parsing without loading the whole
@@ -199,10 +206,11 @@ The first reader slice is implemented:
   output in bounded chunks, delay flushing across incomplete RARVM filter
   blocks, and retain only the sliding history needed by later matches. Normal
   vector-returning extraction and direct-to-writer extraction now share the same
-  per-archive decoder session, so solid/non-solid Unpack29 state ownership is
-  centralized instead of duplicated across extraction paths. Volume-aware
-  `extract_volumes_to` streams stored split members across chained archive
-  ranges without reassembling the packed stream in memory.
+  per-archive decoder session. That session owns a codec-state enum rather than
+  a dedicated Unpack29 field: `UNP_VER=15` uses Unpack15, `UNP_VER=20` is routed
+  to an explicit Unpack20-not-ported state, and `UNP_VER>=29` uses Unpack29.
+  Volume-aware `extract_volumes_to` streams stored split members across chained
+  archive ranges without reassembling the packed stream in memory.
 
 Next RAR 1.5-4.x tasks:
 
@@ -212,8 +220,8 @@ Next RAR 1.5-4.x tasks:
   parity in the LZ/filter output.
 - Finish compressed split-volume extraction; the current guard shows additional
   split stream semantics beyond simple packed-byte concatenation.
-- Add `UNP_VER` dispatch for RAR 1.5-4.x compressed files, then add RAR
-  2.0/Unpack20 coverage.
+- Port RAR 2.0/Unpack20 and replace the current explicit unsupported
+  `UNP_VER=20` codec-state placeholder with a real decoder.
 - Add PPMd coverage for RAR 2.9+ method 0x35.
 - Add RAR 1.5-4.x file/header encryption modules.
 
@@ -223,10 +231,10 @@ Architectural debt to address before the RAR 5.0 streaming slice:
   1.5-4.x direct-to-writer paths now stream stored data, compressed output, and
   packed codec input for file-backed archives, including legacy encrypted
   RAR 1.3/1.4 entries.
-- Extend the same decoder-session model to RAR 1.5-4.x compressed split-volume
+- Extend the codec-state session to RAR 1.5-4.x compressed split-volume
   extraction. Stored split volumes stream through `extract_volumes_to`, but
   compressed split volumes remain guarded by fixture tests until the split stream
-  semantics are wired through the session.
+  semantics are understood and wired through the session.
 - Enrich library errors with archive offsets and block context before treating
   the public API as stable.
 

@@ -1,6 +1,7 @@
 use crate::detect::{find_archive_start, RAR15_SIGNATURE};
 use crate::error::{Error, Result};
 use crate::version::ArchiveFamily;
+use rars_codec::rar13::Unpack15;
 use rars_codec::rar29::Unpack29;
 use std::fs::File;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
@@ -213,18 +214,8 @@ impl FileHeader {
         if self.is_stored() {
             return self.stored_data(archive);
         }
-        if self.is_encrypted() {
-            return Err(Error::InvalidHeader(
-                "RAR 1.5 encrypted file extraction is not implemented",
-            ));
-        }
-        if self.unp_ver >= 29 {
-            let mut decoder = Unpack29::new();
-            return self.unpacked_data_with_rar29(archive, &mut decoder);
-        }
-        Err(Error::InvalidHeader(
-            "RAR 1.5 compressed file extraction is not implemented",
-        ))
+        let mut session = DecoderSession::new(false);
+        session.decode_file_data(archive, self)
     }
 
     pub fn unpacked_data_with_rar29(
@@ -250,6 +241,35 @@ impl FileHeader {
                 &self.packed_data(archive)?,
                 usize::try_from(self.unp_size)
                     .map_err(|_| Error::InvalidHeader("RAR 2.9 unpacked size overflows usize"))?,
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn unpacked_data_with_unpack15(
+        &self,
+        archive: &Archive,
+        decoder: &mut Unpack15,
+        solid: bool,
+    ) -> Result<Vec<u8>> {
+        if self.is_stored() {
+            return self.stored_data(archive);
+        }
+        if self.is_encrypted() {
+            return Err(Error::InvalidHeader(
+                "RAR 1.5 encrypted file extraction is not implemented",
+            ));
+        }
+        if self.unp_ver != 15 {
+            return Err(Error::InvalidHeader(
+                "RAR 1.5 compressed file extraction is not implemented",
+            ));
+        }
+        decoder
+            .decode_member(
+                &self.packed_data(archive)?,
+                usize::try_from(self.unp_size)
+                    .map_err(|_| Error::InvalidHeader("RAR 1.5 unpacked size overflows usize"))?,
+                solid,
             )
             .map_err(Into::into)
     }
@@ -388,6 +408,53 @@ impl FileHeader {
                 &mut packed,
                 usize::try_from(self.unp_size)
                     .map_err(|_| Error::InvalidHeader("RAR 1.5 unpacked size overflows usize"))?,
+                &mut crc_writer,
+            )
+            .map_err(Error::from)?;
+        let actual = crc.finish();
+        if actual == self.file_crc {
+            Ok(())
+        } else {
+            Err(Error::Crc32Mismatch {
+                expected: self.file_crc,
+                actual,
+            })
+        }
+    }
+
+    fn write_unpack15_to(
+        &self,
+        archive: &Archive,
+        decoder: &mut Unpack15,
+        solid: bool,
+        out: &mut impl Write,
+    ) -> Result<()> {
+        if self.is_stored() {
+            return self.write_stored_to(archive, out);
+        }
+        if self.is_encrypted() {
+            return Err(Error::InvalidHeader(
+                "RAR 1.5 encrypted file extraction is not implemented",
+            ));
+        }
+        if self.unp_ver != 15 {
+            return Err(Error::InvalidHeader(
+                "RAR 1.5 compressed file extraction is not implemented",
+            ));
+        }
+
+        let mut packed = archive.range_reader(self.packed_range.clone())?;
+        let mut crc = Crc32::new();
+        let mut crc_writer = CrcWriter {
+            inner: out,
+            crc: &mut crc,
+        };
+        decoder
+            .decode_member_from_reader(
+                &mut packed,
+                usize::try_from(self.unp_size)
+                    .map_err(|_| Error::InvalidHeader("RAR 1.5 unpacked size overflows usize"))?,
+                solid,
                 &mut crc_writer,
             )
             .map_err(Error::from)?;
@@ -635,6 +702,9 @@ impl Archive {
         Ok(out)
     }
 
+    /// Convenience extraction API that buffers each extracted entry in memory.
+    ///
+    /// Prefer [`Archive::extract_to`] for large archives.
     pub fn extract(&self) -> Result<Vec<ExtractedEntry>> {
         if self.main.has_encrypted_headers() {
             return Err(Error::InvalidHeader(
@@ -655,6 +725,7 @@ impl Archive {
         Ok(out)
     }
 
+    /// Streams extracted entries to caller-provided writers.
     pub fn extract_to<F>(&self, mut open: F) -> Result<()>
     where
         F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
@@ -700,16 +771,85 @@ impl Archive {
     }
 }
 
+enum CodecState {
+    Unpack15(Unpack15),
+    Unpack20Unsupported,
+    Unpack29(Unpack29),
+}
+
+impl CodecState {
+    fn new_for(file: &FileHeader) -> Result<Self> {
+        if file.is_encrypted() {
+            return Err(Error::InvalidHeader(
+                "RAR 1.5 encrypted file extraction is not implemented",
+            ));
+        }
+        if file.unp_ver >= 29 {
+            return Ok(Self::Unpack29(Unpack29::new()));
+        }
+        if file.unp_ver == 20 {
+            return Ok(Self::Unpack20Unsupported);
+        }
+        if file.unp_ver == 15 {
+            return Ok(Self::Unpack15(Unpack15::new()));
+        }
+        Err(Error::InvalidHeader(
+            "RAR 1.5 compressed file extraction is not implemented",
+        ))
+    }
+
+    fn supports(&self, file: &FileHeader) -> bool {
+        match self {
+            Self::Unpack15(_) => !file.is_encrypted() && file.unp_ver == 15,
+            Self::Unpack20Unsupported => !file.is_encrypted() && file.unp_ver == 20,
+            Self::Unpack29(_) => !file.is_encrypted() && file.unp_ver >= 29,
+        }
+    }
+
+    fn decode_file_data(
+        &mut self,
+        archive: &Archive,
+        file: &FileHeader,
+        solid: bool,
+    ) -> Result<Vec<u8>> {
+        match self {
+            Self::Unpack15(decoder) => file.unpacked_data_with_unpack15(archive, decoder, solid),
+            Self::Unpack20Unsupported => Err(Error::InvalidHeader(
+                "RAR 2.0 compressed file extraction is not implemented",
+            )),
+            Self::Unpack29(decoder) => file.unpacked_data_with_rar29(archive, decoder),
+        }
+    }
+
+    fn write_file_to(
+        &mut self,
+        archive: &Archive,
+        file: &FileHeader,
+        solid: bool,
+        out: &mut impl Write,
+    ) -> Result<()> {
+        match self {
+            Self::Unpack15(decoder) => file.write_unpack15_to(archive, decoder, solid, out),
+            Self::Unpack20Unsupported => Err(Error::InvalidHeader(
+                "RAR 2.0 compressed file extraction is not implemented",
+            )),
+            Self::Unpack29(decoder) => file.write_rar29_to(archive, decoder, out),
+        }
+    }
+}
+
 struct DecoderSession {
-    rar29: Unpack29,
+    codec: Option<CodecState>,
     solid: bool,
+    decoded_files: usize,
 }
 
 impl DecoderSession {
     fn new(solid: bool) -> Self {
         Self {
-            rar29: Unpack29::new(),
+            codec: None,
             solid,
+            decoded_files: 0,
         }
     }
 
@@ -717,9 +857,9 @@ impl DecoderSession {
         if file.is_directory() || file.is_stored() {
             return file.extract(archive);
         }
-        self.prepare_for(file);
-        let data = file.unpacked_data_with_rar29(archive, &mut self.rar29)?;
+        let data = self.decode_file_data(archive, file)?;
         file.verify_crc32(&data)?;
+        self.decoded_files += 1;
         Ok(ExtractedEntry {
             name: file.name.clone(),
             data,
@@ -736,17 +876,35 @@ impl DecoderSession {
         file: &FileHeader,
         out: &mut impl Write,
     ) -> Result<()> {
-        self.prepare_for(file);
-        file.write_rar29_to(archive, &mut self.rar29, out)
+        let solid = self.solid && self.decoded_files != 0;
+        self.codec_for(file)?
+            .write_file_to(archive, file, solid, out)?;
+        self.decoded_files += 1;
+        Ok(())
     }
 
-    fn prepare_for(&mut self, file: &FileHeader) {
-        if !self.solid && !file.is_stored() {
-            self.rar29 = Unpack29::new();
+    fn decode_file_data(&mut self, archive: &Archive, file: &FileHeader) -> Result<Vec<u8>> {
+        let solid = self.solid && self.decoded_files != 0;
+        self.codec_for(file)?.decode_file_data(archive, file, solid)
+    }
+
+    fn codec_for(&mut self, file: &FileHeader) -> Result<&mut CodecState> {
+        let reset = !self.solid
+            || self
+                .codec
+                .as_ref()
+                .is_none_or(|codec| !codec.supports(file));
+        if reset {
+            self.codec = Some(CodecState::new_for(file)?);
         }
+        self.codec
+            .as_mut()
+            .ok_or(Error::InvalidHeader("RAR 1.5 codec state is missing"))
     }
 }
 
+/// Convenience multivolume extraction API that buffers each extracted entry in
+/// memory. Prefer [`extract_volumes_to`] for large archives.
 pub fn extract_volumes(volumes: &[Archive]) -> Result<Vec<ExtractedEntry>> {
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -785,6 +943,7 @@ pub fn extract_volumes(volumes: &[Archive]) -> Result<Vec<ExtractedEntry>> {
     Ok(out)
 }
 
+/// Streams a multivolume archive set to caller-provided writers.
 pub fn extract_volumes_to<F>(volumes: &[Archive], mut open: F) -> Result<()>
 where
     F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,

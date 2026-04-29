@@ -154,6 +154,58 @@ fn extracts_compressed_rar300_lz_file() {
 }
 
 #[test]
+fn extracts_rar154_unp15_compressed_file() {
+    let bytes = std::fs::read(fixture("rar154/readme_154_normal.rar")).unwrap();
+    let expected = std::fs::read(fixture("rar154/README.md")).unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let file = archive.files().next().unwrap();
+
+    assert_eq!(file.name, b"README.md");
+    assert_eq!(file.method, 0x33);
+    assert_eq!(file.unp_ver, 15);
+    assert_eq!(file.pack_size, 2068);
+    assert_eq!(file.unp_size, 4198);
+
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].name, b"README.md");
+    assert_eq!(extracted[0].data, expected);
+    assert_eq!(crc32(&extracted[0].data), 0x509e5e3c);
+}
+
+#[test]
+fn extracts_rar154_unp15_solid_flagged_file() {
+    let bytes = std::fs::read(fixture("rar154/readme_154_store_solid.rar")).unwrap();
+    let expected = std::fs::read(fixture("rar154/README.md")).unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+
+    assert!(archive.main.is_solid());
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].name, b"README.md");
+    assert_eq!(extracted[0].data, expected);
+}
+
+#[test]
+fn rejects_rar250_unp20_until_codec_is_ported() {
+    let bytes = std::fs::read(fixture("rar250/AUTOREJ.RAR")).unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let file = archive.files().next().unwrap();
+
+    assert_eq!(file.name, b"PLAIN.TXT");
+    assert_eq!(file.method, 0x35);
+    assert_eq!(file.unp_ver, 20);
+    assert_eq!(file.pack_size, 54);
+    assert_eq!(file.unp_size, 2300);
+    assert!(matches!(
+        archive.extract(),
+        Err(Error::InvalidHeader(
+            "RAR 2.0 compressed file extraction is not implemented"
+        ))
+    ));
+}
+
+#[test]
 fn extracts_rar300_standard_rarvm_filter_fixtures() {
     for (name, entry_name, size, expected_crc) in [
         (

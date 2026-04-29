@@ -435,6 +435,9 @@ impl Archive {
         Ok(out)
     }
 
+    /// Convenience extraction API that buffers each extracted entry in memory.
+    ///
+    /// Prefer [`Archive::extract_to`] for large archives.
     pub fn extract(&self, password: Option<&[u8]>) -> Result<Vec<ExtractedEntry>> {
         let mut out = Vec::new();
         let mut unpack15 = Unpack15::new();
@@ -454,6 +457,7 @@ impl Archive {
         Ok(out)
     }
 
+    /// Streams extracted entries to caller-provided writers.
     pub fn extract_to<F>(&self, password: Option<&[u8]>, mut open: F) -> Result<()>
     where
         F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
@@ -825,6 +829,8 @@ impl Entry {
     }
 }
 
+/// Convenience multivolume extraction API that buffers each extracted entry in
+/// memory. Prefer [`extract_volumes_to`] for large archives.
 pub fn extract_volumes(
     volumes: &[Archive],
     password: Option<&[u8]>,
@@ -885,6 +891,7 @@ pub fn extract_volumes(
     Ok(out)
 }
 
+/// Streams a multivolume archive set to caller-provided writers.
 pub fn extract_volumes_to<F>(
     volumes: &[Archive],
     password: Option<&[u8]>,
