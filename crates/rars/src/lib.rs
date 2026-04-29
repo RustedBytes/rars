@@ -2,7 +2,7 @@ pub use rars_format::{
     detect_archive_family, find_archive_start, rar13, rar15_40, ArchiveFamily, ArchiveSignature,
     ArchiveVersion, Error, FeatureSet, Result,
 };
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,6 +15,14 @@ pub enum Archive {
 pub struct ExtractedEntry {
     pub name: Vec<u8>,
     pub data: Vec<u8>,
+    pub file_time: u32,
+    pub file_attr: u32,
+    pub is_directory: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractedEntryMeta {
+    pub name: Vec<u8>,
     pub file_time: u32,
     pub file_attr: u32,
     pub is_directory: bool,
@@ -36,6 +44,30 @@ impl Archive {
             Self::Rar15To40(archive) => archive
                 .extract()
                 .map(|entries| entries.into_iter().map(Into::into).collect()),
+        }
+    }
+
+    pub fn extract_to<F>(&self, password: Option<&[u8]>, mut open: F) -> Result<()>
+    where
+        F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
+    {
+        match self {
+            Self::Rar13(archive) => archive.extract_to(password, |meta| {
+                open(&ExtractedEntryMeta {
+                    name: meta.name.clone(),
+                    file_time: meta.file_time,
+                    file_attr: meta.file_attr as u32,
+                    is_directory: meta.is_directory,
+                })
+            }),
+            Self::Rar15To40(archive) => archive.extract_to(|meta| {
+                open(&ExtractedEntryMeta {
+                    name: meta.name.clone(),
+                    file_time: meta.file_time,
+                    file_attr: meta.attr,
+                    is_directory: meta.is_directory,
+                })
+            }),
         }
     }
 

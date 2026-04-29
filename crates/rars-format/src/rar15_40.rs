@@ -140,6 +140,15 @@ pub struct ExtractedEntry {
     pub is_directory: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractedEntryMeta {
+    pub name: Vec<u8>,
+    pub file_time: u32,
+    pub attr: u32,
+    pub host_os: u8,
+    pub is_directory: bool,
+}
+
 #[derive(Debug)]
 struct PendingSplit {
     name: Vec<u8>,
@@ -268,6 +277,16 @@ impl FileHeader {
         }
     }
 
+    pub fn metadata(&self) -> ExtractedEntryMeta {
+        ExtractedEntryMeta {
+            name: self.name.clone(),
+            file_time: self.file_time,
+            attr: self.attr,
+            host_os: self.host_os,
+            is_directory: self.is_directory(),
+        }
+    }
+
     pub fn extract_stored(&self, archive: &Archive) -> Result<ExtractedEntry> {
         if self.is_directory() {
             return Ok(ExtractedEntry {
@@ -314,6 +333,84 @@ impl FileHeader {
             host_os: self.host_os,
             is_directory: false,
         })
+    }
+
+    fn write_stored_to(&self, archive: &Archive, out: &mut impl Write) -> Result<()> {
+        if self.is_encrypted() {
+            return Err(Error::InvalidHeader(
+                "RAR 1.5 encrypted file extraction is not implemented",
+            ));
+        }
+        if !self.is_stored() {
+            return Err(Error::InvalidHeader(
+                "RAR 1.5 compressed file extraction is not implemented",
+            ));
+        }
+        if self.pack_size != self.unp_size {
+            return Err(Error::InvalidHeader(
+                "RAR 1.5 stored file has mismatched packed and unpacked sizes",
+            ));
+        }
+        let mut crc = Crc32::new();
+        let mut crc_writer = CrcWriter {
+            inner: out,
+            crc: &mut crc,
+        };
+        self.write_packed_data(archive, &mut crc_writer)?;
+        let actual = crc.finish();
+        if actual == self.file_crc {
+            Ok(())
+        } else {
+            Err(Error::Crc32Mismatch {
+                expected: self.file_crc,
+                actual,
+            })
+        }
+    }
+
+    fn write_rar29_to(
+        &self,
+        archive: &Archive,
+        decoder: &mut Unpack29,
+        out: &mut impl Write,
+    ) -> Result<()> {
+        if self.is_stored() {
+            return self.write_stored_to(archive, out);
+        }
+        if self.is_encrypted() {
+            return Err(Error::InvalidHeader(
+                "RAR 1.5 encrypted file extraction is not implemented",
+            ));
+        }
+        if self.unp_ver < 29 {
+            return Err(Error::InvalidHeader(
+                "RAR 1.5 compressed file extraction is not implemented",
+            ));
+        }
+
+        let packed = self.packed_data(archive)?;
+        let mut crc = Crc32::new();
+        let mut crc_writer = CrcWriter {
+            inner: out,
+            crc: &mut crc,
+        };
+        decoder
+            .decode_member_to(
+                &packed,
+                usize::try_from(self.unp_size)
+                    .map_err(|_| Error::InvalidHeader("RAR 1.5 unpacked size overflows usize"))?,
+                &mut crc_writer,
+            )
+            .map_err(Error::from)?;
+        let actual = crc.finish();
+        if actual == self.file_crc {
+            Ok(())
+        } else {
+            Err(Error::Crc32Mismatch {
+                expected: self.file_crc,
+                actual,
+            })
+        }
     }
 }
 
@@ -559,6 +656,42 @@ impl Archive {
             }
         }
         Ok(out)
+    }
+
+    pub fn extract_to<F>(&self, mut open: F) -> Result<()>
+    where
+        F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
+    {
+        if self.main.has_encrypted_headers() {
+            return Err(Error::InvalidHeader(
+                "RAR 1.5 encrypted header extraction is not implemented",
+            ));
+        }
+
+        let mut rar29 = Unpack29::new();
+        let shared_rar29 = self.main.is_solid();
+        for file in self.files() {
+            if file.is_split_before() || file.is_split_after() {
+                return Err(Error::InvalidHeader(
+                    "RAR 1.5 split entry requires multivolume extraction",
+                ));
+            }
+            let meta = file.metadata();
+            if meta.is_directory {
+                let _ = open(&meta)?;
+                continue;
+            }
+            let mut writer = open(&meta)?;
+            if file.is_stored() {
+                file.write_stored_to(self, &mut writer)?;
+            } else if shared_rar29 {
+                file.write_rar29_to(self, &mut rar29, &mut writer)?;
+            } else {
+                rar29 = Unpack29::new();
+                file.write_rar29_to(self, &mut rar29, &mut writer)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn archive_comment(&self) -> Result<Option<Vec<u8>>> {
@@ -937,6 +1070,47 @@ fn relative_block(block: &BlockHeader) -> BlockHeader {
     relative
 }
 
+struct CrcWriter<'a, W: Write + ?Sized> {
+    inner: &'a mut W,
+    crc: &'a mut Crc32,
+}
+
+impl<W: Write + ?Sized> Write for CrcWriter<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        self.crc.update(&buf[..written]);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+struct Crc32 {
+    value: u32,
+}
+
+impl Crc32 {
+    fn new() -> Self {
+        Self { value: 0xffff_ffff }
+    }
+
+    fn update(&mut self, input: &[u8]) {
+        for &byte in input {
+            self.value ^= byte as u32;
+            for _ in 0..8 {
+                let mask = 0u32.wrapping_sub(self.value & 1);
+                self.value = (self.value >> 1) ^ (0xedb8_8320 & mask);
+            }
+        }
+    }
+
+    fn finish(self) -> u32 {
+        !self.value
+    }
+}
+
 fn parse_block_header(input: &[u8], offset: usize) -> Result<BlockHeader> {
     if input.len() < offset + 7 {
         return Err(Error::TooShort);
@@ -999,13 +1173,7 @@ fn read_u32(input: &[u8], offset: usize) -> Result<u32> {
 }
 
 pub fn crc32(input: &[u8]) -> u32 {
-    let mut crc = 0xffff_ffffu32;
-    for &byte in input {
-        crc ^= byte as u32;
-        for _ in 0..8 {
-            let mask = 0u32.wrapping_sub(crc & 1);
-            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
-        }
-    }
-    !crc
+    let mut crc = Crc32::new();
+    crc.update(input);
+    crc.finish()
 }

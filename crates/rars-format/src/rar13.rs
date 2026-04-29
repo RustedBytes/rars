@@ -91,6 +91,14 @@ pub struct ExtractedEntry {
     pub is_directory: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractedEntryMeta {
+    pub name: Vec<u8>,
+    pub file_time: u32,
+    pub file_attr: u8,
+    pub is_directory: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WriterOptions {
     pub target: ArchiveVersion,
@@ -395,6 +403,41 @@ impl Archive {
         Ok(out)
     }
 
+    pub fn extract_to<F>(&self, password: Option<&[u8]>, mut open: F) -> Result<()>
+    where
+        F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
+    {
+        let mut unpack15 = Unpack15::new();
+        let mut extracted_count = 0usize;
+        for entry in &self.entries {
+            if entry.is_split_before() || entry.is_split_after() {
+                return Err(Error::InvalidHeader(
+                    "RAR 1.3 split entry requires multivolume extraction",
+                ));
+            }
+            let meta = entry.metadata();
+            if meta.is_directory {
+                let _ = open(&meta)?;
+                extracted_count += 1;
+                continue;
+            }
+            let mut writer = open(&meta)?;
+            if entry.is_stored() && !entry.is_encrypted() {
+                entry.write_stored_to(self, password, &mut writer)?;
+            } else {
+                entry.write_compressed_to(
+                    self,
+                    password,
+                    &mut unpack15,
+                    self.main.is_solid() && extracted_count != 0,
+                    &mut writer,
+                )?;
+            }
+            extracted_count += 1;
+        }
+        Ok(())
+    }
+
     pub fn archive_comment(&self) -> Result<Option<Vec<u8>>> {
         if !self.main.has_archive_comment() {
             return Ok(None);
@@ -570,6 +613,15 @@ impl Entry {
         }
     }
 
+    pub fn metadata(&self) -> ExtractedEntryMeta {
+        ExtractedEntryMeta {
+            name: self.name.clone(),
+            file_time: self.header.file_time,
+            file_attr: self.header.file_attr,
+            is_directory: self.is_directory(),
+        }
+    }
+
     pub fn extract_stored(
         &self,
         archive: &Archive,
@@ -594,6 +646,72 @@ impl Entry {
             file_attr: self.header.file_attr,
             is_directory: self.is_directory(),
         })
+    }
+
+    fn write_stored_to(
+        &self,
+        archive: &Archive,
+        password: Option<&[u8]>,
+        out: &mut impl Write,
+    ) -> Result<()> {
+        if !self.is_stored() {
+            return Err(Error::InvalidHeader("RAR 1.3 entry is not stored"));
+        }
+        if self.is_encrypted() {
+            let data = self.stored_data(archive, password)?;
+            self.verify_checksum(&data)?;
+            out.write_all(&data)?;
+            return Ok(());
+        }
+        let mut checksum = Rar13Checksum::new();
+        let mut checksum_writer = Rar13ChecksumWriter {
+            inner: out,
+            checksum: &mut checksum,
+        };
+        self.write_packed_data(archive, &mut checksum_writer)?;
+        let actual = checksum.finish();
+        if actual == self.header.file_crc {
+            Ok(())
+        } else {
+            Err(Error::CrcMismatch {
+                expected: self.header.file_crc,
+                actual,
+            })
+        }
+    }
+
+    fn write_compressed_to(
+        &self,
+        archive: &Archive,
+        password: Option<&[u8]>,
+        unpack15: &mut Unpack15,
+        solid: bool,
+        out: &mut impl Write,
+    ) -> Result<()> {
+        if self.is_stored() || self.is_directory() {
+            return self.write_stored_to(archive, password, out);
+        }
+        let packed = self.decrypt_packed_data(archive, password)?;
+        let mut checksum = Rar13Checksum::new();
+        let mut checksum_writer = Rar13ChecksumWriter {
+            inner: out,
+            checksum: &mut checksum,
+        };
+        unpack15.decode_member_to(
+            &packed,
+            self.header.unp_size as usize,
+            solid,
+            &mut checksum_writer,
+        )?;
+        let actual = checksum.finish();
+        if actual == self.header.file_crc {
+            Ok(())
+        } else {
+            Err(Error::CrcMismatch {
+                expected: self.header.file_crc,
+                actual,
+            })
+        }
     }
 
     pub fn extract(&self, archive: &Archive, password: Option<&[u8]>) -> Result<ExtractedEntry> {
@@ -700,6 +818,43 @@ fn read_exact_at(file: &mut File, offset: usize, len: usize) -> Result<Vec<u8>> 
     let mut data = vec![0; len];
     file.read_exact(&mut data)?;
     Ok(data)
+}
+
+struct Rar13ChecksumWriter<'a, W: Write + ?Sized> {
+    inner: &'a mut W,
+    checksum: &'a mut Rar13Checksum,
+}
+
+impl<W: Write + ?Sized> Write for Rar13ChecksumWriter<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        self.checksum.update(&buf[..written]);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+struct Rar13Checksum {
+    value: u16,
+}
+
+impl Rar13Checksum {
+    fn new() -> Self {
+        Self { value: 0 }
+    }
+
+    fn update(&mut self, input: &[u8]) {
+        for &byte in input {
+            self.value = self.value.wrapping_add(byte as u16).rotate_left(1);
+        }
+    }
+
+    fn finish(self) -> u16 {
+        self.value
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1258,11 +1413,9 @@ fn read_u32(input: &[u8], offset: usize) -> Result<u32> {
 }
 
 pub fn file_checksum(input: &[u8]) -> u16 {
-    let mut checksum = 0u16;
-    for &byte in input {
-        checksum = checksum.wrapping_add(byte as u16).rotate_left(1);
-    }
-    checksum
+    let mut checksum = Rar13Checksum::new();
+    checksum.update(input);
+    checksum.finish()
 }
 
 #[cfg(test)]

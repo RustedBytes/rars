@@ -1,4 +1,5 @@
 use crate::{Error, Result};
+use std::io::Write;
 
 const MAIN_COUNT: usize = 299;
 const OFFSET_COUNT: usize = 60;
@@ -6,6 +7,8 @@ const LOW_OFFSET_COUNT: usize = 17;
 const LENGTH_COUNT: usize = 28;
 const LEVEL_COUNT: usize = 20;
 const TABLE_COUNT: usize = MAIN_COUNT + OFFSET_COUNT + LOW_OFFSET_COUNT + LENGTH_COUNT;
+const MAX_HISTORY: usize = 4 * 1024 * 1024;
+const STREAM_CHUNK: usize = 1024 * 1024;
 
 const LENGTH_BASES: [usize; LENGTH_COUNT] = [
     0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 112, 128,
@@ -52,6 +55,7 @@ pub struct Unpack29 {
     filters: Vec<VmFilter>,
     programs: Vec<VmProgram>,
     last_filter: usize,
+    base_offset: usize,
     output: Vec<u8>,
 }
 
@@ -99,12 +103,13 @@ impl Unpack29 {
             filters: Vec::new(),
             programs: Vec::new(),
             last_filter: 0,
+            base_offset: 0,
             output: Vec::new(),
         }
     }
 
     pub fn decode_member(&mut self, input: &[u8], output_size: usize) -> Result<Vec<u8>> {
-        let start = self.output.len();
+        let start = self.current_pos();
         let target = start
             .checked_add(output_size)
             .ok_or(Error::InvalidData("RAR 2.9 output size overflows"))?;
@@ -112,9 +117,9 @@ impl Unpack29 {
             self.bits = BitReader::new();
         }
         self.bits.append(input);
-        while self.output.len() < target {
+        while self.current_pos() < target {
             self.drain_pending_match(target)?;
-            if self.output.len() >= target {
+            if self.current_pos() >= target {
                 break;
             }
             if !self.in_lz_block {
@@ -123,7 +128,32 @@ impl Unpack29 {
             }
             self.decode_lz(target)?;
         }
-        self.filtered_range(start, target)
+        let out = self.filtered_range(start, target)?;
+        self.trim_history(target);
+        Ok(out)
+    }
+
+    pub fn decode_member_to(
+        &mut self,
+        input: &[u8],
+        output_size: usize,
+        out: &mut impl Write,
+    ) -> Result<()> {
+        let mut remaining = output_size;
+        let mut first = true;
+        while remaining > 0 {
+            let chunk = remaining.min(STREAM_CHUNK);
+            let decoded = if first {
+                first = false;
+                self.decode_member(input, chunk)?
+            } else {
+                self.decode_member(&[], chunk)?
+            };
+            out.write_all(&decoded)
+                .map_err(|_| Error::InvalidData("RAR 2.9 output write failed"))?;
+            remaining -= chunk;
+        }
+        Ok(())
     }
 
     fn read_tables(&mut self) -> Result<()> {
@@ -213,7 +243,7 @@ impl Unpack29 {
     }
 
     fn decode_lz(&mut self, output_size: usize) -> Result<()> {
-        while self.output.len() < output_size {
+        while self.current_pos() < output_size {
             let symbol = self.main.decode(&mut self.bits)?;
             match symbol {
                 0..=255 => self.output.push(symbol as u8),
@@ -354,8 +384,7 @@ impl Unpack29 {
             block_start += 258;
         }
         block_start = self
-            .output
-            .len()
+            .current_pos()
             .checked_add(block_start)
             .ok_or(Error::InvalidData("RAR 2.9 VM block start overflows"))?;
 
@@ -432,12 +461,14 @@ impl Unpack29 {
             if filter.start < pos {
                 continue;
             }
-            out.extend_from_slice(&self.output[pos..filter.start]);
+            out.extend_from_slice(self.raw_range(pos, filter.start)?);
             let program = self
                 .programs
                 .get(filter.program)
                 .ok_or(Error::InvalidData("RAR 2.9 VM program is missing"))?;
-            let mut block = self.output[filter.start..filter.start + filter.size].to_vec();
+            let mut block = self
+                .raw_range(filter.start, filter.start + filter.size)?
+                .to_vec();
             apply_standard_filter(
                 program.filter,
                 &mut block,
@@ -447,22 +478,25 @@ impl Unpack29 {
             out.extend_from_slice(&block);
             pos = filter.start + filter.size;
         }
-        out.extend_from_slice(&self.output[pos..end]);
+        out.extend_from_slice(self.raw_range(pos, end)?);
         Ok(out)
     }
 
     fn copy_match(&mut self, length: usize, offset: usize, output_size: usize) -> Result<()> {
         let offset = if offset == 0 { 1 } else { offset };
-        if offset > self.output.len() {
+        let current = self.current_pos();
+        if offset > current {
             return Err(Error::InvalidData("RAR 2.9 match distance is out of range"));
         }
         for index in 0..length {
-            if self.output.len() >= output_size {
+            if self.current_pos() >= output_size {
                 self.pending_match = Some((length - index, offset));
                 break;
             }
-            let src = self.output.len() - offset;
-            let byte = self.output[src];
+            let src = self.current_pos() - offset;
+            let byte = *self
+                .raw_byte(src)
+                .ok_or(Error::InvalidData("RAR 2.9 match distance is out of range"))?;
             self.output.push(byte);
         }
         Ok(())
@@ -488,6 +522,41 @@ impl Unpack29 {
             self.old_offsets[i] = self.old_offsets[i - 1];
         }
         self.old_offsets[0] = value;
+    }
+
+    fn current_pos(&self) -> usize {
+        self.base_offset + self.output.len()
+    }
+
+    fn raw_byte(&self, position: usize) -> Option<&u8> {
+        self.output.get(position.checked_sub(self.base_offset)?)
+    }
+
+    fn raw_range(&self, start: usize, end: usize) -> Result<&[u8]> {
+        if start < self.base_offset || end < start {
+            return Err(Error::InvalidData(
+                "RAR 2.9 retained history is unavailable",
+            ));
+        }
+        let rel_start = start - self.base_offset;
+        let rel_end = end - self.base_offset;
+        self.output
+            .get(rel_start..rel_end)
+            .ok_or(Error::InvalidData(
+                "RAR 2.9 retained history is unavailable",
+            ))
+    }
+
+    fn trim_history(&mut self, current_pos: usize) {
+        let keep_from = current_pos.saturating_sub(MAX_HISTORY);
+        if keep_from <= self.base_offset {
+            return;
+        }
+        let drain = keep_from - self.base_offset;
+        self.output.drain(..drain);
+        self.base_offset = keep_from;
+        self.filters
+            .retain(|filter| filter.start + filter.size > self.base_offset);
     }
 }
 

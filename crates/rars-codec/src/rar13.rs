@@ -1,4 +1,5 @@
 use crate::{Error, Result};
+use std::io::Write;
 
 const DEC_L1: &[u16] = &[
     0x8000, 0xa000, 0xc000, 0xd000, 0xe000, 0xea00, 0xee00, 0xf000, 0xf200, 0xf200, 0xffff,
@@ -648,7 +649,7 @@ fn simulate_decode_num(
 pub struct Unpack15 {
     bits: BitReader,
     target: usize,
-    output: Vec<u8>,
+    output_written: usize,
     window: [u8; 0x10000],
     unp_ptr: usize,
     prev_ptr: usize,
@@ -685,7 +686,7 @@ impl Unpack15 {
         Self {
             bits: BitReader::new(&[]),
             target: 0,
-            output: Vec::new(),
+            output_written: 0,
             window: [0; 0x10000],
             unp_ptr: 0,
             prev_ptr: 0,
@@ -719,9 +720,21 @@ impl Unpack15 {
     }
 
     pub fn decode_member(&mut self, input: &[u8], target: usize, solid: bool) -> Result<Vec<u8>> {
+        let mut output = Vec::with_capacity(target);
+        self.decode_member_to(input, target, solid, &mut output)?;
+        Ok(output)
+    }
+
+    pub fn decode_member_to(
+        &mut self,
+        input: &[u8],
+        target: usize,
+        solid: bool,
+        out: &mut impl Write,
+    ) -> Result<()> {
         self.bits = BitReader::new(input);
         self.target = target;
-        self.output = Vec::with_capacity(target);
+        self.output_written = 0;
         self.flags_cnt = 0;
         self.flag_buf = 0;
         self.st_mode = false;
@@ -732,19 +745,19 @@ impl Unpack15 {
         }
 
         if self.target == 0 {
-            return Ok(Vec::new());
+            return Ok(());
         }
 
         self.get_flags_buf();
         self.flags_cnt = 8;
 
-        while self.output.len() < self.target {
+        while self.output_written < self.target {
             self.unp_ptr &= 0xffff;
             self.first_win_done |= self.prev_ptr > self.unp_ptr;
             self.prev_ptr = self.unp_ptr;
 
             if self.st_mode {
-                self.huff_decode()?;
+                self.huff_decode(out)?;
                 continue;
             }
 
@@ -757,9 +770,9 @@ impl Unpack15 {
             if self.flag_buf & 0x80 != 0 {
                 self.flag_buf = (self.flag_buf << 1) & 0xff;
                 if self.nlzb > self.nhfb {
-                    self.long_lz()?;
+                    self.long_lz(out)?;
                 } else {
-                    self.huff_decode()?;
+                    self.huff_decode(out)?;
                 }
             } else {
                 self.flag_buf = (self.flag_buf << 1) & 0xff;
@@ -771,18 +784,18 @@ impl Unpack15 {
                 if self.flag_buf & 0x80 != 0 {
                     self.flag_buf = (self.flag_buf << 1) & 0xff;
                     if self.nlzb > self.nhfb {
-                        self.huff_decode()?;
+                        self.huff_decode(out)?;
                     } else {
-                        self.long_lz()?;
+                        self.long_lz(out)?;
                     }
                 } else {
                     self.flag_buf = (self.flag_buf << 1) & 0xff;
-                    self.short_lz()?;
+                    self.short_lz(out)?;
                 }
             }
         }
 
-        Ok(std::mem::take(&mut self.output))
+        Ok(())
     }
 
     fn reset_non_solid(&mut self) {
@@ -807,13 +820,13 @@ impl Unpack15 {
         self.init_huff();
     }
 
-    fn short_lz(&mut self) -> Result<()> {
+    fn short_lz(&mut self, out: &mut impl Write) -> Result<()> {
         self.num_huf = 0;
         let mut bit_field = self.bits.get_bits();
         if self.l_count == 2 {
             self.bits.add_bits(1);
             if bit_field >= 0x8000 {
-                self.copy_string(self.last_dist, self.last_length)?;
+                self.copy_string(self.last_dist, self.last_length, out)?;
                 return Ok(());
             }
             bit_field = (bit_field << 1) & 0xffff;
@@ -848,7 +861,7 @@ impl Unpack15 {
         if length >= 9 {
             if length == 9 {
                 self.l_count += 1;
-                self.copy_string(self.last_dist, self.last_length)?;
+                self.copy_string(self.last_dist, self.last_length, out)?;
                 return Ok(());
             }
             if length == 14 {
@@ -858,7 +871,7 @@ impl Unpack15 {
                 self.bits.add_bits(15);
                 self.last_length = length;
                 self.last_dist = distance;
-                self.copy_string(distance, length)?;
+                self.copy_string(distance, length, out)?;
                 return Ok(());
             }
 
@@ -879,7 +892,7 @@ impl Unpack15 {
             }
 
             self.remember_match(distance, length);
-            self.copy_string(distance, length)?;
+            self.copy_string(distance, length, out)?;
             return Ok(());
         }
 
@@ -898,10 +911,10 @@ impl Unpack15 {
         length += 2;
         distance += 1;
         self.remember_match(distance, length);
-        self.copy_string(distance, length)
+        self.copy_string(distance, length, out)
     }
 
-    fn long_lz(&mut self) -> Result<()> {
+    fn long_lz(&mut self, out: &mut impl Write) -> Result<()> {
         self.num_huf = 0;
         self.nlzb += 16;
         if self.nlzb > 0xff {
@@ -987,10 +1000,10 @@ impl Unpack15 {
         }
 
         self.remember_match(distance, length);
-        self.copy_string(distance, length)
+        self.copy_string(distance, length, out)
     }
 
-    fn huff_decode(&mut self) -> Result<()> {
+    fn huff_decode(&mut self, out: &mut impl Write) -> Result<()> {
         let bit_field = self.bits.get_bits();
 
         let mut byte_place = if self.avr_plc > 0x75ff {
@@ -1023,7 +1036,7 @@ impl Unpack15 {
                 let mut distance = self.decode_num(self.bits.get_bits(), 5, DEC_HF2, POS_HF2);
                 distance = (distance << 5) | (self.bits.get_bits() >> 11);
                 self.bits.add_bits(5);
-                self.copy_string(distance, length)?;
+                self.copy_string(distance, length, out)?;
                 return Ok(());
             }
             byte_place -= 1;
@@ -1043,7 +1056,7 @@ impl Unpack15 {
         }
 
         let byte = (self.ch_set[byte_place as usize] >> 8) as u8;
-        self.put_byte(byte)?;
+        self.put_byte(byte, out)?;
 
         let idx = byte_place as usize;
         let mut cur_byte;
@@ -1110,8 +1123,8 @@ impl Unpack15 {
             + pos_tab[start_pos as usize] as u32
     }
 
-    fn copy_string(&mut self, distance: u32, length: u32) -> Result<()> {
-        if self.output.len() + length as usize > self.target {
+    fn copy_string(&mut self, distance: u32, length: u32, out: &mut impl Write) -> Result<()> {
+        if self.output_written + length as usize > self.target {
             return Err(Error::InvalidData("RAR 1.3 match exceeds output size"));
         }
 
@@ -1120,24 +1133,26 @@ impl Unpack15 {
             || distance == 0
         {
             for _ in 0..length {
-                self.put_byte(0)?;
+                self.put_byte(0, out)?;
             }
         } else {
             for _ in 0..length {
                 let byte = self.window[(self.unp_ptr.wrapping_sub(distance as usize)) & 0xffff];
-                self.put_byte(byte)?;
+                self.put_byte(byte, out)?;
             }
         }
         Ok(())
     }
 
-    fn put_byte(&mut self, byte: u8) -> Result<()> {
-        if self.output.len() >= self.target {
+    fn put_byte(&mut self, byte: u8, out: &mut impl Write) -> Result<()> {
+        if self.output_written >= self.target {
             return Err(Error::InvalidData("RAR 1.3 literal exceeds output size"));
         }
         self.window[self.unp_ptr] = byte;
         self.unp_ptr = (self.unp_ptr + 1) & 0xffff;
-        self.output.push(byte);
+        out.write_all(&[byte])
+            .map_err(|_| Error::InvalidData("RAR 1.3 output write failed"))?;
+        self.output_written += 1;
         Ok(())
     }
 

@@ -1,7 +1,7 @@
 use rars::rar13::{self, FileEntry, StoredEntry, WriterOptions};
 use rars::{
     extract_volumes, Archive as DetectedArchive, ArchiveReader, ArchiveVersion, Error,
-    ExtractedEntry, FeatureSet,
+    ExtractedEntry, ExtractedEntryMeta, FeatureSet,
 };
 use std::env;
 use std::fs;
@@ -156,23 +156,30 @@ fn cmd_test(args: &[String]) -> CliResult<()> {
         return Err("usage: rars test [--password <password>] <archive> [parts...]".into());
     }
 
-    let extracted = if paths.len() == 1 {
-        ArchiveReader::read_path(&paths[0])
-            .map_err(|err| read_archive_error(&paths[0], err))?
-            .extract(password.as_deref())
-            .map_err(|err| format!("failed to test archive '{}': {err}", paths[0]))?
+    if paths.len() == 1 {
+        let archive = ArchiveReader::read_path(&paths[0])
+            .map_err(|err| read_archive_error(&paths[0], err))?;
+        let mut entries = Vec::new();
+        archive
+            .extract_to(password.as_deref(), |meta| {
+                entries.push(meta.clone());
+                Ok(Box::new(std::io::sink()))
+            })
+            .map_err(|err| format!("failed to test archive '{}': {err}", paths[0]))?;
+        for entry in &entries {
+            print_ok_entry(entry);
+        }
     } else {
         let archives = parse_archives(&paths)?;
-        extract_volumes(&archives, password.as_deref())
-            .map_err(|err| format!("failed to test volume set '{}': {err}", paths.join(", ")))?
-    };
-
-    for entry in &extracted {
-        println!(
-            "OK {}{}",
-            String::from_utf8_lossy(&entry.name),
-            if entry.is_directory { "/" } else { "" }
-        );
+        let extracted = extract_volumes(&archives, password.as_deref())
+            .map_err(|err| format!("failed to test volume set '{}': {err}", paths.join(", ")))?;
+        for entry in &extracted {
+            println!(
+                "OK {}{}",
+                String::from_utf8_lossy(&entry.name),
+                if entry.is_directory { "/" } else { "" }
+            );
+        }
     }
     Ok(())
 }
@@ -184,26 +191,38 @@ fn cmd_extract(args: &[String]) -> CliResult<()> {
     }
     let out_dir = PathBuf::from(paths.pop().expect("outdir"));
 
-    let extracted = if paths.len() == 1 {
-        ArchiveReader::read_path(&paths[0])
-            .map_err(|err| read_archive_error(&paths[0], err))?
-            .extract(password.as_deref())
-            .map_err(|err| format!("failed to extract archive '{}': {err}", paths[0]))?
+    if paths.len() == 1 {
+        let archive = ArchiveReader::read_path(&paths[0])
+            .map_err(|err| read_archive_error(&paths[0], err))?;
+        let mut names = Vec::new();
+        archive
+            .extract_to(password.as_deref(), |meta| {
+                names.push(meta.name.clone());
+                open_output_writer(&out_dir, meta)
+            })
+            .map_err(|err| {
+                format!(
+                    "failed to write extracted entry to '{}': {err}",
+                    out_dir.display()
+                )
+            })?;
+        for name in &names {
+            println!("x {}", String::from_utf8_lossy(name));
+        }
     } else {
         let archives = parse_archives(&paths)?;
-        extract_volumes(&archives, password.as_deref())
-            .map_err(|err| format!("failed to extract volume set '{}': {err}", paths.join(", ")))?
-    };
-
-    for entry in &extracted {
-        write_extracted_entry(&out_dir, entry).map_err(|err| {
-            format!(
-                "failed to write extracted entry '{}' to '{}': {err}",
-                String::from_utf8_lossy(&entry.name),
-                out_dir.display()
-            )
-        })?;
-        println!("x {}", String::from_utf8_lossy(&entry.name));
+        let extracted = extract_volumes(&archives, password.as_deref())
+            .map_err(|err| format!("failed to extract volume set '{}': {err}", paths.join(", ")))?;
+        for entry in &extracted {
+            write_extracted_entry(&out_dir, entry).map_err(|err| {
+                format!(
+                    "failed to write extracted entry '{}' to '{}': {err}",
+                    String::from_utf8_lossy(&entry.name),
+                    out_dir.display()
+                )
+            })?;
+            println!("x {}", String::from_utf8_lossy(&entry.name));
+        }
     }
     Ok(())
 }
@@ -427,6 +446,31 @@ fn write_extracted_entry(out_dir: &Path, entry: &ExtractedEntry) -> CliResult<()
     fs::write(&out_path, &entry.data)
         .map_err(|err| format!("failed to write file '{}': {err}", out_path.display()))?;
     Ok(())
+}
+
+fn open_output_writer(
+    out_dir: &Path,
+    entry: &ExtractedEntryMeta,
+) -> rars::Result<Box<dyn std::io::Write>> {
+    let rel = output_relative_path(&entry.name)
+        .map_err(|_| Error::InvalidHeader("unsafe archive path"))?;
+    let out_path = out_dir.join(rel);
+    if entry.is_directory {
+        fs::create_dir_all(&out_path)?;
+        return Ok(Box::new(std::io::sink()));
+    }
+    if let Some(parent) = out_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    Ok(Box::new(fs::File::create(out_path)?))
+}
+
+fn print_ok_entry(entry: &ExtractedEntryMeta) {
+    println!(
+        "OK {}{}",
+        String::from_utf8_lossy(&entry.name),
+        if entry.is_directory { "/" } else { "" }
+    );
 }
 
 fn output_relative_path(name: &[u8]) -> CliResult<PathBuf> {
