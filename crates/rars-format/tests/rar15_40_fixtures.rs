@@ -321,6 +321,32 @@ fn extracts_rar250_unp20_large_lz_file() {
 }
 
 #[test]
+fn extracts_rar250_unp20_keep_tables_archive() {
+    let bytes = std::fs::read(fixture("rar250/unpack20_keep_tables.rar")).unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let files: Vec<_> = archive.files().collect();
+
+    assert_eq!(files.len(), 2);
+    assert_eq!(files[0].name, b"unrar");
+    assert_eq!(files[0].method, 0x33);
+    assert_eq!(files[0].unp_ver, 20);
+    assert_eq!(files[0].pack_size, 25_077);
+    assert_eq!(files[0].unp_size, 54_212);
+    assert_eq!(files[0].file_crc, 0xbf94ba22);
+    assert_eq!(files[1].name, b"file_id.diz");
+    assert_eq!(files[1].method, 0x33);
+    assert_eq!(files[1].unp_ver, 20);
+    assert_eq!(files[1].pack_size, 85);
+    assert_eq!(files[1].unp_size, 76);
+    assert_eq!(files[1].file_crc, 0x497a718f);
+
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted.len(), 2);
+    assert_eq!(crc32(&extracted[0].data), 0xbf94ba22);
+    assert_eq!(crc32(&extracted[1].data), 0x497a718f);
+}
+
+#[test]
 fn extracts_rar300_standard_rarvm_filter_fixtures() {
     for (name, entry_name, size, expected_crc) in [
         (

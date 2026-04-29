@@ -70,8 +70,6 @@ Keep this section short. Detailed behavioural claims belong in tests.
 ### 1. RAR 1.5-4.x Decoder Coverage
 
 - Finish Unpack20:
-  - Add an explicitly observed multiblock/table-refresh fixture for Unpack20
-    if RAR 2.50 can be induced to emit one.
   - Add more audio fixtures if examples with 1, 3, or 4 channels become
     available; current coverage pins normal 2-channel RAR 2.50 audio blocks.
 - Broaden PPMd coverage for RAR 2.9+:

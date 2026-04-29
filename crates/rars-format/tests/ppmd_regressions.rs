@@ -26,3 +26,28 @@ fn ppmd_block_can_emit_embedded_lz_distance_matches() {
     assert_eq!(extracted[0].data, expected);
     assert_eq!(crc32(&extracted[0].data), 0x884fab33);
 }
+
+#[test]
+fn ppmd_block_can_emit_embedded_one_byte_lz_repeats() {
+    let archive = Archive::parse_path(fixture("ppmd_lz_repeat_rar3.cbr")).unwrap();
+    let files: Vec<_> = archive.files().collect();
+
+    assert_eq!(files.len(), 2);
+    assert_eq!(files[0].name, b"testfile.jpg");
+    assert_eq!(files[0].method, 0x35);
+    assert_eq!(files[0].unp_ver, 29);
+    assert_eq!(files[0].pack_size, 182);
+    assert_eq!(files[0].unp_size, 220);
+    assert_eq!(files[0].file_crc, 0xda70b16c);
+    assert_eq!(files[1].name, b"testfile.png");
+    assert_eq!(files[1].method, 0x35);
+    assert_eq!(files[1].unp_ver, 29);
+    assert_eq!(files[1].pack_size, 84);
+    assert_eq!(files[1].unp_size, 87);
+    assert_eq!(files[1].file_crc, 0xafb0ac62);
+
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted.len(), 2);
+    assert_eq!(crc32(&extracted[0].data), 0xda70b16c);
+    assert_eq!(crc32(&extracted[1].data), 0xafb0ac62);
+}
