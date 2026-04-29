@@ -1,6 +1,6 @@
 pub use rars_format::{
-    detect_archive_family, find_archive_start, rar13, rar15_40, ArchiveFamily, ArchiveSignature,
-    ArchiveVersion, Error, FeatureSet, Result,
+    detect_archive_family, find_archive_start, rar13, rar15_40, rar50, ArchiveFamily,
+    ArchiveSignature, ArchiveVersion, Error, FeatureSet, Result,
 };
 use std::io::{Read, Write};
 use std::path::Path;
@@ -9,6 +9,7 @@ use std::path::Path;
 pub enum Archive {
     Rar13(rar13::Archive),
     Rar15To40(rar15_40::Archive),
+    Rar50Plus(rar50::Archive),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +34,7 @@ impl Archive {
         match self {
             Self::Rar13(_) => ArchiveFamily::Rar13,
             Self::Rar15To40(_) => ArchiveFamily::Rar15To40,
+            Self::Rar50Plus(_) => ArchiveFamily::Rar50Plus,
         }
     }
 
@@ -46,6 +48,9 @@ impl Archive {
                 .extract(password)
                 .map(|entries| entries.into_iter().map(Into::into).collect()),
             Self::Rar15To40(archive) => archive
+                .extract()
+                .map(|entries| entries.into_iter().map(Into::into).collect()),
+            Self::Rar50Plus(archive) => archive
                 .extract()
                 .map(|entries| entries.into_iter().map(Into::into).collect()),
         }
@@ -73,6 +78,15 @@ impl Archive {
                     is_directory: meta.is_directory,
                 })
             }),
+            Self::Rar50Plus(archive) => archive.extract_to(|meta| {
+                open(&ExtractedEntryMeta {
+                    name: meta.name.clone(),
+                    file_time: meta.file_time,
+                    file_attr: u32::try_from(meta.attr)
+                        .map_err(|_| Error::InvalidHeader("RAR 5 file attributes overflow u32"))?,
+                    is_directory: meta.is_directory,
+                })
+            }),
         }
     }
 
@@ -80,6 +94,7 @@ impl Archive {
         match self {
             Self::Rar13(archive) => Some(archive),
             Self::Rar15To40(_) => None,
+            Self::Rar50Plus(_) => None,
         }
     }
 
@@ -87,6 +102,14 @@ impl Archive {
         match self {
             Self::Rar13(_) => None,
             Self::Rar15To40(archive) => Some(archive),
+            Self::Rar50Plus(_) => None,
+        }
+    }
+
+    pub fn as_rar50(&self) -> Option<&rar50::Archive> {
+        match self {
+            Self::Rar13(_) | Self::Rar15To40(_) => None,
+            Self::Rar50Plus(archive) => Some(archive),
         }
     }
 }
@@ -115,6 +138,18 @@ impl From<rar15_40::ExtractedEntry> for ExtractedEntry {
     }
 }
 
+impl From<rar50::ExtractedEntry> for ExtractedEntry {
+    fn from(entry: rar50::ExtractedEntry) -> Self {
+        Self {
+            name: entry.name,
+            data: entry.data,
+            file_time: entry.file_time,
+            file_attr: entry.attr as u32,
+            is_directory: entry.is_directory,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ArchiveReader;
 
@@ -128,7 +163,7 @@ impl ArchiveReader {
         match signature.family {
             ArchiveFamily::Rar13 => Ok(Archive::Rar13(rar13::Archive::parse(input)?)),
             ArchiveFamily::Rar15To40 => Ok(Archive::Rar15To40(rar15_40::Archive::parse(input)?)),
-            ArchiveFamily::Rar50Plus => Err(Error::UnsupportedVersion(ArchiveVersion::Rar50)),
+            ArchiveFamily::Rar50Plus => Ok(Archive::Rar50Plus(rar50::Archive::parse(input)?)),
         }
     }
 
@@ -144,7 +179,7 @@ impl ArchiveReader {
             ArchiveFamily::Rar15To40 => {
                 Ok(Archive::Rar15To40(rar15_40::Archive::parse_path(path)?))
             }
-            ArchiveFamily::Rar50Plus => Err(Error::UnsupportedVersion(ArchiveVersion::Rar50)),
+            ArchiveFamily::Rar50Plus => Ok(Archive::Rar50Plus(rar50::Archive::parse_path(path)?)),
         }
     }
 }
@@ -165,7 +200,7 @@ pub fn extract_volumes(
             for archive in archives {
                 match archive {
                     Archive::Rar13(archive) => typed.push(archive.clone()),
-                    Archive::Rar15To40(_) => {
+                    Archive::Rar15To40(_) | Archive::Rar50Plus(_) => {
                         return Err(Error::InvalidHeader("mixed archive families in volume set"));
                     }
                 }
@@ -178,7 +213,7 @@ pub fn extract_volumes(
             for archive in archives {
                 match archive {
                     Archive::Rar15To40(archive) => typed.push(archive.clone()),
-                    Archive::Rar13(_) => {
+                    Archive::Rar13(_) | Archive::Rar50Plus(_) => {
                         return Err(Error::InvalidHeader("mixed archive families in volume set"));
                     }
                 }
@@ -186,7 +221,10 @@ pub fn extract_volumes(
             rar15_40::extract_volumes(&typed)
                 .map(|entries| entries.into_iter().map(Into::into).collect())
         }
-        ArchiveFamily::Rar50Plus => Err(Error::UnsupportedVersion(ArchiveVersion::Rar50)),
+        ArchiveFamily::Rar50Plus => Err(Error::UnsupportedFeature {
+            version: ArchiveVersion::Rar50,
+            feature: "RAR 5 multivolume extraction",
+        }),
     }
 }
 
@@ -209,7 +247,7 @@ where
             for archive in archives {
                 match archive {
                     Archive::Rar13(archive) => typed.push(archive.clone()),
-                    Archive::Rar15To40(_) => {
+                    Archive::Rar15To40(_) | Archive::Rar50Plus(_) => {
                         return Err(Error::InvalidHeader("mixed archive families in volume set"));
                     }
                 }
@@ -228,7 +266,7 @@ where
             for archive in archives {
                 match archive {
                     Archive::Rar15To40(archive) => typed.push(archive.clone()),
-                    Archive::Rar13(_) => {
+                    Archive::Rar13(_) | Archive::Rar50Plus(_) => {
                         return Err(Error::InvalidHeader("mixed archive families in volume set"));
                     }
                 }
@@ -242,7 +280,10 @@ where
                 })
             })
         }
-        ArchiveFamily::Rar50Plus => Err(Error::UnsupportedVersion(ArchiveVersion::Rar50)),
+        ArchiveFamily::Rar50Plus => Err(Error::UnsupportedFeature {
+            version: ArchiveVersion::Rar50,
+            feature: "RAR 5 multivolume extraction",
+        }),
     }
 }
 

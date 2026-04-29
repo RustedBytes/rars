@@ -58,7 +58,12 @@ Keep this section short. Detailed behavioural claims belong in tests.
 - Extraction is reader-backed for normal archive paths and avoids cloning packed
   payloads into parsed entries. Stored RAR 3.x volume sets stream through
   `extract_volumes_to`.
-- RAR 5.0+ is still rejected.
+- RAR 5.0 has an initial read/extract vertical slice: marker and block walking,
+  main/file/service/end header parsing, vint bounds, header CRC32 validation,
+  stored file extraction, optional file CRC32 validation, BLAKE2sp hash-record
+  parsing, and clear rejections for encrypted headers, encrypted files,
+  compression, and multivolume extraction. RAR 7.x remains format-detected but
+  codec-unsupported beyond the shared RAR 5 signature family.
 
 ## Priority Backlog
 
@@ -90,18 +95,30 @@ Keep this section short. Detailed behavioural claims belong in tests.
 
 ### 2. RAR 5.0/7.x Reader
 
-- Add reader-backed RAR 5 parsing from the start:
-  - marker, archive header, file headers, service headers, locator/quick-open,
-    end markers, vint bounds, and header CRC validation.
-  - normal stored extraction first, then compression.
+- Harden the initial RAR 5 reader:
+  - Keep `parse_path` truly reader-backed instead of reading the full archive
+    into memory after signature detection.
+  - Parse and expose main-header extra records, especially locator metadata for
+    quick-open and recovery-record offsets.
+  - Expand service-header tests for `CMT`, `QO`, `RR`, and mixed service
+    archives before relying on service metadata publicly.
+  - Add tests for SFX-prefixed RAR 5 archives and malformed/overlong vint
+    encodings.
 - Implement RAR 5 checksums:
-  - CRC32 and BLAKE2sp verification.
+  - CRC32 is verified when present.
+  - Add BLAKE2sp verification for file hash extra records; records are parsed
+    today but not cryptographically checked.
 - Add RAR 5 compression decode:
   - Unpack50/70 table parsing.
   - RAR 5 filters: x86 E8/E8E9, ARM, delta, and version-specific differences.
   - RAR 7 distance/table-size changes.
 - Add RAR 5 encryption:
   - password KDF, AES-256-CBC, header encryption, password-check records.
+- Add RAR 5 multivolume extraction:
+  - Stored and compressed split entries are currently rejected through the
+    public facade.
+  - Preserve decoder/checksum state across `.partN.rar` sets once split stream
+    semantics are implemented.
 - Add RAR 5 recovery parsing after normal decode is stable:
   - inline RR service blocks.
   - `.rev` volume handling.
@@ -136,7 +153,8 @@ Keep this section short. Detailed behavioural claims belong in tests.
   - RAR 2.0 explicitly observed multiblock fixtures,
   - RAR 3.x PPMd,
   - RAR 3.x encrypted file/header cases,
-  - RAR 5 stored, compressed, encrypted, service-heavy, and recovery cases.
+  - RAR 5 compressed, encrypted, service-heavy, SFX-prefixed, multivolume, and
+    recovery cases.
 - Use `./scripts/coverage.sh` periodically; it writes HTML coverage to
   `target/coverage/html/index.html`.
 

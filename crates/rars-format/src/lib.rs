@@ -3,6 +3,7 @@ pub mod error;
 pub mod features;
 pub mod rar13;
 pub mod rar15_40;
+pub mod rar50;
 pub mod version;
 
 pub use detect::{detect_archive_family, find_archive_start, ArchiveSignature};

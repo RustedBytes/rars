@@ -54,6 +54,7 @@ fn cmd_info(args: &[String]) -> CliResult<()> {
             match &archive {
                 DetectedArchive::Rar13(archive) => archive.sfx_offset,
                 DetectedArchive::Rar15To40(archive) => archive.sfx_offset,
+                DetectedArchive::Rar50Plus(archive) => archive.sfx_offset,
             }
         );
         match archive {
@@ -141,6 +142,35 @@ fn cmd_info(args: &[String]) -> CliResult<()> {
                         sub.file.unp_size,
                         sub.file.method,
                         sub.file.block.flags
+                    );
+                }
+            }
+            DetectedArchive::Rar50Plus(archive) => {
+                println!(
+                    "  rar50 main: flags={:#06x} header_size={} sfx_offset={}",
+                    archive.main.archive_flags, archive.main.block.header_size, archive.sfx_offset
+                );
+                for (index, file) in archive.files().enumerate() {
+                    println!(
+                        "  #{index}: {} pack={} unp={} method={} flags={:#06x} attr={:#010x} crc={}",
+                        file.name_lossy(),
+                        file.packed_size(),
+                        file.unpacked_size,
+                        (file.compression_info >> 7) & 0x07,
+                        file.block.flags,
+                        file.attributes,
+                        file.data_crc32
+                            .map(|crc| format!("{crc:#010x}"))
+                            .unwrap_or_else(|| "none".to_string())
+                    );
+                }
+                for service in archive.services() {
+                    println!(
+                        "  service: {} pack={} unp={} flags={:#06x}",
+                        service.name_lossy(),
+                        service.packed_size(),
+                        service.unpacked_size,
+                        service.block.flags
                     );
                 }
             }
