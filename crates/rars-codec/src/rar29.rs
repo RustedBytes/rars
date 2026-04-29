@@ -135,6 +135,7 @@ impl Unpack29 {
             Error::NeedMoreInput => Error::InvalidData("RAR 2.9 bitstream is truncated"),
             error => error,
         })?;
+        self.finish_ppmd_member()?;
         let out = self.filtered_range(start, target)?;
         self.trim_history(target, target);
         Ok(out)
@@ -183,6 +184,7 @@ impl Unpack29 {
                 .saturating_add(STREAM_CHUNK)
                 .min(final_target);
         }
+        self.finish_ppmd_member()?;
         Ok(())
     }
 
@@ -248,6 +250,18 @@ impl Unpack29 {
                 .current_pos()
                 .saturating_add(STREAM_CHUNK)
                 .min(final_target);
+        }
+        if self.block_mode == BlockMode::Ppmd {
+            loop {
+                let read = input
+                    .read(&mut buffer)
+                    .map_err(|_| Error::InvalidData("RAR 2.9 input read failed"))?;
+                if read == 0 {
+                    break;
+                }
+                self.bits.append(&buffer[..read]);
+            }
+            self.finish_ppmd_member()?;
         }
         Ok(())
     }
@@ -477,6 +491,32 @@ impl Unpack29 {
         self.ppmd
             .decode_symbol(&mut self.bits)?
             .ok_or(Error::InvalidData("RAR 2.9 PPMd stream ended early"))
+    }
+
+    fn finish_ppmd_member(&mut self) -> Result<()> {
+        if self.block_mode != BlockMode::Ppmd {
+            return Ok(());
+        }
+        let Some(symbol) = self.ppmd.decode_symbol(&mut self.bits)? else {
+            return Ok(());
+        };
+        if symbol != self.ppmd_esc {
+            return Err(Error::InvalidData("RAR 2.9 PPMd member has trailing data"));
+        }
+        let Some(next) = self.ppmd.decode_symbol(&mut self.bits)? else {
+            return Ok(());
+        };
+        match next {
+            2 => {
+                self.in_lz_block = false;
+                Ok(())
+            }
+            0 => {
+                self.in_lz_block = false;
+                Ok(())
+            }
+            _ => Err(Error::InvalidData("RAR 2.9 PPMd member has trailing data")),
+        }
     }
 
     fn read_offset(&mut self) -> Result<usize> {

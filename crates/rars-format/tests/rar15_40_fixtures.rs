@@ -406,8 +406,10 @@ fn extracts_rar300_ppmd_mixed_archive() {
 }
 
 #[test]
-fn rejects_rar300_solid_ppmd_until_model_reuse_is_fixed() {
+fn extracts_rar300_solid_ppmd_archive() {
     let bytes = std::fs::read(fixture("ppmd/ppmd_solid_rar300.rar")).unwrap();
+    let expected_a = std::fs::read(fixture("ppmd/solid_lorem_a.txt")).unwrap();
+    let expected_b = std::fs::read(fixture("ppmd/solid_lorem_b.txt")).unwrap();
     let archive = Archive::parse(&bytes).unwrap();
     let files: Vec<_> = archive.files().collect();
 
@@ -417,10 +419,13 @@ fn rejects_rar300_solid_ppmd_until_model_reuse_is_fixed() {
     assert_eq!(files[1].name, b"solid_lorem_b.txt");
     assert!(!files[0].is_solid());
     assert!(files[1].is_solid());
-    assert!(matches!(
-        archive.extract(),
-        Err(Error::InvalidHeader("RAR PPMd escape symbol is invalid"))
-    ));
+
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted.len(), 2);
+    assert_eq!(extracted[0].data, expected_a);
+    assert_eq!(extracted[1].data, expected_b);
+    assert_eq!(crc32(&extracted[0].data), 0x14284201);
+    assert_eq!(crc32(&extracted[1].data), 0xca4cac47);
 }
 
 #[test]

@@ -218,7 +218,7 @@ impl PpmdDecoder {
             let prob = self.bin_summ[idx.0][idx.1] as u32;
             let size0 = (self.range.range >> 14).wrapping_mul(prob);
             let next_prob = update_prob_1(prob);
-            if self.range.code < size0 {
+            if self.range.code.wrapping_sub(self.range.low) < size0 {
                 self.bin_summ[idx.0][idx.1] = (next_prob + (1 << INT_BITS)) as u16;
                 self.range.decode_bit0(size0);
                 self.found_state = StateRef {
@@ -627,6 +627,9 @@ impl PpmdDecoder {
             }
             ps.push(StateRef { context: c, index });
         }
+        if ps.is_empty() {
+            return Some(c);
+        }
 
         let new_sym = *self.text.get(up_branch)?;
         let up_successor = Successor::Raw(up_branch + 1);
@@ -748,13 +751,12 @@ impl RangeDecoder {
 
     fn get_threshold(&mut self, total: u32) -> u32 {
         self.range /= total;
-        self.code / self.range
+        self.code.wrapping_sub(self.low) / self.range
     }
 
     fn decode(&mut self, start: u32, size: u32) {
         let start = start.wrapping_mul(self.range);
         self.low = self.low.wrapping_add(start);
-        self.code = self.code.wrapping_sub(start);
         self.range = self.range.wrapping_mul(size);
     }
 
@@ -764,7 +766,6 @@ impl RangeDecoder {
 
     fn decode_bit1(&mut self, size0: u32) {
         self.low = self.low.wrapping_add(size0);
-        self.code = self.code.wrapping_sub(size0);
         self.range = (self.range & !(BIN_SCALE - 1)).wrapping_sub(size0);
     }
 
