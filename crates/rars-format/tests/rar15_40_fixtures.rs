@@ -94,29 +94,35 @@ fn rejects_corrupt_rar15_40_stored_payload_checksum() {
 }
 
 #[test]
-fn rejects_filter_using_solid_rar300_until_rarvm_exists() {
+fn rejects_large_solid_rar300_until_table_edge_case_is_fixed() {
     let bytes = std::fs::read(fixture("rar300/solid_rar300.rar")).unwrap();
     let archive = Archive::parse(&bytes).unwrap();
 
     assert!(matches!(
         archive.extract(),
-        Err(Error::InvalidHeader(
-            "RAR 2.9 VM filters are not implemented"
-        ))
+        Err(Error::InvalidHeader("RAR 2.9 level length run is too long"))
     ));
 }
 
 #[test]
-fn rejects_simple_solid_rar300_until_solid_state_is_complete() {
+fn extracts_simple_solid_rar300_entries_with_codec_state() {
     let bytes = std::fs::read(fixture("rar300/solid_simple_rar300.rar")).unwrap();
     let archive = Archive::parse(&bytes).unwrap();
 
-    assert!(matches!(
-        archive.extract(),
-        Err(Error::InvalidHeader(
-            "RAR 2.9 VM filters are not implemented"
-        ))
-    ));
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted.len(), 2);
+    assert_eq!(extracted[0].name, b"one.txt");
+    assert_eq!(
+        extracted[0].data,
+        b"shared prefix shared prefix shared prefix alpha\n"
+    );
+    assert_eq!(crc32(&extracted[0].data), 0x11cc9fbb);
+    assert_eq!(extracted[1].name, b"two.txt");
+    assert_eq!(
+        extracted[1].data,
+        b"shared prefix shared prefix shared prefix beta\n"
+    );
+    assert_eq!(crc32(&extracted[1].data), 0xf4fd09e8);
 }
 
 #[test]
@@ -142,6 +148,61 @@ fn extracts_compressed_rar300_lz_file() {
     assert_eq!(extracted[0].name, b"text.txt");
     assert_eq!(extracted[0].data, expected_compressed_text_payload());
     assert_eq!(crc32(&extracted[0].data), 0x6a0d746d);
+}
+
+#[test]
+fn extracts_rar300_standard_rarvm_filter_fixtures() {
+    for (name, entry_name, size, expected_crc) in [
+        (
+            "rar300/rarvm_x86_e8_rar300.rar",
+            b"x86_e8_stream.bin".as_slice(),
+            196_608,
+            0xe0f3971f,
+        ),
+        (
+            "rar300/rarvm_x86_e8e9_rar300.rar",
+            b"x86_e8e9_stream.bin".as_slice(),
+            196_608,
+            0xdc573e1b,
+        ),
+        (
+            "rar300/rarvm_delta_4ch_rar300.rar",
+            b"delta_4ch_ramp.bin".as_slice(),
+            262_144,
+            0xa303b91f,
+        ),
+        (
+            "rar300/rarvm_itanium_synthetic_rar300.rar",
+            b"itanium_synthetic_bundles.bin".as_slice(),
+            1_048_576,
+            0x39086451,
+        ),
+    ] {
+        let bytes = std::fs::read(fixture(name)).unwrap();
+        let archive = Archive::parse(&bytes).unwrap();
+        let extracted = archive.extract().unwrap();
+        assert_eq!(extracted.len(), 1, "{name}");
+        assert_eq!(extracted[0].name, entry_name, "{name}");
+        assert_eq!(extracted[0].data.len(), size, "{name}");
+        assert_eq!(crc32(&extracted[0].data), expected_crc, "{name}");
+    }
+}
+
+#[test]
+fn rejects_rar300_rgb_and_audio_filter_fixtures_until_lz_edge_case_is_fixed() {
+    for name in [
+        "rar300/rarvm_rgb_gradient_rar300.rar",
+        "rar300/rarvm_audio_stereo_rar300.rar",
+    ] {
+        let bytes = std::fs::read(fixture(name)).unwrap();
+        let archive = Archive::parse(&bytes).unwrap();
+        assert!(matches!(
+            archive.extract(),
+            Err(Error::InvalidHeader(
+                "RAR 2.9 match distance is out of range"
+            ))
+        ));
+    }
 }
 
 #[test]

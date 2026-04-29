@@ -49,7 +49,35 @@ pub struct Unpack29 {
     low_offset_repeats: usize,
     pending_match: Option<(usize, usize)>,
     in_lz_block: bool,
+    filters: Vec<VmFilter>,
+    programs: Vec<VmProgram>,
+    last_filter: usize,
     output: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+struct VmFilter {
+    program: usize,
+    start: usize,
+    size: usize,
+    regs: [u32; 7],
+}
+
+#[derive(Debug, Clone)]
+struct VmProgram {
+    filter: StandardFilter,
+    block_size: usize,
+    exec_count: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StandardFilter {
+    E8,
+    E8E9,
+    Itanium,
+    Delta,
+    Rgb,
+    Audio,
 }
 
 impl Unpack29 {
@@ -68,6 +96,9 @@ impl Unpack29 {
             low_offset_repeats: 0,
             pending_match: None,
             in_lz_block: false,
+            filters: Vec::new(),
+            programs: Vec::new(),
+            last_filter: 0,
             output: Vec::new(),
         }
     }
@@ -77,6 +108,9 @@ impl Unpack29 {
         let target = start
             .checked_add(output_size)
             .ok_or(Error::InvalidData("RAR 2.9 output size overflows"))?;
+        if !input.is_empty() {
+            self.bits = BitReader::new();
+        }
         self.bits.append(input);
         while self.output.len() < target {
             self.drain_pending_match(target)?;
@@ -89,7 +123,7 @@ impl Unpack29 {
             }
             self.decode_lz(target)?;
         }
-        Ok(self.output[start..target].to_vec())
+        self.filtered_range(start, target)
     }
 
     fn read_tables(&mut self) -> Result<()> {
@@ -187,14 +221,15 @@ impl Unpack29 {
             match symbol {
                 0..=255 => self.output.push(symbol as u8),
                 256 => {
-                    if self.bits.read_bit()? != 0 {
-                        let _new_table = self.bits.read_bit()?;
-                        self.in_lz_block = false;
-                        return Ok(());
+                    if self.bits.read_bit()? == 0 {
+                        let _new_file_table_flag = self.bits.read_bit()?;
                     }
-                    return Err(Error::InvalidData("RAR 2.9 VM filters are not implemented"));
+                    self.in_lz_block = false;
+                    return Ok(());
                 }
-                257 => return Err(Error::InvalidData("RAR 2.9 VM filters are not implemented")),
+                257 => {
+                    self.read_vm_code()?;
+                }
                 258 => {
                     if self.last_length != 0 {
                         self.copy_match(self.last_length, self.last_offset, output_size)?;
@@ -282,6 +317,141 @@ impl Unpack29 {
             }
         }
         Ok(offset)
+    }
+
+    fn read_vm_code(&mut self) -> Result<()> {
+        let first_byte = self.bits.read_bits(8)?;
+        let mut len = (first_byte & 7) + 1;
+        if len == 7 {
+            len = self.bits.read_bits(8)? + 7;
+        } else if len == 8 {
+            len = self.bits.read_bits(16)?;
+        }
+        let mut data = Vec::with_capacity(len as usize);
+        for _ in 0..len {
+            data.push(self.bits.read_bits(8)? as u8);
+        }
+
+        let mut vm = BitReader::from_bytes(&data);
+        let program_index = if first_byte & 0x80 != 0 {
+            let value = vm.read_encoded_u32()?;
+            if value == 0 {
+                self.filters.clear();
+                self.programs.clear();
+                0
+            } else {
+                usize::try_from(value - 1)
+                    .map_err(|_| Error::InvalidData("RAR 2.9 VM program index overflows"))?
+            }
+        } else {
+            self.last_filter
+        };
+        if program_index > self.programs.len() {
+            return Err(Error::InvalidData("RAR 2.9 VM program index is invalid"));
+        }
+        self.last_filter = program_index;
+        let new_program = program_index == self.programs.len();
+
+        let mut block_start = vm.read_encoded_u32()? as usize;
+        if first_byte & 0x40 != 0 {
+            block_start += 258;
+        }
+        block_start = self
+            .output
+            .len()
+            .checked_add(block_start)
+            .ok_or(Error::InvalidData("RAR 2.9 VM block start overflows"))?;
+
+        let mut block_size = self
+            .programs
+            .get(program_index)
+            .map(|program| program.block_size)
+            .unwrap_or(0);
+        if first_byte & 0x20 != 0 {
+            block_size = vm.read_encoded_u32()? as usize;
+        }
+
+        let mut regs = [0u32; 7];
+        regs[3] = 0x3c000;
+        regs[4] = block_size as u32;
+        if let Some(program) = self.programs.get(program_index) {
+            regs[5] = program.exec_count;
+        }
+        if first_byte & 0x10 != 0 {
+            let mask = vm.read_bits(7)?;
+            for (index, reg) in regs.iter_mut().enumerate() {
+                if mask & (1 << index) != 0 {
+                    *reg = vm.read_encoded_u32()?;
+                }
+            }
+        }
+
+        if new_program {
+            let code_size = vm.read_encoded_u32()? as usize;
+            if code_size == 0 {
+                return Err(Error::InvalidData("RAR 2.9 VM code is empty"));
+            }
+            let mut code = Vec::with_capacity(code_size);
+            for _ in 0..code_size {
+                code.push(vm.read_bits(8)? as u8);
+            }
+            let filter = identify_standard_filter(&code).ok_or(Error::InvalidData(
+                "RAR 2.9 non-standard VM filters are not implemented",
+            ))?;
+            self.programs.push(VmProgram {
+                filter,
+                block_size,
+                exec_count: 0,
+            });
+        } else if let Some(program) = self.programs.get_mut(program_index) {
+            program.exec_count = program.exec_count.wrapping_add(1);
+            program.block_size = block_size;
+        }
+
+        if first_byte & 0x08 != 0 {
+            let data_size = vm.read_encoded_u32()? as usize;
+            for _ in 0..data_size {
+                let _ = vm.read_bits(8)?;
+            }
+        }
+
+        self.filters.push(VmFilter {
+            program: program_index,
+            start: block_start,
+            size: block_size,
+            regs,
+        });
+        Ok(())
+    }
+
+    fn filtered_range(&self, start: usize, end: usize) -> Result<Vec<u8>> {
+        let mut out = Vec::with_capacity(end - start);
+        let mut pos = start;
+        for filter in self
+            .filters
+            .iter()
+            .filter(|filter| filter.start >= start && filter.start + filter.size <= end)
+        {
+            if filter.start < pos {
+                continue;
+            }
+            out.extend_from_slice(&self.output[pos..filter.start]);
+            let program = self
+                .programs
+                .get(filter.program)
+                .ok_or(Error::InvalidData("RAR 2.9 VM program is missing"))?;
+            let mut block = self.output[filter.start..filter.start + filter.size].to_vec();
+            apply_standard_filter(
+                program.filter,
+                &mut block,
+                filter.start as u32,
+                &filter.regs,
+            )?;
+            out.extend_from_slice(&block);
+            pos = filter.start + filter.size;
+        }
+        out.extend_from_slice(&self.output[pos..end]);
+        Ok(out)
     }
 
     fn copy_match(&mut self, length: usize, offset: usize, output_size: usize) -> Result<()> {
@@ -423,6 +593,13 @@ impl BitReader {
         }
     }
 
+    fn from_bytes(input: &[u8]) -> Self {
+        Self {
+            input: input.to_vec(),
+            bit_pos: 0,
+        }
+    }
+
     fn append(&mut self, input: &[u8]) {
         self.input.extend_from_slice(input);
     }
@@ -461,6 +638,270 @@ impl BitReader {
         }
         Ok(value)
     }
+
+    fn read_encoded_u32(&mut self) -> Result<u32> {
+        match self.read_bits(2)? {
+            0 => self.read_bits(4),
+            1 => {
+                let high = self.read_bits(8)?;
+                if high >= 16 {
+                    Ok(high)
+                } else {
+                    Ok(0xffff_ff00 | (high << 4) | self.read_bits(4)?)
+                }
+            }
+            2 => self.read_bits(16),
+            _ => self.read_bits(32),
+        }
+    }
+}
+
+fn identify_standard_filter(code: &[u8]) -> Option<StandardFilter> {
+    if code.iter().fold(0u8, |acc, &byte| acc ^ byte) != 0 {
+        return None;
+    }
+    match (code.len(), crc32(code)) {
+        (53, 0xad57_6887) => Some(StandardFilter::E8),
+        (57, 0x3cd7_e57e) => Some(StandardFilter::E8E9),
+        (120, 0x3769_893f) => Some(StandardFilter::Itanium),
+        (29, 0x0e06_077d) => Some(StandardFilter::Delta),
+        (149, 0x1c2c_5dc8) => Some(StandardFilter::Rgb),
+        (216, 0xbc85_e701) => Some(StandardFilter::Audio),
+        _ => None,
+    }
+}
+
+fn apply_standard_filter(
+    filter: StandardFilter,
+    data: &mut Vec<u8>,
+    file_offset: u32,
+    regs: &[u32; 7],
+) -> Result<()> {
+    match filter {
+        StandardFilter::E8 => e8e9_decode(data, file_offset, false),
+        StandardFilter::E8E9 => e8e9_decode(data, file_offset, true),
+        StandardFilter::Itanium => itanium_decode(data, file_offset),
+        StandardFilter::Delta => {
+            let channels = regs[0] as usize;
+            if channels == 0 {
+                return Err(Error::InvalidData("RAR 2.9 DELTA filter has zero channels"));
+            }
+            *data = delta_decode(data, channels)?;
+        }
+        StandardFilter::Rgb => {
+            let width = regs[0] as usize;
+            let pos_r = regs[1] as usize;
+            *data = rgb_decode(data, width, pos_r)?;
+        }
+        StandardFilter::Audio => {
+            let channels = regs[0] as usize;
+            if channels == 0 {
+                return Err(Error::InvalidData("RAR 2.9 AUDIO filter has zero channels"));
+            }
+            *data = audio_decode(data, channels)?;
+        }
+    }
+    Ok(())
+}
+
+fn e8e9_decode(data: &mut [u8], file_offset: u32, include_e9: bool) {
+    if data.len() <= 4 {
+        return;
+    }
+    let cmp_mask = if include_e9 { 0xfe } else { 0xff };
+    let mut cur_pos = 0usize;
+    while cur_pos < data.len() - 4 {
+        cur_pos += 1;
+        let opcode = data[cur_pos - 1];
+        if opcode & cmp_mask == 0xe8 {
+            let offset = file_offset.wrapping_add(cur_pos as u32);
+            let addr = u32::from_le_bytes([
+                data[cur_pos],
+                data[cur_pos + 1],
+                data[cur_pos + 2],
+                data[cur_pos + 3],
+            ]);
+            let new_addr = if addr < 0x0100_0000 {
+                Some(addr.wrapping_sub(offset))
+            } else if addr & 0x8000_0000 != 0 && addr.wrapping_add(offset) & 0x8000_0000 == 0 {
+                Some(addr.wrapping_add(0x0100_0000))
+            } else {
+                None
+            };
+            if let Some(value) = new_addr {
+                data[cur_pos..cur_pos + 4].copy_from_slice(&value.to_le_bytes());
+            }
+            cur_pos += 4;
+        }
+    }
+}
+
+fn itanium_decode(data: &mut [u8], file_offset: u32) {
+    if data.len() <= 21 {
+        return;
+    }
+    let mut file_offset = file_offset >> 4;
+    let data_size = (((data.len() as u32 - 21 + 15) >> 4) + file_offset) as u32;
+    let mut pos = 0usize;
+    while file_offset != data_size {
+        let mut mask = (0x334b_0000u32 >> (data[pos] & 0x1e)) & 3;
+        if mask != 0 {
+            mask += 1;
+            while mask <= 4 {
+                let p = pos + (mask as usize * 5 - 8);
+                if ((data[p + 3] >> mask) & 15) == 5 {
+                    let raw = u32::from_le_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]]);
+                    let mut value = raw >> mask;
+                    value = value.wrapping_sub(file_offset) & 0x000f_ffff;
+                    let raw = (raw & !(0x000f_ffff << mask)) | (value << mask);
+                    data[p..p + 4].copy_from_slice(&raw.to_le_bytes());
+                }
+                mask += 1;
+            }
+        }
+        pos += 16;
+        file_offset += 1;
+    }
+}
+
+fn delta_decode(data: &[u8], channels: usize) -> Result<Vec<u8>> {
+    let mut out = vec![0u8; data.len()];
+    let mut src = 0usize;
+    for channel in 0..channels {
+        let mut prev = 0u8;
+        let mut dest = channel;
+        while dest < out.len() {
+            let byte = *data.get(src).ok_or(Error::InvalidData(
+                "RAR 2.9 DELTA filter source is truncated",
+            ))?;
+            prev = prev.wrapping_sub(byte);
+            out[dest] = prev;
+            src += 1;
+            dest += channels;
+        }
+    }
+    Ok(out)
+}
+
+fn rgb_decode(data: &[u8], width: usize, pos_r: usize) -> Result<Vec<u8>> {
+    if data.len() < 3 || width < 3 || pos_r > 2 {
+        return Err(Error::InvalidData(
+            "RAR 2.9 RGB filter parameters are invalid",
+        ));
+    }
+    let mut out = vec![0u8; data.len()];
+    let mut src = 0usize;
+    for channel in 0..3 {
+        let mut prev = 0u8;
+        let mut i = channel;
+        while i < data.len() {
+            let predicted = if i < width {
+                prev
+            } else {
+                let upper_left = out[i - width];
+                let upper = out[i - width + 3];
+                let pred = prev.wrapping_add(upper).wrapping_sub(upper_left);
+                let pa = (pred as i16 - prev as i16).abs();
+                let pb = (pred as i16 - upper as i16).abs();
+                let pc = (pred as i16 - upper_left as i16).abs();
+                if pa <= pb && pa <= pc {
+                    prev
+                } else if pb <= pc {
+                    upper
+                } else {
+                    upper_left
+                }
+            };
+            let encoded = *data
+                .get(src)
+                .ok_or(Error::InvalidData("RAR 2.9 RGB filter source is truncated"))?;
+            prev = predicted.wrapping_sub(encoded);
+            out[i] = prev;
+            src += 1;
+            i += 3;
+        }
+    }
+    for i in (pos_r..data.len().saturating_sub(2)).step_by(3) {
+        let green = out[i + 1];
+        out[i] = out[i].wrapping_add(green);
+        out[i + 2] = out[i + 2].wrapping_add(green);
+    }
+    Ok(out)
+}
+
+fn audio_decode(data: &[u8], channels: usize) -> Result<Vec<u8>> {
+    let mut out = vec![0u8; data.len()];
+    let mut src = 0usize;
+    for channel in 0..channels {
+        let mut prev_byte = 0u32;
+        let mut prev_delta = 0i32;
+        let mut d1 = 0i32;
+        let mut d2 = 0i32;
+        let mut k1 = 0i32;
+        let mut k2 = 0i32;
+        let mut k3 = 0i32;
+        let mut dif = [0u32; 7];
+        let mut byte_count = 0usize;
+        let mut i = channel;
+        while i < data.len() {
+            let d3 = d2;
+            d2 = prev_delta - d1;
+            d1 = prev_delta;
+            let predicted = ((8 * prev_byte as i32 + k1 * d1 + k2 * d2 + k3 * d3) >> 3) & 0xff;
+            let encoded = *data.get(src).ok_or(Error::InvalidData(
+                "RAR 2.9 AUDIO filter source is truncated",
+            ))?;
+            src += 1;
+            let decoded = (predicted as u8).wrapping_sub(encoded);
+            out[i] = decoded;
+            prev_delta = (decoded as i8).wrapping_sub(prev_byte as u8 as i8) as i32;
+            prev_byte = decoded as u32;
+            let d = (encoded as i8 as i32) << 3;
+            dif[0] += d.unsigned_abs();
+            dif[1] += (d - d1).unsigned_abs();
+            dif[2] += (d + d1).unsigned_abs();
+            dif[3] += (d - d2).unsigned_abs();
+            dif[4] += (d + d2).unsigned_abs();
+            dif[5] += (d - d3).unsigned_abs();
+            dif[6] += (d + d3).unsigned_abs();
+            if byte_count & 0x1f == 0 {
+                let mut min = dif[0];
+                let mut min_index = 0usize;
+                dif[0] = 0;
+                for (index, value) in dif.iter_mut().enumerate().skip(1) {
+                    if *value < min {
+                        min = *value;
+                        min_index = index;
+                    }
+                    *value = 0;
+                }
+                match min_index {
+                    1 if k1 >= -16 => k1 -= 1,
+                    2 if k1 < 16 => k1 += 1,
+                    3 if k2 >= -16 => k2 -= 1,
+                    4 if k2 < 16 => k2 += 1,
+                    5 if k3 >= -16 => k3 -= 1,
+                    6 if k3 < 16 => k3 += 1,
+                    _ => {}
+                }
+            }
+            byte_count += 1;
+            i += channels;
+        }
+    }
+    Ok(out)
+}
+
+fn crc32(input: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffffu32;
+    for &byte in input {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            let mask = 0u32.wrapping_sub(crc & 1);
+            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+        }
+    }
+    !crc
 }
 
 #[cfg(test)]
@@ -468,11 +909,10 @@ mod tests {
     use super::{unpack29_decode, Unpack29};
 
     const COMPRESSED_TEXT: &[u8] = &[
-        0x09, 0x10, 0x10, 0x93, 0xe4, 0xce, 0x7f, 0xa2, 0xba, 0x80, 0x46, 0x16, 0x82, 0x63,
-        0xe9, 0x9a, 0x19, 0xe4, 0x10, 0xe0, 0x41, 0x3d, 0x16, 0xfc, 0x4d, 0xfa, 0x6f, 0xf2,
-        0x5c, 0xae, 0x32, 0x86, 0xc9, 0x95, 0x9d, 0xf1, 0x04, 0xa4, 0xe8, 0x92, 0x8f, 0x12,
-        0xd7, 0xe7, 0xba, 0xcb, 0x26, 0xf1, 0x97, 0xac, 0x7c, 0x5f, 0xfd, 0xa0, 0x00, 0x1f,
-        0x77, 0x50,
+        0x09, 0x10, 0x10, 0x93, 0xe4, 0xce, 0x7f, 0xa2, 0xba, 0x80, 0x46, 0x16, 0x82, 0x63, 0xe9,
+        0x9a, 0x19, 0xe4, 0x10, 0xe0, 0x41, 0x3d, 0x16, 0xfc, 0x4d, 0xfa, 0x6f, 0xf2, 0x5c, 0xae,
+        0x32, 0x86, 0xc9, 0x95, 0x9d, 0xf1, 0x04, 0xa4, 0xe8, 0x92, 0x8f, 0x12, 0xd7, 0xe7, 0xba,
+        0xcb, 0x26, 0xf1, 0x97, 0xac, 0x7c, 0x5f, 0xfd, 0xa0, 0x00, 0x1f, 0x77, 0x50,
     ];
 
     #[test]

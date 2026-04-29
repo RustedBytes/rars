@@ -146,9 +146,9 @@ The first reader slice is implemented:
 - Parsed metadata includes file names, packed/unpacked sizes, host OS, CRC32,
   DOS mtime, method, `UNP_VER`, attributes, salt presence, and raw extended-time
   bytes.
-- Stored files and basic non-solid RAR 2.9/3.x LZ-compressed files can be
-  extracted through the public facade and CLI, with full file-data CRC32
-  verification.
+- Stored files, basic non-solid RAR 2.9/3.x LZ-compressed files, and the
+  standard RARVM E8/E8E9/DELTA/ITANIUM filter fixtures can be extracted
+  through the public facade and CLI, with full file-data CRC32 verification.
 - Non-AV/SIGN block headers are validated with `HEAD_CRC = CRC32(header[2..]) &
   0xFFFF`.
 - `NEWSUB` service headers are classified at parse time. The current typed
@@ -158,16 +158,18 @@ The first reader slice is implemented:
 - Stored split files can be reassembled across RAR 3.x volume sets, including
   old-style `.r00` numbering, with final full-data CRC32 verification.
 - `rars-codec::rar29::Unpack29` is reusable and preserves table/history,
-  pending matches, and unread bits across caller-selected output slices. The
-  archive layer still treats solid and compressed split archives as unsupported
-  until the remaining RARVM/split semantics are implemented.
+  pending matches, and unread bits across caller-selected output slices. It
+  parses RARVM filter records, recognizes standard bytecode by length+CRC32,
+  and applies native E8/E8E9/DELTA/ITANIUM transforms to returned data while
+  keeping raw dictionary history separate.
 - Fixture coverage includes RAR 3.00 archive comments (`NEWSUB` name `CMT`),
   stored file metadata, solid archive flags, old/new multivolume numbering,
   split-after flags, RAR 4.20 extended-time headers, corrupt header checksum
   rejection, corrupt stored-payload CRC32 rejection, incomplete stored-volume
   rejection, standalone Unpack29 LZ extraction, reusable decoder-state
-  regression coverage, compressed archive-comment decode, RARVM-filter
-  rejection, and compressed-volume rejection pending cross-volume codec state.
+  regression coverage, compressed archive-comment decode, four standard RARVM
+  filter fixtures, RGB/AUDIO edge-case guards, and compressed-volume rejection
+  pending cross-volume codec state.
 - The public facade dispatches `ArchiveReader::read` to RAR 1.5-4.x parsing,
   and `rars info`, `rars test`, and `rars x` work for stored and basic
   non-solid LZ-compressed RAR 1.5-4.x archives, including stored volume sets
@@ -175,10 +177,10 @@ The first reader slice is implemented:
 
 Next RAR 1.5-4.x tasks:
 
-- Implement enough RARVM filter execution to decode filter-bearing RAR 3.x
-  streams.
-- Finish compressed split-volume and solid archive extraction once the filter
-  path and split stream semantics are pinned.
+- Fix the remaining Unpack29 edge case hit by the RGB and AUDIO RARVM fixtures,
+  then enable their native filters.
+- Finish compressed split-volume extraction; the current guard shows additional
+  split stream semantics beyond simple packed-byte concatenation.
 - Add PPMd and RAR 2.0/Unpack20 coverage.
 
 ## Testing strategy
