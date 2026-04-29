@@ -280,6 +280,18 @@ fn extracts_rar300_standard_rarvm_filter_fixtures() {
             1_048_576,
             0x39086451,
         ),
+        (
+            "rar300/rarvm_rgb_gradient_rar300.rar",
+            b"rgb_gradient_24bit.bmp".as_slice(),
+            196_662,
+            0xbf03aa49,
+        ),
+        (
+            "rar300/rarvm_audio_stereo_rar300.rar",
+            b"audio_stereo_pcm.wav".as_slice(),
+            705_644,
+            0x8ad44141,
+        ),
     ] {
         let bytes = std::fs::read(fixture(name)).unwrap();
         let archive = Archive::parse(&bytes).unwrap();
@@ -312,32 +324,6 @@ fn extracts_rar300_ppmd_text_file() {
 }
 
 #[test]
-fn rejects_rar300_rgb_and_audio_filter_fixtures_until_filter_parity_is_fixed() {
-    for (name, expected, actual) in [
-        (
-            "rar300/rarvm_rgb_gradient_rar300.rar",
-            0xbf03aa49,
-            0xf3a01e32,
-        ),
-        (
-            "rar300/rarvm_audio_stereo_rar300.rar",
-            0x8ad44141,
-            0x83af746b,
-        ),
-    ] {
-        let bytes = std::fs::read(fixture(name)).unwrap();
-        let archive = Archive::parse(&bytes).unwrap();
-        assert!(matches!(
-            archive.extract(),
-            Err(Error::Crc32Mismatch {
-                expected: observed_expected,
-                actual: observed_actual,
-            }) if observed_expected == expected && observed_actual == actual
-        ));
-    }
-}
-
-#[test]
 fn decodes_rar300_compressed_archive_comment() {
     let bytes = std::fs::read(fixture("rar300/with_comment_rar300.rar")).unwrap();
     let archive = Archive::parse(&bytes).unwrap();
@@ -346,6 +332,21 @@ fn decodes_rar300_compressed_archive_comment() {
         archive.archive_comment().unwrap().as_deref(),
         Some(b"This is the archive comment.\n".as_slice())
     );
+}
+
+#[test]
+fn decodes_node_unrar_js_utf16_archive_comment() {
+    let bytes = std::fs::read(fixture("node_unrar_js/with_comment.rar")).unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let comment = archive.archive_comment().unwrap().unwrap();
+    let expected: Vec<u8> = "Test Comments for rar files.\r\n\r\n测试一下中文注释。\r\n日本語のコメントもテストしていまし。"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+
+    assert_eq!(comment, expected);
+    assert_eq!(crc32(&comment), 0xe96e8fcf);
+    assert_eq!(comment.len(), 122);
 }
 
 #[test]

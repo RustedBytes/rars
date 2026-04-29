@@ -47,7 +47,7 @@ Keep this section short. Detailed behavioural claims belong in tests.
   payloads, RAR 1.54 Unpack15 members, RAR 2.50 Unpack20 LZ-mode members, and
   common RAR 2.9/3.x Unpack29 members. Current Unpack29 coverage includes
   LZ-mode members, a native Rust PPMd text fixture, and the standard
-  E8/E8E9/DELTA/ITANIUM native RARVM filters.
+  E8/E8E9/DELTA/ITANIUM/RGB/AUDIO native RARVM filters.
 - RAR 3.x header-encrypted archives are detected from `MHD_PASSWORD` and
   rejected with a clear unsupported-feature error before encrypted block bytes
   are parsed.
@@ -71,12 +71,8 @@ Keep this section short. Detailed behavioural claims belong in tests.
     RARVM filters, escape-byte literal handling, and solid PPMd state reuse.
 - Fix the large solid RAR 3.x table edge case currently pinned by the
   `solid_rar300.rar` rejection test.
-- Fix remaining RARVM/filter parity:
-  - RGB and AUDIO fixtures currently decode to the requested size but fail final
-    CRC32. Treat this as byte-parity work in LZ/filter output, not container
-    parsing.
-  - Decide whether to support generic RARVM bytecode execution or continue to
-    accept only recognized standard filters by bytecode identity.
+- Decide whether to support generic RARVM bytecode execution or continue to
+  accept only recognized standard filters by bytecode identity.
 - Finish compressed split-volume extraction:
   - Stored split volumes stream today; compressed split volumes are guarded
     because simple packed-byte concatenation does not match the observed stream

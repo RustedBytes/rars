@@ -401,6 +401,7 @@ impl Unpack29 {
                     if SHORT_BITS[index] != 0 {
                         offset += self.bits.read_bits(SHORT_BITS[index])? as usize;
                     }
+                    self.push_old_offset(offset);
                     self.last_offset = offset;
                     self.last_length = 2;
                     self.copy_match(2, offset, output_size)?;
@@ -455,17 +456,16 @@ impl Unpack29 {
                     ));
                 }
                 4 => {
-                    let offset = self.read_ppmd_u32()? as usize + 2;
+                    let mut offset = 0usize;
+                    for _ in 0..3 {
+                        offset = (offset << 8) | self.read_ppmd_required_byte()? as usize;
+                    }
+                    offset += 2;
                     let length = self.read_ppmd_required_byte()? as usize + 32;
-                    self.push_old_offset(offset);
-                    self.last_offset = offset;
-                    self.last_length = length;
                     self.copy_match(length, offset, output_size)?;
                 }
                 5 => {
                     let length = self.read_ppmd_required_byte()? as usize + 4;
-                    self.last_offset = 1;
-                    self.last_length = length;
                     self.copy_match(length, 1, output_size)?;
                 }
             }
@@ -477,14 +477,6 @@ impl Unpack29 {
         self.ppmd
             .decode_symbol(&mut self.bits)?
             .ok_or(Error::InvalidData("RAR 2.9 PPMd stream ended early"))
-    }
-
-    fn read_ppmd_u32(&mut self) -> Result<u32> {
-        let b0 = self.read_ppmd_required_byte()? as u32;
-        let b1 = self.read_ppmd_required_byte()? as u32;
-        let b2 = self.read_ppmd_required_byte()? as u32;
-        let b3 = self.read_ppmd_required_byte()? as u32;
-        Ok(b0 | (b1 << 8) | (b2 << 16) | (b3 << 24))
     }
 
     fn read_offset(&mut self) -> Result<usize> {
