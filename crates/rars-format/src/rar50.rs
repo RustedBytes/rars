@@ -3,7 +3,7 @@ use crate::error::{Error, Result};
 use crate::rar15_40::crc32;
 use crate::version::ArchiveFamily;
 use std::fs::File;
-use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -259,12 +259,16 @@ impl Archive {
         if sig.family != ArchiveFamily::Rar50Plus {
             return Err(Error::UnsupportedSignature);
         }
-        let bytes = read_exact_at(
+        let archive_len = usize::try_from(len)
+            .map_err(|_| Error::InvalidHeader("RAR 5 archive size overflows usize"))?
+            .checked_sub(sig.offset)
+            .ok_or(Error::TooShort)?;
+        Self::parse_file_backed(
             &mut file,
+            archive_len,
             sig.offset,
-            (len as usize).saturating_sub(sig.offset),
-        )?;
-        Self::parse_seekable(bytes, sig.offset, ArchiveSource::File(path))
+            ArchiveSource::File(path),
+        )
     }
 
     fn parse_shared(input: Arc<[u8]>) -> Result<Self> {
@@ -316,6 +320,61 @@ impl Archive {
                     break;
                 }
                 _ => blocks.push(Block::Unknown(block)),
+            }
+            pos = next;
+        }
+
+        Ok(Self {
+            sfx_offset,
+            main,
+            blocks,
+            source,
+        })
+    }
+
+    fn parse_file_backed(
+        file: &mut File,
+        archive_len: usize,
+        sfx_offset: usize,
+        source: ArchiveSource,
+    ) -> Result<Self> {
+        let signature = read_exact_at(file, sfx_offset, RAR50_SIGNATURE.len())?;
+        if signature != RAR50_SIGNATURE {
+            return Err(Error::UnsupportedSignature);
+        }
+
+        let mut pos = RAR50_SIGNATURE.len();
+        let first = read_block_header_at(file, pos, archive_len, sfx_offset)?;
+        if first.block.header_type == HEAD_CRYPT {
+            return Err(Error::UnsupportedFeature {
+                version: crate::version::ArchiveVersion::Rar50,
+                feature: "RAR 5 encrypted headers",
+            });
+        }
+        if first.block.header_type != HEAD_MAIN {
+            return Err(Error::InvalidHeader("RAR 5 main header is missing"));
+        }
+        let main = parse_main_header_bytes(&first)?;
+        pos = first.next_offset;
+
+        let mut blocks = Vec::new();
+        while pos < archive_len {
+            let parsed = read_block_header_at(file, pos, archive_len, sfx_offset)?;
+            let next = parsed.next_offset;
+            match parsed.block.header_type {
+                HEAD_FILE => blocks.push(Block::File(parse_file_header_bytes(&parsed)?)),
+                HEAD_SERVICE => blocks.push(Block::Service(parse_file_header_bytes(&parsed)?)),
+                HEAD_CRYPT => {
+                    return Err(Error::UnsupportedFeature {
+                        version: crate::version::ArchiveVersion::Rar50,
+                        feature: "RAR 5 encrypted headers",
+                    });
+                }
+                HEAD_END => {
+                    blocks.push(Block::End(parsed.block));
+                    break;
+                }
+                _ => blocks.push(Block::Unknown(parsed.block)),
             }
             pos = next;
         }
@@ -403,6 +462,21 @@ fn parse_main_header(input: &[u8], block: BlockHeader) -> Result<MainHeader> {
     })
 }
 
+fn parse_main_header_bytes(parsed: &ParsedBlockHeader) -> Result<MainHeader> {
+    let mut reader = HeaderReader::new(&parsed.header, parsed.type_specific_range.clone())?;
+    let archive_flags = reader.read_vint()?;
+    let volume_number = if archive_flags & MHFL_VOLUME_NUMBER != 0 {
+        Some(reader.read_vint()?)
+    } else {
+        None
+    };
+    Ok(MainHeader {
+        block: parsed.block.clone(),
+        archive_flags,
+        volume_number,
+    })
+}
+
 fn parse_file_header(input: &[u8], block: BlockHeader) -> Result<FileHeader> {
     let mut reader = HeaderReader::new(input, block.header_range.clone())?;
     let file_flags = reader.read_vint()?;
@@ -442,6 +516,45 @@ fn parse_file_header(input: &[u8], block: BlockHeader) -> Result<FileHeader> {
     Ok(file)
 }
 
+fn parse_file_header_bytes(parsed: &ParsedBlockHeader) -> Result<FileHeader> {
+    let mut reader = HeaderReader::new(&parsed.header, parsed.type_specific_range.clone())?;
+    let file_flags = reader.read_vint()?;
+    let unpacked_size = reader.read_vint()?;
+    let attributes = reader.read_vint()?;
+    let mtime = if file_flags & FHFL_MTIME != 0 {
+        Some(reader.read_u32()?)
+    } else {
+        None
+    };
+    let data_crc32 = if file_flags & FHFL_CRC32 != 0 {
+        Some(reader.read_u32()?)
+    } else {
+        None
+    };
+    let compression_info = reader.read_vint()?;
+    let host_os = reader.read_vint()?;
+    let name_len = usize_from_u64(
+        reader.read_vint()?,
+        "RAR 5 file name length overflows usize",
+    )?;
+    let name = reader.read_bytes(name_len)?.to_vec();
+    let mut file = FileHeader {
+        block: parsed.block.clone(),
+        file_flags,
+        unpacked_size,
+        attributes,
+        mtime,
+        data_crc32,
+        compression_info,
+        host_os,
+        name,
+        hash: None,
+        encrypted: false,
+    };
+    parse_file_extra_area(&parsed.header, parsed.extra_range.clone(), &mut file)?;
+    Ok(file)
+}
+
 fn parse_file_extra(input: &[u8], file: &mut FileHeader) -> Result<()> {
     let Some(extra_size) = file.block.extra_area_size else {
         return Ok(());
@@ -458,10 +571,17 @@ fn parse_file_extra(input: &[u8], file: &mut FileHeader) -> Result<()> {
     if extra_end > input.len() {
         return Err(Error::TooShort);
     }
-    let mut pos = extra_start;
-    while pos < extra_end {
+    parse_file_extra_area(input, extra_start..extra_end, file)
+}
+
+fn parse_file_extra_area(input: &[u8], range: Range<usize>, file: &mut FileHeader) -> Result<()> {
+    if file.block.extra_area_size.is_none() {
+        return Ok(());
+    }
+    let mut pos = range.start;
+    while pos < range.end {
         let record_start = pos;
-        let (record_size, size_len) = read_vint_at(input, pos, extra_end)?;
+        let (record_size, size_len) = read_vint_at(input, pos, range.end)?;
         pos += size_len;
         let record_payload_len =
             usize_from_u64(record_size, "RAR 5 extra record size overflows usize")?;
@@ -470,7 +590,7 @@ fn parse_file_extra(input: &[u8], file: &mut FileHeader) -> Result<()> {
             .ok_or(Error::InvalidHeader(
                 "RAR 5 extra record size overflows usize",
             ))?;
-        if record_end > extra_end {
+        if record_end > range.end {
             return Err(Error::TooShort);
         }
         let (record_type, type_len) = read_vint_at(input, pos, record_end)?;
@@ -492,6 +612,107 @@ fn parse_file_extra(input: &[u8], file: &mut FileHeader) -> Result<()> {
         pos = record_end;
     }
     Ok(())
+}
+
+struct ParsedBlockHeader {
+    block: BlockHeader,
+    header: Vec<u8>,
+    type_specific_range: Range<usize>,
+    extra_range: Range<usize>,
+    next_offset: usize,
+}
+
+fn read_block_header_at(
+    file: &mut File,
+    offset: usize,
+    archive_len: usize,
+    sfx_offset: usize,
+) -> Result<ParsedBlockHeader> {
+    let remaining = archive_len.checked_sub(offset).ok_or(Error::TooShort)?;
+    if remaining < 5 {
+        return Err(Error::TooShort);
+    }
+    let prefix_len = remaining.min(14);
+    let prefix = read_exact_at(file, sfx_offset + offset, prefix_len)?;
+    let header_crc = read_u32(&prefix, 0)?;
+    let (header_size, header_size_len) = read_vint_at(&prefix, 4, prefix.len())?;
+    let header_body_len = usize_from_u64(header_size, "RAR 5 header size overflows usize")?;
+    let header_total = 4usize
+        .checked_add(header_size_len)
+        .and_then(|size| size.checked_add(header_body_len))
+        .ok_or(Error::InvalidHeader("RAR 5 header size overflows usize"))?;
+    if header_total > remaining {
+        return Err(Error::TooShort);
+    }
+
+    let header = read_exact_at(file, sfx_offset + offset, header_total)?;
+    let actual = crc32(&header[4..]);
+    if actual != header_crc {
+        return Err(Error::Crc32Mismatch {
+            expected: header_crc,
+            actual,
+        });
+    }
+
+    let type_start = 4 + header_size_len;
+    let mut reader = SliceReader::new(&header, type_start, header_total);
+    let header_type = reader.read_vint()?;
+    let flags = reader.read_vint()?;
+    let extra_area_size = if flags & HFL_EXTRA != 0 {
+        Some(reader.read_vint()?)
+    } else {
+        None
+    };
+    let data_size = if flags & HFL_DATA != 0 {
+        Some(reader.read_vint()?)
+    } else {
+        None
+    };
+    let extra_len = extra_area_size
+        .map(|size| usize_from_u64(size, "RAR 5 extra area size overflows usize"))
+        .transpose()?
+        .unwrap_or(0);
+    if extra_len > header_total.saturating_sub(reader.pos) {
+        return Err(Error::TooShort);
+    }
+    let type_specific_end = header_total - extra_len;
+    let data_len = data_size
+        .map(|size| usize_from_u64(size, "RAR 5 data size overflows usize"))
+        .transpose()?
+        .unwrap_or(0);
+    let next_offset = offset
+        .checked_add(header_total)
+        .and_then(|pos| pos.checked_add(data_len))
+        .ok_or(Error::InvalidHeader("RAR 5 data size overflows usize"))?;
+    if next_offset > archive_len {
+        return Err(Error::TooShort);
+    }
+    let type_specific_start = reader.pos;
+    let data_start = sfx_offset
+        .checked_add(offset)
+        .and_then(|pos| pos.checked_add(header_total))
+        .ok_or(Error::InvalidHeader("RAR 5 data offset overflows usize"))?;
+    let data_end = data_start
+        .checked_add(data_len)
+        .ok_or(Error::InvalidHeader("RAR 5 data size overflows usize"))?;
+
+    Ok(ParsedBlockHeader {
+        block: BlockHeader {
+            header_crc,
+            header_size,
+            header_type,
+            flags,
+            extra_area_size,
+            data_size,
+            offset: sfx_offset + offset,
+            header_range: (offset + type_specific_start)..(offset + type_specific_end),
+            data_range: data_start..data_end,
+        },
+        header,
+        type_specific_range: type_specific_start..type_specific_end,
+        extra_range: type_specific_end..header_total,
+        next_offset,
+    })
 }
 
 fn parse_block_header(input: &[u8], offset: usize, sfx_offset: usize) -> Result<BlockHeader> {
@@ -661,9 +882,4 @@ fn usize_from_u64(value: u64, message: &'static str) -> Result<usize> {
 
 fn compression_method(compression_info: u64) -> u64 {
     (compression_info >> 7) & 0x07
-}
-
-#[allow(dead_code)]
-fn _range_reader(data: &[u8]) -> Cursor<&[u8]> {
-    Cursor::new(data)
 }

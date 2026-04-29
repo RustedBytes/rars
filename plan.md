@@ -96,8 +96,6 @@ Keep this section short. Detailed behavioural claims belong in tests.
 ### 2. RAR 5.0/7.x Reader
 
 - Harden the initial RAR 5 reader:
-  - Keep `parse_path` truly reader-backed instead of reading the full archive
-    into memory after signature detection.
   - Parse and expose main-header extra records, especially locator metadata for
     quick-open and recovery-record offsets.
   - Expand service-header tests for `CMT`, `QO`, `RR`, and mixed service

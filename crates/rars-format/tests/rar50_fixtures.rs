@@ -43,6 +43,20 @@ fn parses_and_extracts_rar50_stored_file() {
 }
 
 #[test]
+fn parses_and_extracts_rar50_stored_file_from_path() {
+    let archive = Archive::parse_path(fixture("stored.rar")).unwrap();
+
+    let files: Vec<_> = archive.files().collect();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].name, b"hello.txt");
+    assert_eq!(files[0].packed_size(), 30);
+
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].data, b"Hello, RAR 5.0 fixture world.\n");
+}
+
+#[test]
 fn extracts_rar50_empty_file_with_blake2_hash_record() {
     let bytes = std::fs::read(fixture("empty_file.rar")).unwrap();
     let archive = Archive::parse(&bytes).unwrap();
