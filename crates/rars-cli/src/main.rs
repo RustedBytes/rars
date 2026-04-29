@@ -1,7 +1,7 @@
 use rars::rar13::{self, FileEntry, StoredEntry, WriterOptions};
 use rars::{
-    detect_archive_family, extract_volumes, Archive as DetectedArchive, ArchiveReader,
-    ArchiveVersion, Error, ExtractedEntry, FeatureSet,
+    extract_volumes, Archive as DetectedArchive, ArchiveReader, ArchiveVersion, Error,
+    ExtractedEntry, FeatureSet,
 };
 use std::env;
 use std::fs;
@@ -46,18 +46,17 @@ fn cmd_info(args: &[String]) -> CliResult<()> {
     }
 
     for path in args {
-        let bytes = read_file(Path::new(path), "archive")?;
-        let sig = detect_archive_family(&bytes).ok_or_else(|| {
-            format!(
-                "failed to identify archive '{}': {}",
-                path,
-                Error::UnsupportedSignature
-            )
-        })?;
-        println!("{path}: {:?} at offset {}", sig.family, sig.offset);
-        match ArchiveReader::read(&bytes)
-            .map_err(|err| format!("failed to parse archive '{path}': {err}"))?
-        {
+        let archive =
+            ArchiveReader::read_path(path).map_err(|err| read_archive_error(path, err))?;
+        println!(
+            "{path}: {:?} at offset {}",
+            archive.family(),
+            match &archive {
+                DetectedArchive::Rar13(archive) => archive.sfx_offset,
+                DetectedArchive::Rar15To40(archive) => archive.sfx_offset,
+            }
+        );
+        match archive {
             DetectedArchive::Rar13(archive) => {
                 println!(
                     "  rar13 main: flags={:#04x} head_size={} sfx_offset={}",
@@ -158,9 +157,8 @@ fn cmd_test(args: &[String]) -> CliResult<()> {
     }
 
     let extracted = if paths.len() == 1 {
-        let bytes = read_file(Path::new(&paths[0]), "archive")?;
-        ArchiveReader::read(&bytes)
-            .map_err(|err| format!("failed to parse archive '{}': {err}", paths[0]))?
+        ArchiveReader::read_path(&paths[0])
+            .map_err(|err| read_archive_error(&paths[0], err))?
             .extract(password.as_deref())
             .map_err(|err| format!("failed to test archive '{}': {err}", paths[0]))?
     } else {
@@ -187,9 +185,8 @@ fn cmd_extract(args: &[String]) -> CliResult<()> {
     let out_dir = PathBuf::from(paths.pop().expect("outdir"));
 
     let extracted = if paths.len() == 1 {
-        let bytes = read_file(Path::new(&paths[0]), "archive")?;
-        ArchiveReader::read(&bytes)
-            .map_err(|err| format!("failed to parse archive '{}': {err}", paths[0]))?
+        ArchiveReader::read_path(&paths[0])
+            .map_err(|err| read_archive_error(&paths[0], err))?
             .extract(password.as_deref())
             .map_err(|err| format!("failed to extract archive '{}': {err}", paths[0]))?
     } else {
@@ -388,13 +385,22 @@ fn parse_password(args: &[String]) -> CliResult<(Option<Vec<u8>>, Vec<String>)> 
 fn parse_archives(paths: &[String]) -> CliResult<Vec<DetectedArchive>> {
     let mut archives = Vec::new();
     for path in paths {
-        let bytes = read_file(Path::new(path), "archive")?;
-        archives.push(
-            ArchiveReader::read(&bytes)
-                .map_err(|err| format!("failed to parse archive '{path}': {err}"))?,
-        );
+        archives.push(ArchiveReader::read_path(path).map_err(|err| read_archive_error(path, err))?);
     }
     Ok(archives)
+}
+
+fn read_archive_error(path: &str, err: Error) -> String {
+    match err {
+        Error::Io(message) => format!("failed to read archive '{path}': {message}"),
+        Error::UnsupportedSignature => {
+            format!(
+                "failed to identify archive '{path}': {}",
+                Error::UnsupportedSignature
+            )
+        }
+        other => format!("failed to parse archive '{path}': {other}"),
+    }
 }
 
 fn read_file(path: &Path, role: &str) -> CliResult<Vec<u8>> {

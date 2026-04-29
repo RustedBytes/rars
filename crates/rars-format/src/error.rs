@@ -12,6 +12,7 @@ pub enum Error {
         version: ArchiveVersion,
         feature: &'static str,
     },
+    Io(String),
     NeedPassword,
     CrcMismatch {
         expected: u16,
@@ -33,6 +34,7 @@ impl std::fmt::Display for Error {
             Self::UnsupportedFeature { version, feature } => {
                 write!(f, "feature {feature} is not supported by {version:?}")
             }
+            Self::Io(message) => write!(f, "I/O error: {message}"),
             Self::NeedPassword => write!(f, "a password is required"),
             Self::CrcMismatch { expected, actual } => {
                 write!(
@@ -47,6 +49,12 @@ impl std::fmt::Display for Error {
                 )
             }
         }
+    }
+}
+
+impl From<std::io::Error> for Error {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error.to_string())
     }
 }
 

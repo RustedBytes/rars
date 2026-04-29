@@ -2,7 +2,10 @@ use crate::detect::{find_archive_start, RAR15_SIGNATURE};
 use crate::error::{Error, Result};
 use crate::version::ArchiveFamily;
 use rars_codec::rar29::Unpack29;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::ops::Range;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 const MARK_HEAD: u8 = 0x72;
@@ -34,7 +37,13 @@ pub struct Archive {
     pub sfx_offset: usize,
     pub main: MainHeader,
     pub blocks: Vec<Block>,
-    data: Arc<[u8]>,
+    source: ArchiveSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ArchiveSource {
+    Memory(Arc<[u8]>),
+    File(Arc<PathBuf>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,11 +184,12 @@ impl FileHeader {
         self.method == 0x30
     }
 
-    pub fn packed_data<'a>(&self, archive: &'a Archive) -> Result<&'a [u8]> {
-        archive
-            .data
-            .get(self.packed_range.clone())
-            .ok_or(Error::TooShort)
+    pub fn packed_data(&self, archive: &Archive) -> Result<Vec<u8>> {
+        archive.read_range(self.packed_range.clone())
+    }
+
+    pub fn write_packed_data(&self, archive: &Archive, out: &mut impl Write) -> Result<()> {
+        archive.copy_range_to(self.packed_range.clone(), out)
     }
 
     pub fn stored_data(&self, archive: &Archive) -> Result<Vec<u8>> {
@@ -198,7 +208,7 @@ impl FileHeader {
                 "RAR 1.5 stored file has mismatched packed and unpacked sizes",
             ));
         }
-        Ok(self.packed_data(archive)?.to_vec())
+        self.packed_data(archive)
     }
 
     pub fn unpacked_data(&self, archive: &Archive) -> Result<Vec<u8>> {
@@ -239,7 +249,7 @@ impl FileHeader {
         }
         decoder
             .decode_member(
-                self.packed_data(archive)?,
+                &self.packed_data(archive)?,
                 usize::try_from(self.unp_size)
                     .map_err(|_| Error::InvalidHeader("RAR 2.9 unpacked size overflows usize"))?,
             )
@@ -319,6 +329,20 @@ impl Archive {
         Self::parse_shared(data)
     }
 
+    pub fn parse_path(path: impl AsRef<Path>) -> Result<Self> {
+        let path = Arc::new(path.as_ref().to_path_buf());
+        let mut file = File::open(path.as_ref())?;
+        let len = file.metadata()?.len();
+        let scan_len = len.min(128 * 1024) as usize;
+        let mut scan = vec![0; scan_len];
+        file.read_exact(&mut scan)?;
+        let sig = find_archive_start(&scan, 128 * 1024).ok_or(Error::UnsupportedSignature)?;
+        if sig.family != ArchiveFamily::Rar15To40 {
+            return Err(Error::UnsupportedSignature);
+        }
+        Self::parse_seekable(file, len, sig.offset, ArchiveSource::File(path))
+    }
+
     fn parse_shared(input: Arc<[u8]>) -> Result<Self> {
         let sig = find_archive_start(&input, 128 * 1024).ok_or(Error::UnsupportedSignature)?;
         if sig.family != ArchiveFamily::Rar15To40 {
@@ -379,8 +403,103 @@ impl Archive {
             sfx_offset: sig.offset,
             main,
             blocks,
-            data: input,
+            source: ArchiveSource::Memory(input),
         })
+    }
+
+    fn parse_seekable(
+        mut file: File,
+        file_len: u64,
+        sfx_offset: usize,
+        source: ArchiveSource,
+    ) -> Result<Self> {
+        let marker = read_block_header_at(&mut file, file_len, sfx_offset, 0)?;
+        if marker.head_type != MARK_HEAD || marker.head_size != RAR15_SIGNATURE.len() as u16 {
+            return Err(Error::InvalidHeader("RAR 1.5 marker block is invalid"));
+        }
+
+        let main_block =
+            read_block_header_at(&mut file, file_len, sfx_offset, marker.head_size as usize)?;
+        if main_block.head_type != MAIN_HEAD {
+            return Err(Error::InvalidHeader("RAR 1.5 main header is missing"));
+        }
+        let main_header = read_exact_at(
+            &mut file,
+            sfx_offset + main_block.offset,
+            main_block.head_size as usize,
+        )?;
+        let main = parse_main_header(&main_header, &relative_block(&main_block))?;
+        let mut pos = main_block.offset + main_block.head_size as usize;
+        let mut blocks = Vec::new();
+
+        while (sfx_offset + pos) as u64 + 7 <= file_len {
+            let block = read_block_header_at(&mut file, file_len, sfx_offset, pos)?;
+            let total = block_total_size(&block)?;
+            let next = block
+                .offset
+                .checked_add(total)
+                .ok_or(Error::InvalidHeader("RAR 1.5 block size overflows usize"))?;
+            if (sfx_offset + next) as u64 > file_len {
+                return Err(Error::TooShort);
+            }
+
+            match block.head_type {
+                FILE_HEAD => blocks.push(Block::File(read_file_like_header(
+                    &mut file, file_len, sfx_offset, block,
+                )?)),
+                NEWSUB_HEAD => {
+                    let file_header =
+                        read_file_like_header(&mut file, file_len, sfx_offset, block)?;
+                    let kind = classify_new_sub(&file_header.name);
+                    blocks.push(Block::NewSub(NewSubHeader {
+                        file: file_header,
+                        kind,
+                    }));
+                }
+                ENDARC_HEAD => {
+                    blocks.push(Block::End(block));
+                    break;
+                }
+                _ => blocks.push(Block::Unknown(block)),
+            }
+            pos = next;
+        }
+
+        Ok(Self {
+            sfx_offset,
+            main,
+            blocks,
+            source,
+        })
+    }
+
+    fn read_range(&self, range: Range<usize>) -> Result<Vec<u8>> {
+        match &self.source {
+            ArchiveSource::Memory(data) => data
+                .get(range)
+                .map(|data| data.to_vec())
+                .ok_or(Error::TooShort),
+            ArchiveSource::File(path) => {
+                let mut file = File::open(path.as_ref())?;
+                read_exact_at(&mut file, range.start, range.len())
+            }
+        }
+    }
+
+    fn copy_range_to(&self, range: Range<usize>, out: &mut impl Write) -> Result<()> {
+        match &self.source {
+            ArchiveSource::Memory(data) => {
+                let data = data.get(range).ok_or(Error::TooShort)?;
+                out.write_all(data)?;
+            }
+            ArchiveSource::File(path) => {
+                let mut file = File::open(path.as_ref())?;
+                file.seek(SeekFrom::Start(range.start as u64))?;
+                let mut limited = file.take(range.len() as u64);
+                std::io::copy(&mut limited, out)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn files(&self) -> impl Iterator<Item = &FileHeader> {
@@ -518,12 +637,14 @@ pub fn extract_volumes(volumes: &[Archive]) -> Result<Vec<ExtractedEntry>> {
                 (true, true, true) => {
                     let current = pending.as_mut().expect("pending split");
                     validate_split_continuation(current, file)?;
-                    current.data.extend_from_slice(file.packed_data(archive)?);
+                    current.data.extend_from_slice(&file.packed_data(archive)?);
                 }
                 (true, true, false) => {
                     let mut completed = pending.take().expect("pending split");
                     validate_split_continuation(&completed, file)?;
-                    completed.data.extend_from_slice(file.packed_data(archive)?);
+                    completed
+                        .data
+                        .extend_from_slice(&file.packed_data(archive)?);
                     let data = if completed.method == 0x30 {
                         let expected_len = usize::try_from(file.unp_size).map_err(|_| {
                             Error::InvalidHeader("RAR 1.5 split unpacked size overflows usize")
@@ -729,10 +850,6 @@ fn parse_file_like_header(
         .ok_or(Error::InvalidHeader(
             "RAR 1.5 packed file size overflows usize",
         ))?;
-    if data_end > input.len() {
-        return Err(Error::TooShort);
-    }
-
     Ok(FileHeader {
         block,
         pack_size,
@@ -748,6 +865,76 @@ fn parse_file_like_header(
         ext_time,
         packed_range: archive_offset + data_start..archive_offset + data_end,
     })
+}
+
+fn read_file_like_header(
+    file: &mut File,
+    file_len: u64,
+    archive_offset: usize,
+    block: BlockHeader,
+) -> Result<FileHeader> {
+    let header = read_exact_at(
+        file,
+        archive_offset + block.offset,
+        block.head_size as usize,
+    )?;
+    let relative = relative_block(&block);
+    let data_start = archive_offset + block.offset + block.head_size as usize;
+    let data_end = data_start
+        .checked_add(
+            usize::try_from(block.add_size.unwrap_or(0))
+                .map_err(|_| Error::InvalidHeader("RAR 1.5 packed file size overflows usize"))?,
+        )
+        .ok_or(Error::InvalidHeader(
+            "RAR 1.5 packed file size overflows usize",
+        ))?;
+    if data_end as u64 > file_len {
+        return Err(Error::TooShort);
+    }
+    parse_file_like_header(&header, relative, archive_offset + block.offset)
+}
+
+fn read_block_header_at(
+    file: &mut File,
+    file_len: u64,
+    archive_offset: usize,
+    offset: usize,
+) -> Result<BlockHeader> {
+    let absolute = archive_offset
+        .checked_add(offset)
+        .ok_or(Error::InvalidHeader("RAR 1.5 block offset overflows usize"))?;
+    if absolute as u64 + 7 > file_len {
+        return Err(Error::TooShort);
+    }
+    let base = read_exact_at(file, absolute, 7)?;
+    let head_size = read_u16(&base, 5)? as usize;
+    if head_size < 7 {
+        return Err(Error::InvalidHeader("RAR 1.5 block header is too short"));
+    }
+    if absolute as u64 + head_size as u64 > file_len {
+        return Err(Error::TooShort);
+    }
+    let header = if head_size == 7 {
+        base
+    } else {
+        read_exact_at(file, absolute, head_size)?
+    };
+    let mut block = parse_block_header(&header, 0)?;
+    block.offset = offset;
+    Ok(block)
+}
+
+fn read_exact_at(file: &mut File, offset: usize, len: usize) -> Result<Vec<u8>> {
+    file.seek(SeekFrom::Start(offset as u64))?;
+    let mut data = vec![0; len];
+    file.read_exact(&mut data)?;
+    Ok(data)
+}
+
+fn relative_block(block: &BlockHeader) -> BlockHeader {
+    let mut relative = block.clone();
+    relative.offset = 0;
+    relative
 }
 
 fn parse_block_header(input: &[u8], offset: usize) -> Result<BlockHeader> {

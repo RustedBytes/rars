@@ -4,7 +4,10 @@ use crate::features::FeatureSet;
 use crate::version::{ArchiveFamily, ArchiveVersion};
 use rars_codec::rar13::{unpack15_decode, unpack15_encode, Unpack15, Unpack15Encoder};
 use rars_crypto::rar13::Rar13Cipher;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::ops::Range;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 const MAIN_HEAD_SIZE: u16 = 7;
@@ -57,7 +60,13 @@ pub struct Archive {
     pub sfx_offset: usize,
     pub main: MainHeader,
     pub entries: Vec<Entry>,
-    data: Arc<[u8]>,
+    source: ArchiveSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ArchiveSource {
+    Memory(Arc<[u8]>),
+    File(Arc<PathBuf>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -221,6 +230,20 @@ impl Archive {
         Self::parse_shared(data)
     }
 
+    pub fn parse_path(path: impl AsRef<Path>) -> Result<Self> {
+        let path = Arc::new(path.as_ref().to_path_buf());
+        let mut file = File::open(path.as_ref())?;
+        let len = file.metadata()?.len();
+        let scan_len = len.min(128 * 1024) as usize;
+        let mut scan = vec![0; scan_len];
+        file.read_exact(&mut scan)?;
+        let sig = find_archive_start(&scan, 128 * 1024).ok_or(Error::UnsupportedSignature)?;
+        if sig.family != ArchiveFamily::Rar13 {
+            return Err(Error::UnsupportedSignature);
+        }
+        Self::parse_seekable(file, len, sig.offset, ArchiveSource::File(path))
+    }
+
     fn parse_shared(input: Arc<[u8]>) -> Result<Self> {
         let sig = find_archive_start(&input, 128 * 1024).ok_or(Error::UnsupportedSignature)?;
         if sig.family != ArchiveFamily::Rar13 {
@@ -262,8 +285,82 @@ impl Archive {
             sfx_offset: sig.offset,
             main,
             entries,
-            data: input,
+            source: ArchiveSource::Memory(input),
         })
+    }
+
+    fn parse_seekable(
+        mut file: File,
+        file_len: u64,
+        sfx_offset: usize,
+        source: ArchiveSource,
+    ) -> Result<Self> {
+        let main_prefix = read_exact_at(&mut file, sfx_offset, MAIN_HEAD_SIZE as usize)?;
+        let head_size = read_u16(&main_prefix, 4)? as usize;
+        let main_bytes = read_exact_at(&mut file, sfx_offset, head_size)?;
+        let main = MainHeader::parse(&main_bytes)?;
+        let mut pos = main.head_size as usize;
+        let mut entries = Vec::new();
+
+        while (sfx_offset + pos) as u64 + FILE_HEAD_BASE_SIZE as u64 <= file_len {
+            let header_prefix = read_exact_at(&mut file, sfx_offset + pos, FILE_HEAD_BASE_SIZE)?;
+            let head_size = read_u16(&header_prefix, 10)? as usize;
+            let header_bytes = read_exact_at(&mut file, sfx_offset + pos, head_size)?;
+            let (header, name, extra, consumed) = FileHeader::parse(&header_bytes)?;
+            let data_start = pos + consumed;
+            let data_end =
+                data_start
+                    .checked_add(header.pack_size as usize)
+                    .ok_or(Error::InvalidHeader(
+                        "RAR 1.3 file data size overflows usize",
+                    ))?;
+            if (sfx_offset + data_end) as u64 > file_len {
+                return Err(Error::TooShort);
+            }
+            entries.push(Entry {
+                header,
+                name,
+                extra,
+                packed_range: sfx_offset + data_start..sfx_offset + data_end,
+            });
+            pos = data_end;
+        }
+
+        Ok(Self {
+            sfx_offset,
+            main,
+            entries,
+            source,
+        })
+    }
+
+    fn read_range(&self, range: Range<usize>) -> Result<Vec<u8>> {
+        match &self.source {
+            ArchiveSource::Memory(data) => data
+                .get(range)
+                .map(|data| data.to_vec())
+                .ok_or(Error::TooShort),
+            ArchiveSource::File(path) => {
+                let mut file = File::open(path.as_ref())?;
+                read_exact_at(&mut file, range.start, range.len())
+            }
+        }
+    }
+
+    fn copy_range_to(&self, range: Range<usize>, out: &mut impl Write) -> Result<()> {
+        match &self.source {
+            ArchiveSource::Memory(data) => {
+                let data = data.get(range).ok_or(Error::TooShort)?;
+                out.write_all(data)?;
+            }
+            ArchiveSource::File(path) => {
+                let mut file = File::open(path.as_ref())?;
+                file.seek(SeekFrom::Start(range.start as u64))?;
+                let mut limited = file.take(range.len() as u64);
+                std::io::copy(&mut limited, out)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn extract_stored(&self, password: Option<&[u8]>) -> Result<Vec<ExtractedEntry>> {
@@ -425,10 +522,22 @@ impl Entry {
     }
 
     pub fn packed_data<'a>(&self, archive: &'a Archive) -> Result<&'a [u8]> {
-        archive
-            .data
-            .get(self.packed_range.clone())
-            .ok_or(Error::TooShort)
+        match &archive.source {
+            ArchiveSource::Memory(data) => {
+                data.get(self.packed_range.clone()).ok_or(Error::TooShort)
+            }
+            ArchiveSource::File(_) => Err(Error::InvalidHeader(
+                "RAR 1.3 file-backed packed data requires owned read",
+            )),
+        }
+    }
+
+    pub fn packed_data_owned(&self, archive: &Archive) -> Result<Vec<u8>> {
+        archive.read_range(self.packed_range.clone())
+    }
+
+    pub fn write_packed_data(&self, archive: &Archive, out: &mut impl Write) -> Result<()> {
+        archive.copy_range_to(self.packed_range.clone(), out)
     }
 
     pub fn stored_data(&self, archive: &Archive, password: Option<&[u8]>) -> Result<Vec<u8>> {
@@ -440,7 +549,7 @@ impl Entry {
     }
 
     fn decrypt_packed_data(&self, archive: &Archive, password: Option<&[u8]>) -> Result<Vec<u8>> {
-        let mut data = self.packed_data(archive)?.to_vec();
+        let mut data = self.packed_data_owned(archive)?;
         if self.is_encrypted() {
             let password = password.ok_or(Error::NeedPassword)?;
             Rar13Cipher::new(password).decrypt_in_place(&mut data);
@@ -584,6 +693,13 @@ pub fn extract_stored_volumes(
     password: Option<&[u8]>,
 ) -> Result<Vec<ExtractedEntry>> {
     extract_volumes(volumes, password)
+}
+
+fn read_exact_at(file: &mut File, offset: usize, len: usize) -> Result<Vec<u8>> {
+    file.seek(SeekFrom::Start(offset as u64))?;
+    let mut data = vec![0; len];
+    file.read_exact(&mut data)?;
+    Ok(data)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1301,7 +1417,7 @@ mod tests {
                 extra: 1u16.to_le_bytes().to_vec(),
             },
             entries: Vec::new(),
-            data: Arc::new([]),
+            source: ArchiveSource::Memory(Arc::new([])),
         };
         assert_eq!(
             packed_too_short.archive_comment(),
@@ -1318,7 +1434,7 @@ mod tests {
                 extra: 4u16.to_le_bytes().to_vec(),
             },
             entries: Vec::new(),
-            data: Arc::new([]),
+            source: ArchiveSource::Memory(Arc::new([])),
         };
         assert_eq!(unpacked_too_short.archive_comment(), Err(Error::TooShort));
     }
@@ -1333,7 +1449,7 @@ mod tests {
                 extra: 5u16.to_le_bytes().to_vec(),
             },
             entries: Vec::new(),
-            data: Arc::new([]),
+            source: ArchiveSource::Memory(Arc::new([])),
         };
         assert_eq!(
             too_short.authenticity_verification(),
@@ -1352,7 +1468,7 @@ mod tests {
                 },
             },
             entries: Vec::new(),
-            data: Arc::new([]),
+            source: ArchiveSource::Memory(Arc::new([])),
         };
         assert_eq!(
             bad_prefix.authenticity_verification(),

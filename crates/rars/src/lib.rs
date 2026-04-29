@@ -2,6 +2,8 @@ pub use rars_format::{
     detect_archive_family, find_archive_start, rar13, rar15_40, ArchiveFamily, ArchiveSignature,
     ArchiveVersion, Error, FeatureSet, Result,
 };
+use std::io::Read;
+use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Archive {
@@ -89,6 +91,22 @@ impl ArchiveReader {
         match signature.family {
             ArchiveFamily::Rar13 => Ok(Archive::Rar13(rar13::Archive::parse(input)?)),
             ArchiveFamily::Rar15To40 => Ok(Archive::Rar15To40(rar15_40::Archive::parse(input)?)),
+            ArchiveFamily::Rar50Plus => Err(Error::UnsupportedVersion(ArchiveVersion::Rar50)),
+        }
+    }
+
+    pub fn read_path(path: impl AsRef<Path>) -> Result<Archive> {
+        let path = path.as_ref();
+        let mut file = std::fs::File::open(path)?;
+        let len = file.metadata()?.len();
+        let mut scan = vec![0; len.min(128 * 1024) as usize];
+        file.read_exact(&mut scan)?;
+        let signature = find_archive_start(&scan, 128 * 1024).ok_or(Error::UnsupportedSignature)?;
+        match signature.family {
+            ArchiveFamily::Rar13 => Ok(Archive::Rar13(rar13::Archive::parse_path(path)?)),
+            ArchiveFamily::Rar15To40 => {
+                Ok(Archive::Rar15To40(rar15_40::Archive::parse_path(path)?))
+            }
             ArchiveFamily::Rar50Plus => Err(Error::UnsupportedVersion(ArchiveVersion::Rar50)),
         }
     }

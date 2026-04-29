@@ -94,8 +94,9 @@ This slice is now good enough to act as the first backend for a CLI:
   cipher lives in `rars-crypto`. The facade crate exposes `ArchiveReader`,
   `Archive`, and a small `ArchiveWriter` wrapper so callers have an auto-detect
   path instead of only version-specific entry points. Parsed entries store
-  packed byte ranges into the archive backing buffer rather than cloning packed
-  payloads into every entry.
+  packed byte ranges into the archive backing source rather than cloning packed
+  payloads into every entry. `Archive::parse_path` supports file-backed parsing
+  without loading the whole archive.
 - Negative coverage: wrong password rejection, corrupt stored payload checksum
   rejection, truncated compressed payload rejection, and unsafe extraction path
   rejection. Positive fixture coverage includes packed archive-comment and
@@ -178,8 +179,10 @@ The first reader slice is implemented:
   and `rars info`, `rars test`, and `rars x` work for stored and basic
   non-solid LZ-compressed RAR 1.5-4.x archives, including stored volume sets
   when all parts are supplied in order. Parsed file/service headers store
-  packed byte ranges into the archive backing buffer rather than cloned
+  packed byte ranges into the archive backing source rather than cloned
   payloads, so parsing no longer duplicates the compressed data for each entry.
+  `Archive::parse_path` supports file-backed parsing without loading the whole
+  archive, and the CLI uses the path-backed facade for read-side commands.
 
 Next RAR 1.5-4.x tasks:
 
@@ -196,10 +199,6 @@ Next RAR 1.5-4.x tasks:
 
 Architectural debt to address before the RAR 5.0 streaming slice:
 
-- Add path-backed parsing so `rars info`, `rars test`, and `rars x` do not need
-  `fs::read` of the entire archive before header parsing. The current archive
-  structs are range-backed, but the public parse helper still owns an in-memory
-  backing buffer for compatibility with fixture tests.
 - Add streaming extraction targets (`extract_to_writer` / CLI direct-to-file)
   so large stored files can be copied without materializing output `Vec<u8>`.
   Codec APIs still return `Vec<u8>` and need a streaming output interface before
