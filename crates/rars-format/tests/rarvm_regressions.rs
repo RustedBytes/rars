@@ -47,3 +47,30 @@ fn vm_filter_control_stream_accepts_32_bit_encoded_integers() {
 
     assert_eq!(extracted, vec![b"bsdcat.exe".to_vec()]);
 }
+
+#[test]
+fn non_standard_vm_filter_uses_generic_executor() {
+    let archive = Archive::parse_path(fixture("generic_delta_padding_mutation.rar")).unwrap();
+    let files: Vec<_> = archive.files().collect();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].name, b"itanium_synthetic_bundles.bin");
+    assert_eq!(files[0].unp_size, 1_048_576);
+    assert_eq!(files[0].file_crc, 0x3908_6451);
+
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].data.len(), 1_048_576);
+    assert_eq!(crc32(&extracted[0].data), 0x3908_6451);
+}
+
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffffu32;
+    for &byte in data {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            let mask = 0u32.wrapping_sub(crc & 1);
+            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+        }
+    }
+    !crc
+}

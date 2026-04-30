@@ -48,8 +48,8 @@ Keep this section short. Detailed behavioural claims belong in tests.
   common RAR 2.9/3.x Unpack29 members. Current Unpack29 coverage includes
   LZ-mode members, a native Rust PPMd text fixture, and the standard
   E8/E8E9/DELTA/ITANIUM/RGB/AUDIO native RARVM filters. Generic RARVM
-  bytecode now has a parser and execution core, but still needs an archive
-  fixture that exercises the generic fallback path end to end.
+  bytecode has parser/executor unit coverage and an archive-level fixture that
+  exercises the generic fallback path end to end.
   Current Unpack20 coverage includes plain LZ, 2-channel audio, solid member
   state carry-over, and a larger LZ history/table-stress fixture.
   Current PPMd coverage includes a normal text member, literal escape-byte
@@ -77,10 +77,6 @@ Keep this section short. Detailed behavioural claims belong in tests.
 - Broaden PPMd coverage for RAR 2.9+:
   - Add fixtures for PPMd-embedded RARVM filters when examples can be
     generated.
-- Finish generic RARVM support:
-  - Opcode and operand execution have focused unit coverage in `rars-codec`.
-  - Add or generate a small archive fixture that exercises a non-standard VM
-    program through Unpack29 end to end.
 - Add RAR 1.5-4.x encryption:
   - RAR 2.0 Feistel file encryption.
   - RAR 3.x/4.x AES file encryption.
