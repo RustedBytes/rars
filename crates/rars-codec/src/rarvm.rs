@@ -574,8 +574,10 @@ impl Vm {
                 }
             }
             Opcode::Popa => {
+                let mut stack = self.regs[7];
                 for index in (0..8).rev() {
-                    self.regs[index] = self.pop();
+                    self.regs[index] = self.read_mem(stack, false);
+                    stack = stack.wrapping_add(4);
                 }
             }
             Opcode::Pushf => self.push(self.flags),
@@ -1062,6 +1064,320 @@ mod tests {
     }
 
     #[test]
+    fn executes_unconditional_jumps_and_mutating_unary_ops() {
+        let result = execute_instructions(vec![
+            instr(
+                Opcode::Mov,
+                false,
+                vec![Operand::Register(0), Operand::Immediate(1)],
+            ),
+            instr(Opcode::Inc, false, vec![Operand::Register(0)]),
+            instr(Opcode::Dec, false, vec![Operand::Register(0)]),
+            instr(Opcode::Not, false, vec![Operand::Register(0)]),
+            instr(Opcode::Neg, false, vec![Operand::Register(0)]),
+            instr(Opcode::Jmp, false, vec![Operand::Immediate(7)]),
+            instr(
+                Opcode::Mov,
+                false,
+                vec![Operand::Register(0), Operand::Immediate(99)],
+            ),
+            instr(Opcode::Ret, false, Vec::new()),
+        ]);
+
+        assert_eq!(result.regs[0], 2);
+    }
+
+    #[test]
+    fn executes_logic_ops_and_test_without_writing_destination() {
+        let result = execute_instructions(vec![
+            instr(
+                Opcode::Mov,
+                false,
+                vec![Operand::Register(0), Operand::Immediate(0b1010)],
+            ),
+            instr(
+                Opcode::Xor,
+                false,
+                vec![Operand::Register(0), Operand::Immediate(0b1100)],
+            ),
+            instr(
+                Opcode::And,
+                false,
+                vec![Operand::Register(0), Operand::Immediate(0b0110)],
+            ),
+            instr(
+                Opcode::Or,
+                false,
+                vec![Operand::Register(0), Operand::Immediate(0b0001)],
+            ),
+            instr(
+                Opcode::Test,
+                false,
+                vec![Operand::Register(0), Operand::Immediate(0b0100)],
+            ),
+            instr(Opcode::Jnz, false, vec![Operand::Immediate(7)]),
+            instr(
+                Opcode::Mov,
+                false,
+                vec![Operand::Register(0), Operand::Immediate(99)],
+            ),
+            instr(Opcode::Ret, false, Vec::new()),
+        ]);
+
+        assert_eq!(result.regs[0], 0b0111);
+    }
+
+    #[test]
+    fn executes_unsigned_conditional_jumps() {
+        let result = execute_instructions(vec![
+            instr(
+                Opcode::Mov,
+                false,
+                vec![Operand::Register(0), Operand::Immediate(0)],
+            ),
+            instr(
+                Opcode::Cmp,
+                false,
+                vec![Operand::Immediate(1), Operand::Immediate(2)],
+            ),
+            instr(Opcode::Jb, false, vec![Operand::Immediate(5)]),
+            instr(
+                Opcode::Mov,
+                false,
+                vec![Operand::Register(0), Operand::Immediate(99)],
+            ),
+            instr(Opcode::Ret, false, Vec::new()),
+            instr(Opcode::Jbe, false, vec![Operand::Immediate(7)]),
+            instr(
+                Opcode::Mov,
+                false,
+                vec![Operand::Register(0), Operand::Immediate(98)],
+            ),
+            instr(
+                Opcode::Cmp,
+                false,
+                vec![Operand::Immediate(3), Operand::Immediate(2)],
+            ),
+            instr(Opcode::Ja, false, vec![Operand::Immediate(10)]),
+            instr(
+                Opcode::Mov,
+                false,
+                vec![Operand::Register(0), Operand::Immediate(97)],
+            ),
+            instr(
+                Opcode::Cmp,
+                false,
+                vec![Operand::Immediate(3), Operand::Immediate(2)],
+            ),
+            instr(Opcode::Jae, false, vec![Operand::Immediate(13)]),
+            instr(
+                Opcode::Mov,
+                false,
+                vec![Operand::Register(0), Operand::Immediate(96)],
+            ),
+            instr(
+                Opcode::Mov,
+                false,
+                vec![Operand::Register(0), Operand::Immediate(42)],
+            ),
+            instr(Opcode::Ret, false, Vec::new()),
+        ]);
+
+        assert_eq!(result.regs[0], 42);
+    }
+
+    #[test]
+    fn executes_signed_conditional_jumps() {
+        let result = execute_instructions(vec![
+            instr(
+                Opcode::Mov,
+                false,
+                vec![Operand::Register(0), Operand::Immediate(0)],
+            ),
+            instr(
+                Opcode::Sub,
+                false,
+                vec![Operand::Register(0), Operand::Immediate(1)],
+            ),
+            instr(Opcode::Js, false, vec![Operand::Immediate(5)]),
+            instr(
+                Opcode::Mov,
+                false,
+                vec![Operand::Register(1), Operand::Immediate(99)],
+            ),
+            instr(Opcode::Ret, false, Vec::new()),
+            instr(
+                Opcode::Add,
+                false,
+                vec![Operand::Register(0), Operand::Immediate(1)],
+            ),
+            instr(Opcode::Jns, false, vec![Operand::Immediate(8)]),
+            instr(
+                Opcode::Mov,
+                false,
+                vec![Operand::Register(1), Operand::Immediate(98)],
+            ),
+            instr(
+                Opcode::Mov,
+                false,
+                vec![Operand::Register(1), Operand::Immediate(42)],
+            ),
+            instr(Opcode::Ret, false, Vec::new()),
+        ]);
+
+        assert_eq!(result.regs[0], 0);
+        assert_eq!(result.regs[1], 42);
+    }
+
+    #[test]
+    fn executes_stack_register_and_flag_round_trips() {
+        let result = execute_instructions(vec![
+            instr(
+                Opcode::Mov,
+                false,
+                vec![Operand::Register(0), Operand::Immediate(10)],
+            ),
+            instr(Opcode::Push, false, vec![Operand::Register(0)]),
+            instr(
+                Opcode::Mov,
+                false,
+                vec![Operand::Register(0), Operand::Immediate(0)],
+            ),
+            instr(Opcode::Pop, false, vec![Operand::Register(1)]),
+            instr(
+                Opcode::Mov,
+                false,
+                vec![Operand::Register(0), Operand::Immediate(10)],
+            ),
+            instr(Opcode::Pusha, false, Vec::new()),
+            instr(
+                Opcode::Mov,
+                false,
+                vec![Operand::Register(0), Operand::Immediate(99)],
+            ),
+            instr(Opcode::Popa, false, Vec::new()),
+            instr(
+                Opcode::Cmp,
+                false,
+                vec![Operand::Immediate(1), Operand::Immediate(2)],
+            ),
+            instr(Opcode::Pushf, false, Vec::new()),
+            instr(
+                Opcode::Cmp,
+                false,
+                vec![Operand::Immediate(2), Operand::Immediate(2)],
+            ),
+            instr(Opcode::Popf, false, Vec::new()),
+            instr(Opcode::Jb, false, vec![Operand::Immediate(14)]),
+            instr(
+                Opcode::Mov,
+                false,
+                vec![Operand::Register(1), Operand::Immediate(99)],
+            ),
+            instr(Opcode::Ret, false, Vec::new()),
+        ]);
+
+        assert_eq!(result.regs[0], 10);
+        assert_eq!(result.regs[1], 10);
+    }
+
+    #[test]
+    fn executes_shifts_with_byte_and_word_modes() {
+        let result = execute_instructions(vec![
+            instr(
+                Opcode::Mov,
+                false,
+                vec![Operand::Register(0), Operand::Immediate(0x81)],
+            ),
+            instr(
+                Opcode::Shl,
+                false,
+                vec![Operand::Register(0), Operand::Immediate(1)],
+            ),
+            instr(
+                Opcode::Shr,
+                false,
+                vec![Operand::Register(0), Operand::Immediate(2)],
+            ),
+            instr(
+                Opcode::Mov,
+                false,
+                vec![Operand::Register(1), Operand::Immediate(0x80)],
+            ),
+            instr(
+                Opcode::Sar,
+                true,
+                vec![Operand::Register(1), Operand::Immediate(1)],
+            ),
+            instr(Opcode::Ret, false, Vec::new()),
+        ]);
+
+        assert_eq!(result.regs[0], 0x40);
+        assert_eq!(result.regs[1], 0xc0);
+    }
+
+    #[test]
+    fn executes_extension_exchange_multiply_divide_and_carry_arithmetic() {
+        let result = execute_instructions(vec![
+            instr(
+                Opcode::Mov,
+                false,
+                vec![Operand::Absolute(0), Operand::Immediate(0x80)],
+            ),
+            instr(
+                Opcode::Movzx,
+                false,
+                vec![Operand::Register(0), Operand::Absolute(0)],
+            ),
+            instr(
+                Opcode::Movsx,
+                false,
+                vec![Operand::Register(1), Operand::Absolute(0)],
+            ),
+            instr(
+                Opcode::Xchg,
+                false,
+                vec![Operand::Register(0), Operand::Register(1)],
+            ),
+            instr(
+                Opcode::Mul,
+                false,
+                vec![Operand::Register(1), Operand::Immediate(3)],
+            ),
+            instr(
+                Opcode::Div,
+                false,
+                vec![Operand::Register(1), Operand::Immediate(2)],
+            ),
+            instr(
+                Opcode::Cmp,
+                false,
+                vec![Operand::Immediate(1), Operand::Immediate(2)],
+            ),
+            instr(
+                Opcode::Adc,
+                false,
+                vec![Operand::Register(1), Operand::Immediate(1)],
+            ),
+            instr(
+                Opcode::Cmp,
+                false,
+                vec![Operand::Immediate(1), Operand::Immediate(2)],
+            ),
+            instr(
+                Opcode::Sbb,
+                false,
+                vec![Operand::Register(1), Operand::Immediate(2)],
+            ),
+            instr(Opcode::Print, false, Vec::new()),
+            instr(Opcode::Ret, false, Vec::new()),
+        ]);
+
+        assert_eq!(result.regs[0], 0xffff_ff80);
+        assert_eq!(result.regs[1], 0xbf);
+    }
+
+    #[test]
     fn preserves_requested_user_globals() {
         let program = Program {
             static_data: b"static".to_vec(),
@@ -1092,6 +1408,29 @@ mod tests {
         assert_eq!(result.output, [1, 2, 3]);
         assert_eq!(result.globals.len(), 68);
         assert_eq!(&result.globals[64..], b"stat");
+    }
+
+    fn instr(opcode: Opcode, byte_mode: bool, operands: Vec<Operand>) -> Instruction {
+        Instruction {
+            opcode,
+            byte_mode,
+            operands,
+        }
+    }
+
+    fn execute_instructions(instructions: Vec<Instruction>) -> ExecutionResult {
+        Program {
+            static_data: Vec::new(),
+            instructions,
+        }
+        .execute(Invocation {
+            input: &[0],
+            regs: [0; 7],
+            global_data: &[],
+            file_offset: 0,
+            exec_count: 0,
+        })
+        .unwrap()
     }
 
     struct BitWriter {

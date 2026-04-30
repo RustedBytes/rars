@@ -78,8 +78,7 @@ Keep this section short. Detailed behavioural claims belong in tests.
   - Add fixtures for PPMd-embedded RARVM filters when examples can be
     generated.
 - Finish generic RARVM support:
-  - Extend opcode/operand execution coverage until every documented instruction
-    has a focused unit test.
+  - Opcode and operand execution have focused unit coverage in `rars-codec`.
   - Add or generate a small archive fixture that exercises a non-standard VM
     program through Unpack29 end to end.
 - Add RAR 1.5-4.x encryption:
