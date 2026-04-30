@@ -555,7 +555,7 @@ fn rejects_incomplete_rar300_stored_volume_set() {
 }
 
 #[test]
-fn rejects_compressed_rar300_old_numbered_volume_set_until_split_codec_state_exists() {
+fn extracts_compressed_rar300_old_numbered_volume_set() {
     let archives: Vec<_> = [
         "rar300/compressed_multivol_prng_rar300.rar",
         "rar300/compressed_multivol_prng_rar300.r00",
@@ -567,12 +567,11 @@ fn rejects_compressed_rar300_old_numbered_volume_set_until_split_codec_state_exi
     .map(|name| Archive::parse(&std::fs::read(fixture(name)).unwrap()).unwrap())
     .collect();
 
-    assert!(matches!(
-        extract_volumes(&archives),
-        Err(Error::InvalidHeader(
-            "RAR 1.5 compressed file extraction is not implemented"
-        ))
-    ));
+    let extracted = extract_volumes(&archives).unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].name, b"cvolume.bin");
+    assert_eq!(extracted[0].data.len(), 4096);
+    assert_eq!(crc32(&extracted[0].data), 0x96de2bef);
 }
 
 #[test]

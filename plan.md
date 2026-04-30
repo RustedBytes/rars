@@ -56,8 +56,8 @@ Keep this section short. Detailed behavioural claims belong in tests.
   rejected with a clear unsupported-feature error before encrypted block bytes
   are parsed.
 - Extraction is reader-backed for normal archive paths and avoids cloning packed
-  payloads into parsed entries. Stored RAR 3.x volume sets stream through
-  `extract_volumes_to`.
+  payloads into parsed entries. Stored and compressed RAR 3.x volume sets stream
+  through `extract_volumes_to`.
 - RAR 5.0 has an initial read/extract vertical slice: marker and block walking,
   main/file/service/end header parsing, vint bounds, header CRC32 validation,
   stored file extraction, optional file CRC32 validation, BLAKE2sp hash-record
@@ -77,12 +77,6 @@ Keep this section short. Detailed behavioural claims belong in tests.
     generated.
 - Decide whether to support generic RARVM bytecode execution or continue to
   accept only recognized standard filters by bytecode identity.
-- Finish compressed split-volume extraction:
-  - Stored split volumes stream today; compressed split volumes are guarded
-    because simple packed-byte concatenation does not match the observed stream
-    semantics.
-  - Preserve one decoder session across the archive set once the split semantics
-    are understood.
 - Add RAR 1.5-4.x encryption:
   - RAR 2.0 Feistel file encryption.
   - RAR 3.x/4.x AES file encryption.

@@ -1,4 +1,5 @@
 use rars::rar13::{write_stored_archive, StoredEntry, WriterOptions};
+use rars::rar15_40;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -212,6 +213,35 @@ fn extracts_rar15_40_stored_multivolume_fixture() {
         fs::read(out_dir.join("stored-volume.txt")).unwrap(),
         expected_rar15_40_stored_volume_payload()
     );
+}
+
+#[test]
+fn extracts_rar15_40_compressed_multivolume_fixture() {
+    let out_dir = scratch("extract-rar15-40-compressed-multivol");
+    let output = rars()
+        .arg("x")
+        .arg(fixture_rar15_40(
+            "rar300/compressed_multivol_prng_rar300.rar",
+        ))
+        .arg(fixture_rar15_40(
+            "rar300/compressed_multivol_prng_rar300.r00",
+        ))
+        .arg(fixture_rar15_40(
+            "rar300/compressed_multivol_prng_rar300.r01",
+        ))
+        .arg(fixture_rar15_40(
+            "rar300/compressed_multivol_prng_rar300.r02",
+        ))
+        .arg(fixture_rar15_40(
+            "rar300/compressed_multivol_prng_rar300.r03",
+        ))
+        .arg(&out_dir)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let data = fs::read(out_dir.join("cvolume.bin")).unwrap();
+    assert_eq!(data.len(), 4096);
+    assert_eq!(rar15_40::crc32(&data), 0x96de2bef);
 }
 
 #[test]

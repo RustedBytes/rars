@@ -909,6 +909,42 @@ impl CodecState {
             Self::Unpack29(decoder) => file.write_rar29_to(archive, decoder, out),
         }
     }
+
+    fn write_split_to(
+        &mut self,
+        input: &mut impl Read,
+        file: &FileHeader,
+        solid: bool,
+        out: &mut impl Write,
+    ) -> Result<()> {
+        let mut crc = Crc32::new();
+        let mut crc_writer = CrcWriter {
+            inner: out,
+            crc: &mut crc,
+        };
+        let target = usize::try_from(file.unp_size)
+            .map_err(|_| Error::InvalidHeader("RAR 1.5 split unpacked size overflows usize"))?;
+        match self {
+            Self::Unpack15(decoder) => decoder
+                .decode_member_from_reader(input, target, solid, &mut crc_writer)
+                .map_err(Error::from)?,
+            Self::Unpack20(decoder) => decoder
+                .decode_member_from_reader(input, target, &mut crc_writer)
+                .map_err(Error::from)?,
+            Self::Unpack29(decoder) => decoder
+                .decode_member_from_reader(input, target, &mut crc_writer)
+                .map_err(Error::from)?,
+        }
+        let actual = crc.finish();
+        if actual == file.file_crc {
+            Ok(())
+        } else {
+            Err(Error::Crc32Mismatch {
+                expected: file.file_crc,
+                actual,
+            })
+        }
+    }
 }
 
 struct DecoderSession {
@@ -952,6 +988,19 @@ impl DecoderSession {
         let solid = self.solid && self.decoded_files != 0;
         self.codec_for(file)?
             .write_file_to(archive, file, solid, out)?;
+        self.decoded_files += 1;
+        Ok(())
+    }
+
+    fn write_split_to(
+        &mut self,
+        input: &mut impl Read,
+        final_file: &FileHeader,
+        out: &mut impl Write,
+    ) -> Result<()> {
+        let solid = self.solid && self.decoded_files != 0;
+        self.codec_for(final_file)?
+            .write_split_to(input, final_file, solid, out)?;
         self.decoded_files += 1;
         Ok(())
     }
@@ -1104,11 +1153,6 @@ fn validate_split_fragment(file: &FileHeader) -> Result<()> {
             "RAR 1.5 encrypted file extraction is not implemented",
         ));
     }
-    if !file.is_stored() {
-        return Err(Error::InvalidHeader(
-            "RAR 1.5 compressed file extraction is not implemented",
-        ));
-    }
     Ok(())
 }
 
@@ -1174,33 +1218,6 @@ impl PendingSplitRefs {
     where
         F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
     {
-        let expected_len = usize::try_from(final_file.unp_size)
-            .map_err(|_| Error::InvalidHeader("RAR 1.5 split unpacked size overflows usize"))?;
-        let actual_len =
-            self.fragments
-                .iter()
-                .try_fold(0usize, |total, &(volume_index, file_index)| {
-                    let archive = volumes
-                        .get(volume_index)
-                        .ok_or(Error::InvalidHeader("RAR 1.5 split volume is missing"))?;
-                    let file = archive
-                        .files()
-                        .nth(file_index)
-                        .ok_or(Error::InvalidHeader("RAR 1.5 split entry is missing"))?;
-                    total
-                        .checked_add(usize::try_from(file.pack_size).map_err(|_| {
-                            Error::InvalidHeader("RAR 1.5 split packed size overflows usize")
-                        })?)
-                        .ok_or(Error::InvalidHeader(
-                            "RAR 1.5 split packed size overflows usize",
-                        ))
-                })?;
-        if actual_len != expected_len {
-            return Err(Error::InvalidHeader(
-                "RAR 1.5 split stored file has wrong reassembled size",
-            ));
-        }
-
         let meta = ExtractedEntryMeta {
             name: self.name.clone(),
             file_time: self.file_time,
@@ -1209,23 +1226,57 @@ impl PendingSplitRefs {
             is_directory: false,
         };
         let mut writer = open(&meta)?;
-        let mut crc = Crc32::new();
-        let mut crc_writer = CrcWriter {
-            inner: &mut writer,
-            crc: &mut crc,
-        };
-        let _ = session;
         let mut reader = self.fragment_reader(volumes)?;
-        std::io::copy(&mut reader, &mut crc_writer)?;
-        let actual = crc.finish();
-        if actual == final_file.file_crc {
-            Ok(())
+
+        if final_file.is_stored() {
+            let expected_len = usize::try_from(final_file.unp_size)
+                .map_err(|_| Error::InvalidHeader("RAR 1.5 split unpacked size overflows usize"))?;
+            let actual_len = self.packed_size(volumes)?;
+            if actual_len != expected_len {
+                return Err(Error::InvalidHeader(
+                    "RAR 1.5 split stored file has wrong reassembled size",
+                ));
+            }
+
+            let mut crc = Crc32::new();
+            let mut crc_writer = CrcWriter {
+                inner: &mut writer,
+                crc: &mut crc,
+            };
+            std::io::copy(&mut reader, &mut crc_writer)?;
+            let actual = crc.finish();
+            if actual == final_file.file_crc {
+                Ok(())
+            } else {
+                Err(Error::Crc32Mismatch {
+                    expected: final_file.file_crc,
+                    actual,
+                })
+            }
         } else {
-            Err(Error::Crc32Mismatch {
-                expected: final_file.file_crc,
-                actual,
-            })
+            session.write_split_to(&mut reader, final_file, &mut writer)
         }
+    }
+
+    fn packed_size(&self, volumes: &[Archive]) -> Result<usize> {
+        self.fragments
+            .iter()
+            .try_fold(0usize, |total, &(volume_index, file_index)| {
+                let archive = volumes
+                    .get(volume_index)
+                    .ok_or(Error::InvalidHeader("RAR 1.5 split volume is missing"))?;
+                let file = archive
+                    .files()
+                    .nth(file_index)
+                    .ok_or(Error::InvalidHeader("RAR 1.5 split entry is missing"))?;
+                total
+                    .checked_add(usize::try_from(file.pack_size).map_err(|_| {
+                        Error::InvalidHeader("RAR 1.5 split packed size overflows usize")
+                    })?)
+                    .ok_or(Error::InvalidHeader(
+                        "RAR 1.5 split packed size overflows usize",
+                    ))
+            })
     }
 
     fn fragment_reader<'a>(&self, volumes: &'a [Archive]) -> Result<ChainedReader<'a>> {
