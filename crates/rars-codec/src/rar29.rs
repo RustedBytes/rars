@@ -494,9 +494,7 @@ impl Unpack29 {
                 1 | 6..=u8::MAX => self.output.push(self.ppmd_esc),
                 2 => return Ok(()),
                 3 => {
-                    return Err(Error::InvalidData(
-                        "RAR 2.9 PPMd VM filters are not implemented",
-                    ));
+                    self.read_vm_code_ppmd()?;
                 }
                 4 => {
                     let mut offset = 0usize;
@@ -623,6 +621,27 @@ impl Unpack29 {
             data.push(self.bits.read_bits(8)? as u8);
         }
 
+        self.parse_vm_code(first_byte, data)
+    }
+
+    fn read_vm_code_ppmd(&mut self) -> Result<()> {
+        let first_byte = u32::from(self.read_ppmd_required_byte()?);
+        let mut len = (first_byte & 7) + 1;
+        if len == 7 {
+            len = u32::from(self.read_ppmd_required_byte()?) + 7;
+        } else if len == 8 {
+            len = (u32::from(self.read_ppmd_required_byte()?) << 8)
+                | u32::from(self.read_ppmd_required_byte()?);
+        }
+        let mut data = Vec::with_capacity(len as usize);
+        for _ in 0..len {
+            data.push(self.read_ppmd_required_byte()?);
+        }
+
+        self.parse_vm_code(first_byte, data)
+    }
+
+    fn parse_vm_code(&mut self, first_byte: u32, data: Vec<u8>) -> Result<()> {
         let mut vm = BitReader::from_bytes(&data);
         let program_index = if first_byte & 0x80 != 0 {
             let value = vm.read_encoded_u32()?;

@@ -63,6 +63,25 @@ fn non_standard_vm_filter_uses_generic_executor() {
     assert_eq!(crc32(&extracted[0].data), 0x3908_6451);
 }
 
+#[test]
+fn ppmd_embedded_vm_filter_is_applied() {
+    // Generated with RAR 3.00 using `-m5 -mc10:16t+ -mce+`: text/PPMd is
+    // forced for the member while the x86 executable filter is also forced,
+    // so the filter record is carried by PPMd escape 3 instead of LZ symbols.
+    let archive = Archive::parse_path(fixture("ppmd_embedded_vm_filter.rar")).unwrap();
+    let files: Vec<_> = archive.files().collect();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].name, b"ppmd_branch_mix.bin");
+    assert_eq!(files[0].pack_size, 3_351);
+    assert_eq!(files[0].unp_size, 710_400);
+    assert_eq!(files[0].file_crc, 0xa0fa_ad59);
+
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].data.len(), 710_400);
+    assert_eq!(crc32(&extracted[0].data), 0xa0fa_ad59);
+}
+
 fn crc32(data: &[u8]) -> u32 {
     let mut crc = 0xffff_ffffu32;
     for &byte in data {

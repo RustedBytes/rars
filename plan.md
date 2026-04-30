@@ -53,7 +53,8 @@ Keep this section short. Detailed behavioural claims belong in tests.
   Current Unpack20 coverage includes plain LZ, 2-channel audio, solid member
   state carry-over, and a larger LZ history/table-stress fixture.
   Current PPMd coverage includes a normal text member, literal escape-byte
-  handling, a mixed text/binary multi-file archive, and solid PPMd model reuse.
+  handling, a mixed text/binary multi-file archive, solid PPMd model reuse, and
+  PPMd-embedded RARVM filter records.
 - RAR 3.x header-encrypted archives are detected from `MHD_PASSWORD` and
   rejected with a clear unsupported-feature error before encrypted block bytes
   are parsed.
@@ -75,8 +76,7 @@ Keep this section short. Detailed behavioural claims belong in tests.
   - Add more audio fixtures if examples with 1, 3, or 4 channels become
     available; current coverage pins normal 2-channel RAR 2.50 audio blocks.
 - Broaden PPMd coverage for RAR 2.9+:
-  - Add fixtures for PPMd-embedded RARVM filters when examples can be
-    generated.
+  - Add more adversarial PPMd fixtures as corpus bugs appear.
 - Add RAR 1.5-4.x encryption:
   - RAR 2.0 Feistel file encryption.
   - RAR 3.x/4.x AES file encryption.
