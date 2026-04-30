@@ -442,7 +442,7 @@ impl Unpack15Encoder {
     fn init_huff(&mut self) {
         for i in 0..256 {
             self.ch_set[i] = (i as u16) << 8;
-            self.ch_set_c[i] = ((0u8.wrapping_sub(i as u8) as u16) << 8) as u16;
+            self.ch_set_c[i] = (0u8.wrapping_sub(i as u8) as u16) << 8;
             self.ch_set_b[i] = (i as u16) << 8;
         }
         self.n_to_pl = [0; 256];
@@ -475,6 +475,12 @@ impl Unpack15Encoder {
         } else {
             SHORT_LEN2[pos]
         }
+    }
+}
+
+impl Default for Unpack15Encoder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1240,12 +1246,18 @@ impl Unpack15 {
             self.ch_set[i] = (i as u16) << 8;
             self.ch_set_b[i] = (i as u16) << 8;
             self.ch_set_a[i] = i as u16;
-            self.ch_set_c[i] = ((0u8.wrapping_sub(i as u8) as u16) << 8) as u16;
+            self.ch_set_c[i] = (0u8.wrapping_sub(i as u8) as u16) << 8;
         }
         self.n_to_pl = [0; 256];
         self.n_to_pl_b = [0; 256];
         self.n_to_pl_c = [0; 256];
         corr_huff(&mut self.ch_set_b, &mut self.n_to_pl_b);
+    }
+}
+
+impl Default for Unpack15 {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1379,7 +1391,7 @@ impl BitWriter {
     fn write_bits(&mut self, value: u32, count: usize) {
         for i in (0..count).rev() {
             let bit = ((value >> i) & 1) as u8;
-            if self.bit_pos % 8 == 0 {
+            if self.bit_pos.is_multiple_of(8) {
                 self.output.push(0);
             }
             if bit != 0 {

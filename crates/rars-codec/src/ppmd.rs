@@ -325,8 +325,8 @@ impl PpmdDecoder {
         };
 
         for i in 0..128 {
-            for k in 0..8 {
-                let value = BIN_SCALE - INIT_BIN_ESC[k] as u32 / (i as u32 + 2);
+            for (k, &init_bin_esc) in INIT_BIN_ESC.iter().enumerate() {
+                let value = BIN_SCALE - u32::from(init_bin_esc) / (i as u32 + 2);
                 for m in (0..64).step_by(8) {
                     self.bin_summ[i][k + m] = value as u16;
                 }
@@ -528,10 +528,8 @@ impl PpmdDecoder {
                 min_successor = Successor::Context(context);
             }
             self.order_fall -= 1;
-            if self.order_fall == 0 {
-                if self.max_context != self.min_context {
-                    self.text.pop();
-                }
+            if self.order_fall == 0 && self.max_context != self.min_context {
+                self.text.pop();
             }
         } else {
             self.state_mut(self.found_state).successor = max_successor;
@@ -789,5 +787,5 @@ fn update_prob_1(prob: u32) -> u32 {
 }
 
 fn hi_bits_flag(symbol: u8, bits: u32) -> u32 {
-    (((symbol as u32 + 0xc0) >> (8 - bits)) & (1 << bits)) as u32
+    ((symbol as u32 + 0xc0) >> (8 - bits)) & (1 << bits)
 }

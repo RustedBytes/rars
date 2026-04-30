@@ -849,9 +849,9 @@ impl Archive {
 }
 
 enum CodecState {
-    Unpack15(Unpack15),
-    Unpack20(Unpack20),
-    Unpack29(Unpack29),
+    Unpack15(Box<Unpack15>),
+    Unpack20(Box<Unpack20>),
+    Unpack29(Box<Unpack29>),
 }
 
 impl CodecState {
@@ -862,13 +862,13 @@ impl CodecState {
             ));
         }
         if file.unp_ver >= 29 {
-            return Ok(Self::Unpack29(Unpack29::new()));
+            return Ok(Self::Unpack29(Box::default()));
         }
         if file.unp_ver == 20 || file.unp_ver == 26 {
-            return Ok(Self::Unpack20(Unpack20::new()));
+            return Ok(Self::Unpack20(Box::default()));
         }
         if file.unp_ver == 15 {
-            return Ok(Self::Unpack15(Unpack15::new()));
+            return Ok(Self::Unpack15(Box::default()));
         }
         Err(Error::InvalidHeader(
             "RAR 1.5 compressed file extraction is not implemented",

@@ -877,6 +877,12 @@ impl Unpack29 {
     }
 }
 
+impl Default for Unpack29 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn fill_levels(levels: &mut [u8], pos: &mut usize, count: usize, value: u8) -> Result<()> {
     let end = pos
         .checked_add(count)
@@ -1136,7 +1142,7 @@ fn itanium_decode(data: &mut [u8], file_offset: u32) {
         return;
     }
     let mut file_offset = file_offset >> 4;
-    let data_size = (((data.len() as u32 - 21 + 15) >> 4) + file_offset) as u32;
+    let data_size = ((data.len() as u32 - 21 + 15) >> 4) + file_offset;
     let mut pos = 0usize;
     while file_offset != data_size {
         let mut mask = (0x334b_0000u32 >> (data[pos] & 0x1e)) & 3;

@@ -518,6 +518,12 @@ impl Unpack20 {
     }
 }
 
+impl Default for Unpack20 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct AudioState {
     k: [i32; 5],
