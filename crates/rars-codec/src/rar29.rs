@@ -1,4 +1,5 @@
 use crate::ppmd::{PpmdByteReader, PpmdDecoder};
+use crate::rarvm;
 use crate::{Error, Result};
 use std::io::{Read, Write};
 
@@ -76,13 +77,21 @@ struct VmFilter {
     start: usize,
     size: usize,
     regs: [u32; 7],
+    global_data: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
 struct VmProgram {
-    filter: StandardFilter,
+    kind: VmProgramKind,
     block_size: usize,
     exec_count: u32,
+    globals: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+enum VmProgramKind {
+    Standard(StandardFilter),
+    Generic(rarvm::Program),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -676,23 +685,29 @@ impl Unpack29 {
             for _ in 0..code_size {
                 code.push(vm.read_bits(8)? as u8);
             }
-            let filter = identify_standard_filter(&code).ok_or(Error::InvalidData(
-                "RAR 2.9 non-standard VM filters are not implemented",
-            ))?;
+            let kind = identify_standard_filter(&code)
+                .map(VmProgramKind::Standard)
+                .map_or_else(
+                    || rarvm::Program::parse(&code).map(VmProgramKind::Generic),
+                    Ok,
+                )?;
             self.programs.push(VmProgram {
-                filter,
+                kind,
                 block_size,
                 exec_count: 0,
+                globals: Vec::new(),
             });
         } else if let Some(program) = self.programs.get_mut(program_index) {
             program.exec_count = program.exec_count.wrapping_add(1);
             program.block_size = block_size;
         }
 
+        let mut global_data = Vec::new();
         if first_byte & 0x08 != 0 {
             let data_size = vm.read_encoded_u32()? as usize;
+            global_data.reserve(data_size);
             for _ in 0..data_size {
-                let _ = vm.read_bits(8)?;
+                global_data.push(vm.read_bits(8)? as u8);
             }
         }
 
@@ -701,39 +716,58 @@ impl Unpack29 {
             start: block_start,
             size: block_size,
             regs,
+            global_data,
         });
         Ok(())
     }
 
-    fn filtered_range(&self, start: usize, end: usize, member_start: usize) -> Result<Vec<u8>> {
+    fn filtered_range(&mut self, start: usize, end: usize, member_start: usize) -> Result<Vec<u8>> {
         let mut out = Vec::with_capacity(end - start);
         let mut pos = start;
-        for filter in self
+        let filters: Vec<_> = self
             .filters
             .iter()
             .filter(|filter| filter.start >= start && filter.start + filter.size <= end)
-        {
+            .cloned()
+            .collect();
+        for filter in filters {
             if filter.start < pos {
                 continue;
             }
             out.extend_from_slice(self.raw_range(pos, filter.start)?);
-            let program = self
-                .programs
-                .get(filter.program)
-                .ok_or(Error::InvalidData("RAR 2.9 VM program is missing"))?;
             let mut block = self
                 .raw_range(filter.start, filter.start + filter.size)?
                 .to_vec();
-            apply_standard_filter(
-                program.filter,
-                &mut block,
-                filter
-                    .start
-                    .checked_sub(member_start)
-                    .ok_or(Error::InvalidData("RAR 2.9 VM filter starts before file"))?
-                    as u32,
-                &filter.regs,
-            )?;
+            let file_offset = filter
+                .start
+                .checked_sub(member_start)
+                .ok_or(Error::InvalidData("RAR 2.9 VM filter starts before file"))?
+                as u32;
+            let program = self
+                .programs
+                .get_mut(filter.program)
+                .ok_or(Error::InvalidData("RAR 2.9 VM program is missing"))?;
+            match &program.kind {
+                VmProgramKind::Standard(standard) => {
+                    apply_standard_filter(*standard, &mut block, file_offset, &filter.regs)?
+                }
+                VmProgramKind::Generic(generic) => {
+                    let globals = if filter.global_data.is_empty() {
+                        program.globals.as_slice()
+                    } else {
+                        filter.global_data.as_slice()
+                    };
+                    let result = generic.execute(rarvm::Invocation {
+                        input: &block,
+                        regs: filter.regs,
+                        global_data: globals,
+                        file_offset: file_offset as u64,
+                        exec_count: program.exec_count,
+                    })?;
+                    program.globals = result.globals;
+                    block = result.output;
+                }
+            }
             out.extend_from_slice(&block);
             pos = filter.start + filter.size;
         }
@@ -1267,7 +1301,9 @@ fn crc32(input: &[u8]) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{unpack29_decode, StandardFilter, Unpack29, VmFilter, VmProgram};
+    use crate::rarvm::{Instruction, Opcode, Operand, Program};
+
+    use super::{unpack29_decode, StandardFilter, Unpack29, VmFilter, VmProgram, VmProgramKind};
 
     const COMPRESSED_TEXT: &[u8] = &[
         0x09, 0x10, 0x10, 0x93, 0xe4, 0xce, 0x7f, 0xa2, 0xba, 0x80, 0x46, 0x16, 0x82, 0x63, 0xe9,
@@ -1331,15 +1367,17 @@ mod tests {
         decoder.output[filter_start + 1..filter_start + 5]
             .copy_from_slice(&encoded_addr.to_le_bytes());
         decoder.programs.push(VmProgram {
-            filter: StandardFilter::E8,
+            kind: VmProgramKind::Standard(StandardFilter::E8),
             block_size: 5,
             exec_count: 0,
+            globals: Vec::new(),
         });
         decoder.filters.push(VmFilter {
             program: 0,
             start: filter_start,
             size: 5,
             regs: [0; 7],
+            global_data: Vec::new(),
         });
 
         let filtered = decoder
@@ -1349,6 +1387,43 @@ mod tests {
             u32::from_le_bytes([filtered[101], filtered[102], filtered[103], filtered[104]]);
 
         assert_eq!(operand, decoded_addr);
+    }
+
+    #[test]
+    fn generic_vm_filter_executes_from_filtered_range() {
+        let mut decoder = Unpack29::new();
+        decoder.output.extend_from_slice(&[0x11, 0x22, 0x33]);
+        decoder.programs.push(VmProgram {
+            kind: VmProgramKind::Generic(Program {
+                static_data: Vec::new(),
+                instructions: vec![
+                    Instruction {
+                        opcode: Opcode::Mov,
+                        byte_mode: true,
+                        operands: vec![Operand::Absolute(0), Operand::Immediate(0x44)],
+                    },
+                    Instruction {
+                        opcode: Opcode::Ret,
+                        byte_mode: false,
+                        operands: Vec::new(),
+                    },
+                ],
+            }),
+            block_size: 3,
+            exec_count: 0,
+            globals: Vec::new(),
+        });
+        decoder.filters.push(VmFilter {
+            program: 0,
+            start: 0,
+            size: 3,
+            regs: [0; 7],
+            global_data: Vec::new(),
+        });
+
+        let filtered = decoder.filtered_range(0, 3, 0).unwrap();
+
+        assert_eq!(filtered, [0x44, 0x22, 0x33]);
     }
 
     #[test]

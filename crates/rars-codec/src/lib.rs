@@ -2,6 +2,7 @@ mod ppmd;
 pub mod rar13;
 pub mod rar20;
 pub mod rar29;
+pub mod rarvm;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
