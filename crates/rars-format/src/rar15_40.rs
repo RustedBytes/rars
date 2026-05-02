@@ -4,6 +4,7 @@ use crate::version::ArchiveFamily;
 use rars_codec::rar13::Unpack15;
 use rars_codec::rar20::Unpack20;
 use rars_codec::rar29::Unpack29;
+use rars_crypto::rar20::Rar20Cipher;
 use std::fs::File;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
@@ -195,22 +196,32 @@ impl FileHeader {
     }
 
     pub fn stored_data(&self, archive: &Archive) -> Result<Vec<u8>> {
-        if self.is_encrypted() {
-            return Err(Error::InvalidHeader(
-                "RAR 1.5 encrypted file extraction is not implemented",
-            ));
-        }
+        self.stored_data_with_password(archive, None)
+    }
+
+    pub fn stored_data_with_password(
+        &self,
+        archive: &Archive,
+        password: Option<&[u8]>,
+    ) -> Result<Vec<u8>> {
         if !self.is_stored() {
             return Err(Error::InvalidHeader(
                 "RAR 1.5 compressed file extraction is not implemented",
             ));
         }
-        if self.pack_size != self.unp_size {
+        if !self.is_encrypted() && self.pack_size != self.unp_size {
             return Err(Error::InvalidHeader(
                 "RAR 1.5 stored file has mismatched packed and unpacked sizes",
             ));
         }
-        self.packed_data(archive)
+        let mut data = self.packed_data_for_decode(archive, password)?;
+        if self.is_encrypted() {
+            data.truncate(
+                usize::try_from(self.unp_size)
+                    .map_err(|_| Error::InvalidHeader("RAR 1.5 unpacked size overflows usize"))?,
+            );
+        }
+        Ok(data)
     }
 
     pub fn unpacked_data(&self, archive: &Archive) -> Result<Vec<u8>> {
@@ -218,6 +229,18 @@ impl FileHeader {
             return self.stored_data(archive);
         }
         let mut session = DecoderSession::new(false);
+        session.decode_file_data(archive, self)
+    }
+
+    pub fn unpacked_data_with_password(
+        &self,
+        archive: &Archive,
+        password: Option<&[u8]>,
+    ) -> Result<Vec<u8>> {
+        if self.is_stored() {
+            return self.stored_data_with_password(archive, password);
+        }
+        let mut session = DecoderSession::new_with_password(false, password);
         session.decode_file_data(archive, self)
     }
 
@@ -281,14 +304,10 @@ impl FileHeader {
         &self,
         archive: &Archive,
         decoder: &mut Unpack20,
+        password: Option<&[u8]>,
     ) -> Result<Vec<u8>> {
         if self.is_stored() {
-            return self.stored_data(archive);
-        }
-        if self.is_encrypted() {
-            return Err(Error::InvalidHeader(
-                "RAR 2.0 encrypted file extraction is not implemented",
-            ));
+            return self.stored_data_with_password(archive, password);
         }
         if self.unp_ver != 20 && self.unp_ver != 26 {
             return Err(Error::InvalidHeader(
@@ -297,11 +316,37 @@ impl FileHeader {
         }
         decoder
             .decode_member(
-                &self.packed_data(archive)?,
+                &self.packed_data_for_decode(archive, password)?,
                 usize::try_from(self.unp_size)
                     .map_err(|_| Error::InvalidHeader("RAR 2.0 unpacked size overflows usize"))?,
             )
             .map_err(Into::into)
+    }
+
+    fn packed_data_for_decode(
+        &self,
+        archive: &Archive,
+        password: Option<&[u8]>,
+    ) -> Result<Vec<u8>> {
+        let mut data = self.packed_data(archive)?;
+        self.decrypt_packed_data(&mut data, password)?;
+        Ok(data)
+    }
+
+    fn decrypt_packed_data(&self, data: &mut [u8], password: Option<&[u8]>) -> Result<()> {
+        if !self.is_encrypted() {
+            return Ok(());
+        }
+        let Some(password) = password else {
+            return Err(Error::NeedPassword);
+        };
+        if self.unp_ver == 20 || self.unp_ver == 26 {
+            Rar20Cipher::new(password).decrypt_in_place(data);
+            return Ok(());
+        }
+        Err(Error::InvalidHeader(
+            "RAR 3.x/4.x encrypted file extraction is not implemented",
+        ))
     }
 
     pub fn verify_crc32(&self, data: &[u8]) -> Result<()> {
@@ -327,6 +372,14 @@ impl FileHeader {
     }
 
     pub fn extract_stored(&self, archive: &Archive) -> Result<ExtractedEntry> {
+        self.extract_stored_with_password(archive, None)
+    }
+
+    pub fn extract_stored_with_password(
+        &self,
+        archive: &Archive,
+        password: Option<&[u8]>,
+    ) -> Result<ExtractedEntry> {
         if self.is_directory() {
             return Ok(ExtractedEntry {
                 name: self.name.clone(),
@@ -338,7 +391,7 @@ impl FileHeader {
             });
         }
 
-        let data = self.stored_data(archive)?;
+        let data = self.stored_data_with_password(archive, password)?;
         self.verify_crc32(&data)?;
         Ok(ExtractedEntry {
             name: self.name.clone(),
@@ -351,6 +404,14 @@ impl FileHeader {
     }
 
     pub fn extract(&self, archive: &Archive) -> Result<ExtractedEntry> {
+        self.extract_with_password(archive, None)
+    }
+
+    pub fn extract_with_password(
+        &self,
+        archive: &Archive,
+        password: Option<&[u8]>,
+    ) -> Result<ExtractedEntry> {
         if self.is_directory() {
             return Ok(ExtractedEntry {
                 name: self.name.clone(),
@@ -362,7 +423,7 @@ impl FileHeader {
             });
         }
 
-        let data = self.unpacked_data(archive)?;
+        let data = self.unpacked_data_with_password(archive, password)?;
         self.verify_crc32(&data)?;
         Ok(ExtractedEntry {
             name: self.name.clone(),
@@ -374,30 +435,26 @@ impl FileHeader {
         })
     }
 
-    fn write_stored_to(&self, archive: &Archive, out: &mut impl Write) -> Result<()> {
-        if self.is_encrypted() {
-            return Err(Error::InvalidHeader(
-                "RAR 1.5 encrypted file extraction is not implemented",
-            ));
-        }
+    fn write_stored_to(
+        &self,
+        archive: &Archive,
+        password: Option<&[u8]>,
+        out: &mut impl Write,
+    ) -> Result<()> {
         if !self.is_stored() {
             return Err(Error::InvalidHeader(
                 "RAR 1.5 compressed file extraction is not implemented",
             ));
         }
-        if self.pack_size != self.unp_size {
+        if !self.is_encrypted() && self.pack_size != self.unp_size {
             return Err(Error::InvalidHeader(
                 "RAR 1.5 stored file has mismatched packed and unpacked sizes",
             ));
         }
-        let mut crc = Crc32::new();
-        let mut crc_writer = CrcWriter {
-            inner: out,
-            crc: &mut crc,
-        };
-        self.write_packed_data(archive, &mut crc_writer)?;
-        let actual = crc.finish();
+        let data = self.stored_data_with_password(archive, password)?;
+        let actual = crc32(&data);
         if actual == self.file_crc {
+            out.write_all(&data)?;
             Ok(())
         } else {
             Err(Error::Crc32Mismatch {
@@ -414,7 +471,7 @@ impl FileHeader {
         out: &mut impl Write,
     ) -> Result<()> {
         if self.is_stored() {
-            return self.write_stored_to(archive, out);
+            return self.write_stored_to(archive, None, out);
         }
         if self.is_encrypted() {
             return Err(Error::InvalidHeader(
@@ -460,7 +517,7 @@ impl FileHeader {
         out: &mut impl Write,
     ) -> Result<()> {
         if self.is_stored() {
-            return self.write_stored_to(archive, out);
+            return self.write_stored_to(archive, None, out);
         }
         if self.is_encrypted() {
             return Err(Error::InvalidHeader(
@@ -503,15 +560,11 @@ impl FileHeader {
         &self,
         archive: &Archive,
         decoder: &mut Unpack20,
+        password: Option<&[u8]>,
         out: &mut impl Write,
     ) -> Result<()> {
         if self.is_stored() {
-            return self.write_stored_to(archive, out);
-        }
-        if self.is_encrypted() {
-            return Err(Error::InvalidHeader(
-                "RAR 2.0 encrypted file extraction is not implemented",
-            ));
+            return self.write_stored_to(archive, password, out);
         }
         if self.unp_ver != 20 && self.unp_ver != 26 {
             return Err(Error::InvalidHeader(
@@ -519,20 +572,24 @@ impl FileHeader {
             ));
         }
 
-        let mut packed = archive.range_reader(self.packed_range.clone())?;
         let mut crc = Crc32::new();
         let mut crc_writer = CrcWriter {
             inner: out,
             crc: &mut crc,
         };
-        decoder
-            .decode_member_from_reader(
-                &mut packed,
-                usize::try_from(self.unp_size)
-                    .map_err(|_| Error::InvalidHeader("RAR 2.0 unpacked size overflows usize"))?,
-                &mut crc_writer,
-            )
-            .map_err(Error::from)?;
+        let target = usize::try_from(self.unp_size)
+            .map_err(|_| Error::InvalidHeader("RAR 2.0 unpacked size overflows usize"))?;
+        if self.is_encrypted() {
+            let data = decoder
+                .decode_member(&self.packed_data_for_decode(archive, password)?, target)
+                .map_err(Error::from)?;
+            crc_writer.write_all(&data)?;
+        } else {
+            let mut packed = archive.range_reader(self.packed_range.clone())?;
+            decoder
+                .decode_member_from_reader(&mut packed, target, &mut crc_writer)
+                .map_err(Error::from)?;
+        }
         let actual = crc.finish();
         if actual == self.file_crc {
             Ok(())
@@ -783,6 +840,10 @@ impl Archive {
     ///
     /// Prefer [`Archive::extract_to`] for large archives.
     pub fn extract(&self) -> Result<Vec<ExtractedEntry>> {
+        self.extract_with_password(None)
+    }
+
+    pub fn extract_with_password(&self, password: Option<&[u8]>) -> Result<Vec<ExtractedEntry>> {
         if self.main.has_encrypted_headers() {
             return Err(Error::InvalidHeader(
                 "RAR 1.5 encrypted header extraction is not implemented",
@@ -790,7 +851,7 @@ impl Archive {
         }
 
         let mut out = Vec::new();
-        let mut session = DecoderSession::new(self.main.is_solid());
+        let mut session = DecoderSession::new_with_password(self.main.is_solid(), password);
         for file in self.files() {
             if file.is_split_before() || file.is_split_after() {
                 return Err(Error::InvalidHeader(
@@ -803,7 +864,14 @@ impl Archive {
     }
 
     /// Streams extracted entries to caller-provided writers.
-    pub fn extract_to<F>(&self, mut open: F) -> Result<()>
+    pub fn extract_to<F>(&self, open: F) -> Result<()>
+    where
+        F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
+    {
+        self.extract_to_with_password(None, open)
+    }
+
+    pub fn extract_to_with_password<F>(&self, password: Option<&[u8]>, mut open: F) -> Result<()>
     where
         F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
     {
@@ -813,7 +881,7 @@ impl Archive {
             ));
         }
 
-        let mut session = DecoderSession::new(self.main.is_solid());
+        let mut session = DecoderSession::new_with_password(self.main.is_solid(), password);
         for file in self.files() {
             if file.is_split_before() || file.is_split_after() {
                 return Err(Error::InvalidHeader(
@@ -827,7 +895,7 @@ impl Archive {
             }
             let mut writer = open(&meta)?;
             if file.is_stored() {
-                file.write_stored_to(self, &mut writer)?;
+                file.write_stored_to(self, password, &mut writer)?;
             } else {
                 session.write_file_to(self, file, &mut writer)?;
             }
@@ -856,9 +924,9 @@ enum CodecState {
 
 impl CodecState {
     fn new_for(file: &FileHeader) -> Result<Self> {
-        if file.is_encrypted() {
+        if file.is_encrypted() && file.unp_ver != 20 && file.unp_ver != 26 {
             return Err(Error::InvalidHeader(
-                "RAR 1.5 encrypted file extraction is not implemented",
+                "RAR 3.x/4.x encrypted file extraction is not implemented",
             ));
         }
         if file.unp_ver >= 29 {
@@ -878,7 +946,7 @@ impl CodecState {
     fn supports(&self, file: &FileHeader) -> bool {
         match self {
             Self::Unpack15(_) => !file.is_encrypted() && file.unp_ver == 15,
-            Self::Unpack20(_) => !file.is_encrypted() && (file.unp_ver == 20 || file.unp_ver == 26),
+            Self::Unpack20(_) => file.unp_ver == 20 || file.unp_ver == 26,
             Self::Unpack29(_) => !file.is_encrypted() && file.unp_ver >= 29,
         }
     }
@@ -888,10 +956,11 @@ impl CodecState {
         archive: &Archive,
         file: &FileHeader,
         solid: bool,
+        password: Option<&[u8]>,
     ) -> Result<Vec<u8>> {
         match self {
             Self::Unpack15(decoder) => file.unpacked_data_with_unpack15(archive, decoder, solid),
-            Self::Unpack20(decoder) => file.unpacked_data_with_unpack20(archive, decoder),
+            Self::Unpack20(decoder) => file.unpacked_data_with_unpack20(archive, decoder, password),
             Self::Unpack29(decoder) => file.unpacked_data_with_rar29(archive, decoder),
         }
     }
@@ -901,11 +970,12 @@ impl CodecState {
         archive: &Archive,
         file: &FileHeader,
         solid: bool,
+        password: Option<&[u8]>,
         out: &mut impl Write,
     ) -> Result<()> {
         match self {
             Self::Unpack15(decoder) => file.write_unpack15_to(archive, decoder, solid, out),
-            Self::Unpack20(decoder) => file.write_unpack20_to(archive, decoder, out),
+            Self::Unpack20(decoder) => file.write_unpack20_to(archive, decoder, password, out),
             Self::Unpack29(decoder) => file.write_rar29_to(archive, decoder, out),
         }
     }
@@ -947,24 +1017,30 @@ impl CodecState {
     }
 }
 
-struct DecoderSession {
+struct DecoderSession<'a> {
     codec: Option<CodecState>,
     solid: bool,
     decoded_files: usize,
+    password: Option<&'a [u8]>,
 }
 
-impl DecoderSession {
+impl<'a> DecoderSession<'a> {
     fn new(solid: bool) -> Self {
+        Self::new_with_password(solid, None)
+    }
+
+    fn new_with_password(solid: bool, password: Option<&'a [u8]>) -> Self {
         Self {
             codec: None,
             solid,
             decoded_files: 0,
+            password,
         }
     }
 
     fn extract_file(&mut self, archive: &Archive, file: &FileHeader) -> Result<ExtractedEntry> {
         if file.is_directory() || file.is_stored() {
-            return file.extract(archive);
+            return file.extract_with_password(archive, self.password);
         }
         let data = self.decode_file_data(archive, file)?;
         file.verify_crc32(&data)?;
@@ -986,8 +1062,9 @@ impl DecoderSession {
         out: &mut impl Write,
     ) -> Result<()> {
         let solid = self.solid && self.decoded_files != 0;
+        let password = self.password;
         self.codec_for(file)?
-            .write_file_to(archive, file, solid, out)?;
+            .write_file_to(archive, file, solid, password, out)?;
         self.decoded_files += 1;
         Ok(())
     }
@@ -1007,7 +1084,9 @@ impl DecoderSession {
 
     fn decode_file_data(&mut self, archive: &Archive, file: &FileHeader) -> Result<Vec<u8>> {
         let solid = self.solid && self.decoded_files != 0;
-        self.codec_for(file)?.decode_file_data(archive, file, solid)
+        let password = self.password;
+        self.codec_for(file)?
+            .decode_file_data(archive, file, solid, password)
     }
 
     fn codec_for(&mut self, file: &FileHeader) -> Result<&mut CodecState> {
@@ -1100,7 +1179,7 @@ where
                     } else {
                         let mut writer = open(&meta)?;
                         if file.is_stored() {
-                            file.write_stored_to(archive, &mut writer)?;
+                            file.write_stored_to(archive, None, &mut writer)?;
                         } else {
                             session.write_file_to(archive, file, &mut writer)?;
                         }

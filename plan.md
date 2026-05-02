@@ -51,7 +51,8 @@ Keep this section short. Detailed behavioural claims belong in tests.
   bytecode has parser/executor unit coverage and an archive-level fixture that
   exercises the generic fallback path end to end.
   Current Unpack20 coverage includes plain LZ, 2-channel audio, solid member
-  state carry-over, and a larger LZ history/table-stress fixture.
+  state carry-over, a larger LZ history/table-stress fixture, and RAR 2.0
+  Feistel-encrypted file members.
   Current PPMd coverage includes a normal text member, literal escape-byte
   handling, a mixed text/binary multi-file archive, solid PPMd model reuse, and
   PPMd-embedded RARVM filter records.
@@ -78,7 +79,6 @@ Keep this section short. Detailed behavioural claims belong in tests.
 - Broaden PPMd coverage for RAR 2.9+:
   - Add more adversarial PPMd fixtures as corpus bugs appear.
 - Add RAR 1.5-4.x encryption:
-  - RAR 2.0 Feistel file encryption.
   - RAR 3.x/4.x AES file encryption.
   - Header encryption (`MHD_PASSWORD`) decryption, including salt/KDF handling
     and parsing decrypted block streams.

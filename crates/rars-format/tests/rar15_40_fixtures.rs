@@ -68,6 +68,26 @@ fn parses_rar202_main_header_with_embedded_comment_subblock() {
 }
 
 #[test]
+fn extracts_rar202_encrypted_files_with_rar20_cipher() {
+    let bytes = std::fs::read(fixture("rar202/comment_psw.rar")).unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let files: Vec<_> = archive.files().collect();
+
+    assert_eq!(files.len(), 2);
+    assert!(files.iter().all(|file| file.is_encrypted()));
+    assert!(matches!(archive.extract(), Err(Error::NeedPassword)));
+
+    let extracted = archive.extract_with_password(Some(b"password")).unwrap();
+    assert_eq!(extracted.len(), 2);
+    assert_eq!(extracted[0].name, b"FILE1.TXT");
+    assert_eq!(extracted[0].data, b"file1\r\n");
+    assert_eq!(extracted[1].name, b"FILE2.TXT");
+    assert_eq!(extracted[1].data, b"file2\r\n");
+    assert_eq!(crc32(&extracted[0].data), files[0].file_crc);
+    assert_eq!(crc32(&extracted[1].data), files[1].file_crc);
+}
+
+#[test]
 fn rejects_rar3_header_encryption_with_clear_error() {
     let bytes = std::fs::read(fixture("encrypted/header_enc_1234.rar")).unwrap();
 
