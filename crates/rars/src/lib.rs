@@ -231,13 +231,22 @@ pub fn extract_volumes(
                     }
                 }
             }
-            rar15_40::extract_volumes(&typed)
+            rar15_40::extract_volumes_with_password(&typed, password)
                 .map(|entries| entries.into_iter().map(Into::into).collect())
         }
-        ArchiveFamily::Rar50Plus => Err(Error::UnsupportedFeature {
-            version: ArchiveVersion::Rar50,
-            feature: "RAR 5 multivolume extraction",
-        }),
+        ArchiveFamily::Rar50Plus => {
+            let mut typed = Vec::with_capacity(archives.len());
+            for archive in archives {
+                match archive {
+                    Archive::Rar50Plus(archive) => typed.push(archive.clone()),
+                    Archive::Rar13(_) | Archive::Rar15To40(_) => {
+                        return Err(Error::InvalidHeader("mixed archive families in volume set"));
+                    }
+                }
+            }
+            rar50::extract_volumes(&typed)
+                .map(|entries| entries.into_iter().map(Into::into).collect())
+        }
     }
 }
 
@@ -284,7 +293,7 @@ where
                     }
                 }
             }
-            rar15_40::extract_volumes_to(&typed, |meta| {
+            rar15_40::extract_volumes_to_with_password(&typed, password, |meta| {
                 open(&ExtractedEntryMeta {
                     name: meta.name.clone(),
                     file_time: meta.file_time,
@@ -293,41 +302,405 @@ where
                 })
             })
         }
-        ArchiveFamily::Rar50Plus => Err(Error::UnsupportedFeature {
-            version: ArchiveVersion::Rar50,
-            feature: "RAR 5 multivolume extraction",
-        }),
+        ArchiveFamily::Rar50Plus => {
+            let mut typed = Vec::with_capacity(archives.len());
+            for archive in archives {
+                match archive {
+                    Archive::Rar50Plus(archive) => typed.push(archive.clone()),
+                    Archive::Rar13(_) | Archive::Rar15To40(_) => {
+                        return Err(Error::InvalidHeader("mixed archive families in volume set"));
+                    }
+                }
+            }
+            rar50::extract_volumes_to(&typed, |meta| {
+                open(&ExtractedEntryMeta {
+                    name: meta.name.clone(),
+                    file_time: meta.file_time,
+                    file_attr: meta.attr as u32,
+                    is_directory: meta.is_directory,
+                })
+            })
+        }
     }
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct ArchiveWriter {
-    options: rar13::WriterOptions,
+    target: ArchiveVersion,
+    features: FeatureSet,
 }
 
 impl ArchiveWriter {
     pub fn new(target: ArchiveVersion) -> Result<Self> {
-        if !target.is_rar13_family() {
-            return Err(Error::UnsupportedVersion(target));
-        }
-        Ok(Self {
-            options: rar13::WriterOptions {
+        match target.family() {
+            ArchiveFamily::Rar13 | ArchiveFamily::Rar15To40 => Ok(Self {
                 target,
                 features: FeatureSet::store_only(),
-            },
-        })
+            }),
+            ArchiveFamily::Rar50Plus => Err(Error::UnsupportedVersion(target)),
+        }
     }
 
     pub fn with_features(mut self, features: FeatureSet) -> Self {
-        self.options.features = features;
+        self.features = features;
         self
     }
 
     pub fn write_stored(self, entries: &[rar13::StoredEntry<'_>]) -> Result<Vec<u8>> {
-        rar13::write_stored_archive(entries, self.options)
+        if !self.target.is_rar13_family() {
+            return Err(Error::UnsupportedVersion(self.target));
+        }
+        rar13::write_stored_archive(
+            entries,
+            rar13::WriterOptions {
+                target: self.target,
+                features: self.features,
+            },
+        )
     }
 
     pub fn write_compressed(self, entries: &[rar13::FileEntry<'_>]) -> Result<Vec<u8>> {
-        rar13::write_compressed_archive(entries, self.options)
+        if !self.target.is_rar13_family() {
+            return Err(Error::UnsupportedVersion(self.target));
+        }
+        rar13::write_compressed_archive(
+            entries,
+            rar13::WriterOptions {
+                target: self.target,
+                features: self.features,
+            },
+        )
+    }
+
+    pub fn write_rar15_stored(self, entries: &[rar15_40::StoredEntry<'_>]) -> Result<Vec<u8>> {
+        rar15_40::write_stored_archive(
+            entries,
+            rar15_40::WriterOptions {
+                target: self.target,
+                features: self.features,
+            },
+        )
+    }
+
+    pub fn write_rar15_stored_with_comment(
+        self,
+        entries: &[rar15_40::StoredEntry<'_>],
+        archive_comment: Option<&[u8]>,
+    ) -> Result<Vec<u8>> {
+        rar15_40::write_stored_archive_with_comment(
+            entries,
+            rar15_40::WriterOptions {
+                target: self.target,
+                features: self.features,
+            },
+            archive_comment,
+        )
+    }
+
+    pub fn write_rar15_compressed(self, entries: &[rar15_40::FileEntry<'_>]) -> Result<Vec<u8>> {
+        rar15_40::write_compressed_archive(
+            entries,
+            rar15_40::WriterOptions {
+                target: self.target,
+                features: self.features,
+            },
+        )
+    }
+
+    pub fn write_rar15_compressed_with_comment(
+        self,
+        entries: &[rar15_40::FileEntry<'_>],
+        archive_comment: Option<&[u8]>,
+    ) -> Result<Vec<u8>> {
+        rar15_40::write_compressed_archive_with_comment(
+            entries,
+            rar15_40::WriterOptions {
+                target: self.target,
+                features: self.features,
+            },
+            archive_comment,
+        )
+    }
+
+    pub fn write_rar15_stored_volumes(
+        self,
+        entry: rar15_40::StoredEntry<'_>,
+        max_packed_per_volume: usize,
+    ) -> Result<Vec<Vec<u8>>> {
+        rar15_40::write_stored_volumes(
+            entry,
+            rar15_40::WriterOptions {
+                target: self.target,
+                features: self.features,
+            },
+            max_packed_per_volume,
+        )
+    }
+
+    pub fn write_rar15_compressed_volumes(
+        self,
+        entry: rar15_40::FileEntry<'_>,
+        max_packed_per_volume: usize,
+    ) -> Result<Vec<Vec<u8>>> {
+        rar15_40::write_compressed_volumes(
+            entry,
+            rar15_40::WriterOptions {
+                target: self.target,
+                features: self.features,
+            },
+            max_packed_per_volume,
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn archive_writer_creates_rar15_stored_archive() {
+        let bytes = ArchiveWriter::new(ArchiveVersion::Rar15)
+            .unwrap()
+            .write_rar15_stored(&[rar15_40::StoredEntry {
+                name: b"hello.txt",
+                data: b"hello via facade\n",
+                file_time: 0,
+                file_attr: 0x20,
+                host_os: 3,
+                password: None,
+                file_comment: None,
+            }])
+            .unwrap();
+
+        let archive = ArchiveReader::read(&bytes).unwrap();
+        assert_eq!(archive.family(), ArchiveFamily::Rar15To40);
+        let extracted = archive.extract(None).unwrap();
+        assert_eq!(extracted.len(), 1);
+        assert_eq!(extracted[0].data, b"hello via facade\n");
+    }
+
+    #[test]
+    fn archive_writer_keeps_rar13_methods_version_typed() {
+        let err = ArchiveWriter::new(ArchiveVersion::Rar15)
+            .unwrap()
+            .write_stored(&[])
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            Error::UnsupportedVersion(ArchiveVersion::Rar15)
+        ));
+    }
+
+    #[test]
+    fn archive_writer_creates_rar15_compressed_archive() {
+        let bytes = ArchiveWriter::new(ArchiveVersion::Rar15)
+            .unwrap()
+            .write_rar15_compressed(&[rar15_40::FileEntry {
+                name: b"text.txt",
+                data: b"facade compressed facade compressed facade compressed\n",
+                file_time: 0,
+                file_attr: 0x20,
+                host_os: 3,
+                password: None,
+                file_comment: None,
+            }])
+            .unwrap();
+
+        let archive = ArchiveReader::read(&bytes).unwrap();
+        assert_eq!(archive.family(), ArchiveFamily::Rar15To40);
+        let extracted = archive.extract(None).unwrap();
+        assert_eq!(
+            extracted[0].data,
+            b"facade compressed facade compressed facade compressed\n"
+        );
+    }
+
+    #[test]
+    fn archive_writer_creates_rar15_archive_comment() {
+        let mut features = FeatureSet::store_only();
+        features.archive_comment = true;
+        let bytes = ArchiveWriter::new(ArchiveVersion::Rar15)
+            .unwrap()
+            .with_features(features)
+            .write_rar15_compressed_with_comment(
+                &[rar15_40::FileEntry {
+                    name: b"commented.txt",
+                    data: b"facade commented payload\n",
+                    file_time: 0,
+                    file_attr: 0x20,
+                    host_os: 3,
+                    password: None,
+                    file_comment: None,
+                }],
+                Some(b"facade note\n"),
+            )
+            .unwrap();
+
+        let archive = ArchiveReader::read(&bytes).unwrap();
+        let archive = archive.as_rar15_40().unwrap();
+        assert_eq!(
+            archive.archive_comment().unwrap().as_deref(),
+            Some(&b"facade note\n"[..])
+        );
+        assert_eq!(
+            archive.extract().unwrap()[0].data,
+            b"facade commented payload\n"
+        );
+    }
+
+    #[test]
+    fn archive_writer_creates_rar15_file_comment() {
+        let mut features = FeatureSet::store_only();
+        features.file_comment = true;
+        let bytes = ArchiveWriter::new(ArchiveVersion::Rar15)
+            .unwrap()
+            .with_features(features)
+            .write_rar15_stored(&[rar15_40::StoredEntry {
+                name: b"file-comment.txt",
+                data: b"facade file comment payload\n",
+                file_time: 0,
+                file_attr: 0x20,
+                host_os: 3,
+                password: None,
+                file_comment: Some(b"facade file note"),
+            }])
+            .unwrap();
+
+        let archive = ArchiveReader::read(&bytes).unwrap();
+        let archive = archive.as_rar15_40().unwrap();
+        let file = archive.files().next().unwrap();
+        assert_eq!(
+            file.file_comment().unwrap().as_deref(),
+            Some(&b"facade file note"[..])
+        );
+        assert_eq!(
+            archive.extract().unwrap()[0].data,
+            b"facade file comment payload\n"
+        );
+    }
+
+    #[test]
+    fn archive_writer_creates_rar15_solid_compressed_archive() {
+        let mut features = FeatureSet::store_only();
+        features.solid = true;
+        let bytes = ArchiveWriter::new(ArchiveVersion::Rar15)
+            .unwrap()
+            .with_features(features)
+            .write_rar15_compressed(&[
+                rar15_40::FileEntry {
+                    name: b"one.txt",
+                    data: b"shared facade prefix one\n",
+                    file_time: 0,
+                    file_attr: 0x20,
+                    host_os: 3,
+                    password: None,
+                    file_comment: None,
+                },
+                rar15_40::FileEntry {
+                    name: b"two.txt",
+                    data: b"shared facade prefix two\n",
+                    file_time: 0,
+                    file_attr: 0x20,
+                    host_os: 3,
+                    password: None,
+                    file_comment: None,
+                },
+            ])
+            .unwrap();
+
+        let archive = ArchiveReader::read(&bytes).unwrap();
+        let extracted = archive.extract(None).unwrap();
+        assert_eq!(extracted[0].data, b"shared facade prefix one\n");
+        assert_eq!(extracted[1].data, b"shared facade prefix two\n");
+    }
+
+    #[test]
+    fn archive_writer_creates_rar15_encrypted_compressed_archive() {
+        let mut features = FeatureSet::store_only();
+        features.file_encryption = true;
+        let bytes = ArchiveWriter::new(ArchiveVersion::Rar15)
+            .unwrap()
+            .with_features(features)
+            .write_rar15_compressed(&[rar15_40::FileEntry {
+                name: b"secret.txt",
+                data: b"facade encrypted payload\n",
+                file_time: 0,
+                file_attr: 0x20,
+                host_os: 3,
+                password: Some(b"password"),
+                file_comment: None,
+            }])
+            .unwrap();
+
+        let archive = ArchiveReader::read(&bytes).unwrap();
+        assert!(matches!(archive.extract(None), Err(Error::NeedPassword)));
+        let extracted = archive.extract(Some(b"password")).unwrap();
+        assert_eq!(extracted[0].data, b"facade encrypted payload\n");
+    }
+
+    #[test]
+    fn archive_writer_creates_rar15_stored_volumes() {
+        let parts = ArchiveWriter::new(ArchiveVersion::Rar15)
+            .unwrap()
+            .write_rar15_stored_volumes(
+                rar15_40::StoredEntry {
+                    name: b"split.bin",
+                    data: b"abcdefghijklmnopqrstuvwxyz0123456789",
+                    file_time: 0,
+                    file_attr: 0x20,
+                    host_os: 3,
+                    password: None,
+                    file_comment: None,
+                },
+                10,
+            )
+            .unwrap();
+        let archives: Vec<_> = parts
+            .iter()
+            .map(|part| rar15_40::Archive::parse(part).unwrap())
+            .collect();
+        let extracted = rar15_40::extract_volumes(&archives).unwrap();
+
+        assert_eq!(extracted[0].name, b"split.bin");
+        assert_eq!(extracted[0].data, b"abcdefghijklmnopqrstuvwxyz0123456789");
+    }
+
+    #[test]
+    fn archive_writer_creates_rar15_encrypted_compressed_volumes() {
+        let mut features = FeatureSet::store_only();
+        features.file_encryption = true;
+        let parts = ArchiveWriter::new(ArchiveVersion::Rar15)
+            .unwrap()
+            .with_features(features)
+            .write_rar15_compressed_volumes(
+                rar15_40::FileEntry {
+                    name: b"split-secret.txt",
+                    data: b"facade encrypted split facade encrypted split\n",
+                    file_time: 0,
+                    file_attr: 0x20,
+                    host_os: 3,
+                    password: Some(b"password"),
+                    file_comment: None,
+                },
+                8,
+            )
+            .unwrap();
+        let archives: Vec<_> = parts
+            .iter()
+            .map(|part| rar15_40::Archive::parse(part).unwrap())
+            .collect();
+
+        assert!(matches!(
+            rar15_40::extract_volumes(&archives),
+            Err(Error::NeedPassword)
+        ));
+        let extracted =
+            rar15_40::extract_volumes_with_password(&archives, Some(b"password")).unwrap();
+        assert_eq!(extracted[0].name, b"split-secret.txt");
+        assert_eq!(
+            extracted[0].data,
+            b"facade encrypted split facade encrypted split\n"
+        );
     }
 }

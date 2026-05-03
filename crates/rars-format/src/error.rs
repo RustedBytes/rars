@@ -23,6 +23,9 @@ pub enum Error {
         expected: u32,
         actual: u32,
     },
+    HashMismatch {
+        hash_type: u64,
+    },
 }
 
 impl std::fmt::Display for Error {
@@ -51,6 +54,9 @@ impl std::fmt::Display for Error {
                     f,
                     "checksum mismatch: expected {expected:#010x}, got {actual:#010x}"
                 )
+            }
+            Self::HashMismatch { hash_type } => {
+                write!(f, "hash mismatch for hash type {hash_type}")
             }
         }
     }

@@ -1,4 +1,10 @@
-use rars::rar13::{self, FileEntry, StoredEntry, WriterOptions};
+use rars::rar13::{
+    self, FileEntry, StoredEntry as Rar13StoredEntry, WriterOptions as Rar13WriterOptions,
+};
+use rars::rar15_40::{
+    FileEntry as Rar15FileEntry, StoredEntry as Rar15StoredEntry,
+    WriterOptions as Rar15WriterOptions,
+};
 use rars::{
     extract_volumes_to, Archive as DetectedArchive, ArchiveReader, ArchiveVersion, Error,
     ExtractedEntryMeta, FeatureSet,
@@ -10,7 +16,7 @@ use std::path::{Component, Path, PathBuf};
 type CliResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 const ADD_USAGE: &str =
-    "usage: rars a [--password <password>] --format rar14 [--store] [--solid] [--comment <text>] [--file-comment <text>] [--volume-size <bytes>] <archive> <files...>";
+    "usage: rars a [--password <password>] --format <rar14|rar15> [--store] [--solid] [--comment <text>] [--file-comment <text>] [--volume-size <bytes>] <archive> <files...>";
 
 fn main() {
     if let Err(err) = run() {
@@ -132,6 +138,14 @@ fn cmd_info(args: &[String]) -> CliResult<()> {
                         file.file_crc,
                         file.unp_ver
                     );
+                    if let Some(comment) = file.file_comment().map_err(|err| {
+                        format!(
+                            "failed to decode file comment '{}' in '{path}': {err}",
+                            file.name_lossy()
+                        )
+                    })? {
+                        println!("    comment: {}", String::from_utf8_lossy(&comment));
+                    }
                 }
                 for sub in archive.new_subs() {
                     println!(
@@ -256,9 +270,14 @@ fn cmd_extract(args: &[String]) -> CliResult<()> {
 
 fn cmd_add(args: &[String]) -> CliResult<()> {
     let (password, args) = parse_password(args)?;
-    if args.len() < 3 || args[0] != "--format" || args[1] != "rar14" {
+    if args.len() < 3 || args[0] != "--format" {
         return Err(ADD_USAGE.into());
     }
+    let target = match args[1].as_str() {
+        "rar14" => ArchiveVersion::Rar14,
+        "rar15" => ArchiveVersion::Rar15,
+        _ => return Err(ADD_USAGE.into()),
+    };
     let mut store = false;
     let mut solid = false;
     let mut archive_comment = None;
@@ -307,24 +326,137 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
     }
     let compress = !store;
     if solid && store {
-        return Err("solid RAR 1.4 output requires compression".into());
+        return Err("solid output requires compression".into());
     }
     let archive_path = PathBuf::from(&args[archive_index]);
     let input_paths = &args[archive_index + 1..];
     if input_paths.is_empty() {
         return Err("no input files".into());
     }
-    if volume_size.is_some() && input_paths.len() != 1 {
-        return Err("RAR 1.4 multivolume writer currently supports one input file".into());
+    if target == ArchiveVersion::Rar15 {
+        validate_rar15_add_options(
+            store,
+            solid,
+            password.as_deref(),
+            archive_comment.as_deref(),
+            file_comment.as_deref(),
+            volume_size,
+        )?;
+    }
+    if matches!(target, ArchiveVersion::Rar14 | ArchiveVersion::Rar15)
+        && volume_size.is_some()
+        && input_paths.len() != 1
+    {
+        return Err("multivolume writer currently supports one input file".into());
     }
 
     let owned = read_inputs(input_paths, password.as_deref())?;
+    if target == ArchiveVersion::Rar15 {
+        let options = Rar15WriterOptions {
+            target,
+            features: {
+                let mut features = FeatureSet::store_only();
+                features.solid = solid;
+                features.file_encryption = password.is_some();
+                features.archive_comment = archive_comment.is_some();
+                features.file_comment = file_comment.is_some();
+                features
+            },
+        };
+        if let Some(volume_size) = volume_size {
+            let entry = owned.first().expect("one input checked above");
+            if entry.file_attr == 0x10 {
+                return Err("RAR 1.5 writer currently rejects directories".into());
+            }
+            let parts = if store {
+                let entry = Rar15StoredEntry {
+                    name: &entry.name,
+                    data: &entry.data,
+                    file_time: 0,
+                    file_attr: u32::from(entry.file_attr),
+                    host_os: 3,
+                    password: entry.password.as_deref(),
+                    file_comment: None,
+                };
+                rars::rar15_40::write_stored_volumes(entry, options, volume_size)?
+            } else {
+                let entry = Rar15FileEntry {
+                    name: &entry.name,
+                    data: &entry.data,
+                    file_time: 0,
+                    file_attr: u32::from(entry.file_attr),
+                    host_os: 3,
+                    password: entry.password.as_deref(),
+                    file_comment: None,
+                };
+                rars::rar15_40::write_compressed_volumes(entry, options, volume_size)?
+            };
+            write_volume_parts(&archive_path, &parts).map_err(|err| {
+                format!(
+                    "failed to write volume set starting at '{}': {err}",
+                    archive_path.display()
+                )
+            })?;
+            println!("created {} volumes", parts.len());
+            return Ok(());
+        }
+
+        let bytes = if store {
+            let mut entries = Vec::with_capacity(owned.len());
+            for entry in &owned {
+                if entry.file_attr == 0x10 {
+                    return Err("RAR 1.5 writer currently rejects directories".into());
+                }
+                entries.push(Rar15StoredEntry {
+                    name: &entry.name,
+                    data: &entry.data,
+                    file_time: 0,
+                    file_attr: u32::from(entry.file_attr),
+                    host_os: 3,
+                    password: entry.password.as_deref(),
+                    file_comment: file_comment.as_deref(),
+                });
+            }
+            rars::rar15_40::write_stored_archive_with_comment(
+                &entries,
+                options,
+                archive_comment.as_deref(),
+            )?
+        } else {
+            let mut entries = Vec::with_capacity(owned.len());
+            for entry in &owned {
+                if entry.file_attr == 0x10 {
+                    return Err("RAR 1.5 writer currently rejects directories".into());
+                }
+                entries.push(Rar15FileEntry {
+                    name: &entry.name,
+                    data: &entry.data,
+                    file_time: 0,
+                    file_attr: u32::from(entry.file_attr),
+                    host_os: 3,
+                    password: entry.password.as_deref(),
+                    file_comment: file_comment.as_deref(),
+                });
+            }
+            rars::rar15_40::write_compressed_archive_with_comment(
+                &entries,
+                options,
+                archive_comment.as_deref(),
+            )?
+        };
+        fs::write(&archive_path, bytes).map_err(|err| {
+            format!(
+                "failed to write archive '{}': {err}",
+                archive_path.display()
+            )
+        })?;
+        println!("created {}", archive_path.display());
+        return Ok(());
+    }
+
     let mut features = FeatureSet::store_only();
     features.solid = solid;
-    let options = WriterOptions {
-        target: ArchiveVersion::Rar14,
-        features,
-    };
+    let options = Rar13WriterOptions { target, features };
     if let Some(volume_size) = volume_size {
         let entry = owned.first().expect("one input checked above");
         let parts = if compress {
@@ -338,7 +470,7 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
             };
             rar13::write_compressed_volumes(entry, options, volume_size)?
         } else {
-            let entry = StoredEntry {
+            let entry = Rar13StoredEntry {
                 name: &entry.name,
                 data: &entry.data,
                 file_time: 0,
@@ -374,7 +506,7 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
     } else {
         let entries: Vec<_> = owned
             .iter()
-            .map(|entry| StoredEntry {
+            .map(|entry| Rar13StoredEntry {
                 name: &entry.name,
                 data: &entry.data,
                 file_time: 0,
@@ -392,6 +524,23 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
         )
     })?;
     println!("created {}", archive_path.display());
+    Ok(())
+}
+
+fn validate_rar15_add_options(
+    _store: bool,
+    _solid: bool,
+    _password: Option<&[u8]>,
+    archive_comment: Option<&[u8]>,
+    file_comment: Option<&[u8]>,
+    _volume_size: Option<usize>,
+) -> CliResult<()> {
+    if archive_comment.is_some() && _volume_size.is_some() {
+        return Err("RAR 1.5 writer does not support comments on volumes yet".into());
+    }
+    if file_comment.is_some() && _volume_size.is_some() {
+        return Err("RAR 1.5 writer does not support file comments on volumes yet".into());
+    }
     Ok(())
 }
 

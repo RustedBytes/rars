@@ -584,6 +584,110 @@ fn creates_stored_archive_that_can_be_tested() {
 }
 
 #[test]
+fn creates_rar15_stored_archive_that_can_be_tested() {
+    let dir = scratch("create-rar15-store");
+    let source = dir.join("hello.txt");
+    let archive = dir.join("created15.rar");
+    fs::write(&source, b"hello from rar15 cli\n").unwrap();
+
+    let create = rars()
+        .args(["a", "--format", "rar15", "--store"])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(create.status.success(), "stderr: {}", stderr(&create));
+
+    let info = rars().arg("info").arg(&archive).output().unwrap();
+    assert!(info.status.success(), "stderr: {}", stderr(&info));
+    let info_stdout = stdout(&info);
+    assert!(info_stdout.contains("Rar15To40"));
+    assert!(info_stdout.contains("method=0x30"));
+
+    let test = rars().arg("test").arg(&archive).output().unwrap();
+    assert!(test.status.success(), "stderr: {}", stderr(&test));
+    assert!(stdout(&test).contains("OK hello.txt"));
+}
+
+#[test]
+fn creates_rar15_compressed_archive_that_can_be_tested() {
+    let dir = scratch("create-rar15-compressed");
+    let source = dir.join("hello.txt");
+    let archive = dir.join("created15.rar");
+    fs::write(&source, b"hello from rar15 cli hello from rar15 cli\n").unwrap();
+
+    let create = rars()
+        .args(["a", "--format", "rar15"])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(create.status.success(), "stderr: {}", stderr(&create));
+
+    let info = rars().arg("info").arg(&archive).output().unwrap();
+    assert!(info.status.success(), "stderr: {}", stderr(&info));
+    assert!(stdout(&info).contains("method=0x33"));
+
+    let test = rars().arg("test").arg(&archive).output().unwrap();
+    assert!(test.status.success(), "stderr: {}", stderr(&test));
+    assert!(stdout(&test).contains("OK hello.txt"));
+}
+
+#[test]
+fn creates_rar15_archive_comment() {
+    let dir = scratch("create-rar15-comment");
+    let source = dir.join("commented.txt");
+    let archive = dir.join("commented.rar");
+    fs::write(&source, b"rar15 commented payload\n").unwrap();
+
+    let create = rars()
+        .args(["a", "--format", "rar15", "--comment", "rar15 note"])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(create.status.success(), "stderr: {}", stderr(&create));
+
+    let info = rars().arg("info").arg(&archive).output().unwrap();
+    assert!(info.status.success(), "stderr: {}", stderr(&info));
+    assert!(stdout(&info).contains("comment: rar15 note"));
+
+    let test = rars().arg("test").arg(&archive).output().unwrap();
+    assert!(test.status.success(), "stderr: {}", stderr(&test));
+    assert!(stdout(&test).contains("OK commented.txt"));
+}
+
+#[test]
+fn creates_rar15_file_comment() {
+    let dir = scratch("create-rar15-file-comment");
+    let source = dir.join("commented.txt");
+    let archive = dir.join("file-comment.rar");
+    fs::write(&source, b"rar15 file commented payload\n").unwrap();
+
+    let create = rars()
+        .args([
+            "a",
+            "--format",
+            "rar15",
+            "--file-comment",
+            "rar15 file note",
+        ])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(create.status.success(), "stderr: {}", stderr(&create));
+
+    let info = rars().arg("info").arg(&archive).output().unwrap();
+    assert!(info.status.success(), "stderr: {}", stderr(&info));
+    assert!(stdout(&info).contains("comment: rar15 file note"));
+
+    let test = rars().arg("test").arg(&archive).output().unwrap();
+    assert!(test.status.success(), "stderr: {}", stderr(&test));
+    assert!(stdout(&test).contains("OK commented.txt"));
+}
+
+#[test]
 fn creates_literal_compressed_archive_that_can_be_tested() {
     let dir = scratch("create-compressed");
     let source = dir.join("tiny.txt");
@@ -640,6 +744,64 @@ fn creates_solid_compressed_archive_that_can_be_tested() {
     let stdout = stdout(&test);
     assert!(stdout.contains("OK first.txt"));
     assert!(stdout.contains("OK second.txt"));
+}
+
+#[test]
+fn creates_rar15_solid_compressed_archive_that_can_be_tested() {
+    let dir = scratch("create-rar15-solid-compressed");
+    let first = dir.join("first.txt");
+    let second = dir.join("second.txt");
+    let archive = dir.join("solid15.rar");
+    fs::write(&first, b"shared prefix shared prefix alpha").unwrap();
+    fs::write(&second, b"shared prefix shared prefix beta").unwrap();
+
+    let create = rars()
+        .args(["a", "--format", "rar15", "--solid"])
+        .arg(&archive)
+        .arg(&first)
+        .arg(&second)
+        .output()
+        .unwrap();
+    assert!(create.status.success(), "stderr: {}", stderr(&create));
+
+    let info = rars().arg("info").arg(&archive).output().unwrap();
+    assert!(info.status.success(), "stderr: {}", stderr(&info));
+    let info_stdout = stdout(&info);
+    assert!(info_stdout.contains("rar15-40 main: flags=0x0008"));
+    assert!(info_stdout.contains("flags=0x8010"));
+
+    let test = rars().arg("test").arg(&archive).output().unwrap();
+    assert!(test.status.success(), "stderr: {}", stderr(&test));
+    let stdout = stdout(&test);
+    assert!(stdout.contains("OK first.txt"));
+    assert!(stdout.contains("OK second.txt"));
+}
+
+#[test]
+fn creates_rar15_encrypted_compressed_archive_that_can_be_tested() {
+    let dir = scratch("create-rar15-encrypted-compressed");
+    let source = dir.join("secret.txt");
+    let archive = dir.join("secret15.rar");
+    fs::write(&source, b"secret rar15 compressed payload\n").unwrap();
+
+    let create = rars()
+        .args(["a", "--password", "pass", "--format", "rar15"])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(create.status.success(), "stderr: {}", stderr(&create));
+
+    let without_password = rars().arg("test").arg(&archive).output().unwrap();
+    assert!(!without_password.status.success());
+
+    let test = rars()
+        .args(["test", "--password", "pass"])
+        .arg(&archive)
+        .output()
+        .unwrap();
+    assert!(test.status.success(), "stderr: {}", stderr(&test));
+    assert!(stdout(&test).contains("OK secret.txt"));
 }
 
 #[test]
@@ -758,6 +920,114 @@ fn creates_compressed_multivolume_archive_that_can_be_tested() {
 }
 
 #[test]
+fn creates_rar15_stored_multivolume_archive_that_can_be_tested() {
+    let dir = scratch("create-rar15-stored-multivolume");
+    let source = dir.join("payload.bin");
+    let archive = dir.join("split.rar");
+    fs::write(&source, b"abcdefghijklmnopqrstuvwxyz0123456789").unwrap();
+
+    let create = rars()
+        .args(["a", "--format", "rar15", "--store", "--volume-size", "10"])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(create.status.success(), "stderr: {}", stderr(&create));
+    assert!(archive.exists());
+    assert!(dir.join("split.r00").exists());
+    assert!(dir.join("split.r01").exists());
+    assert!(dir.join("split.r02").exists());
+
+    let test = rars()
+        .arg("test")
+        .arg(&archive)
+        .arg(dir.join("split.r00"))
+        .arg(dir.join("split.r01"))
+        .arg(dir.join("split.r02"))
+        .output()
+        .unwrap();
+    assert!(test.status.success(), "stderr: {}", stderr(&test));
+    assert!(stdout(&test).contains("OK payload.bin"));
+}
+
+#[test]
+fn creates_rar15_compressed_multivolume_archive_that_can_be_tested() {
+    let dir = scratch("create-rar15-compressed-multivolume");
+    let source = dir.join("repeat.txt");
+    let archive = dir.join("split.rar");
+    fs::write(&source, b"abcabcabcabcabcabcabcabcabcabcabcabcabcabc").unwrap();
+
+    let create = rars()
+        .args(["a", "--format", "rar15", "--volume-size", "8"])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(create.status.success(), "stderr: {}", stderr(&create));
+    assert!(archive.exists());
+    assert!(dir.join("split.r00").exists());
+
+    let test = rars()
+        .arg("test")
+        .arg(&archive)
+        .arg(dir.join("split.r00"))
+        .output()
+        .unwrap();
+    assert!(test.status.success(), "stderr: {}", stderr(&test));
+    assert!(stdout(&test).contains("OK repeat.txt"));
+}
+
+#[test]
+fn creates_rar15_encrypted_multivolume_archive_that_can_be_tested() {
+    let dir = scratch("create-rar15-encrypted-multivolume");
+    let source = dir.join("secret.txt");
+    let archive = dir.join("split.rar");
+    fs::write(
+        &source,
+        b"secret split compressed secret split compressed\n",
+    )
+    .unwrap();
+
+    let create = rars()
+        .args([
+            "a",
+            "--password",
+            "pass",
+            "--format",
+            "rar15",
+            "--volume-size",
+            "8",
+        ])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(create.status.success(), "stderr: {}", stderr(&create));
+    assert!(archive.exists());
+    assert!(dir.join("split.r00").exists());
+    let mut volume_args = vec![archive.clone()];
+    for index in 0.. {
+        let path = dir.join(format!("split.r{index:02}"));
+        if !path.exists() {
+            break;
+        }
+        volume_args.push(path);
+    }
+
+    let missing_password = rars().arg("test").args(&volume_args).output().unwrap();
+    assert!(!missing_password.status.success());
+    assert!(stderr(&missing_password).contains("password is required"));
+
+    let test = rars()
+        .args(["test", "--password", "pass"])
+        .args(&volume_args)
+        .output()
+        .unwrap();
+    assert!(test.status.success(), "stderr: {}", stderr(&test));
+    assert!(stdout(&test).contains("OK secret.txt"));
+}
+
+#[test]
 fn rejects_solid_store_output() {
     let dir = scratch("reject-solid-store");
     let source = dir.join("hello.txt");
@@ -771,7 +1041,7 @@ fn rejects_solid_store_output() {
         .output()
         .unwrap();
     assert!(!output.status.success());
-    assert!(stderr(&output).contains("solid RAR 1.4 output requires compression"));
+    assert!(stderr(&output).contains("solid output requires compression"));
 }
 
 #[test]

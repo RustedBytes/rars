@@ -21,3 +21,11 @@ mono/3-channel/4-channel WAV-shaped data and the historical `AUDIO.RAR`
 fixture all selected normal LZ blocks. A useful future fixture must have bit
 15 set in the first table-read peek word and should pin the selected channel
 count.
+
+The spec repo's `scripts/find-rar20-audio-candidates.py` scans the local
+external corpus, spec fixtures, promoted crate fixtures, and old numbered
+volumes. Current result: 538 archive/volume files scanned, 37 raw bit-15
+candidates, 0 clean candidates. The candidates are stored, encrypted,
+split-continuation, or solid-continuation false positives. `SOLID.RAR` member
+2 intentionally pins one trap: raw data-start peek `0xdfbe`, but `LHD_SOLID`
+means it is not a fresh table-read boundary.
