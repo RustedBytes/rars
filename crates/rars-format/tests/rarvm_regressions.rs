@@ -82,6 +82,16 @@ fn ppmd_embedded_vm_filter_is_applied() {
     assert_eq!(crc32(&extracted[0].data), 0xa0fa_ad59);
 }
 
+#[test]
+fn real_executable_filter_archive_decodes() {
+    let archive = Archive::parse_path(fixture("filter_bsdcat_exe.rar")).unwrap();
+    let extracted = archive.extract().unwrap();
+
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].name, b"bsdcat.exe");
+    assert_eq!(crc32(&extracted[0].data), 0x4db1_0349);
+}
+
 fn crc32(data: &[u8]) -> u32 {
     let mut crc = 0xffff_ffffu32;
     for &byte in data {

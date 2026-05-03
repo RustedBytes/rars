@@ -50,15 +50,22 @@ Keep this section short. Detailed behavioural claims belong in tests.
   E8/E8E9/DELTA/ITANIUM/RGB/AUDIO native RARVM filters. Generic RARVM
   bytecode has parser/executor unit coverage and an archive-level fixture that
   exercises the generic fallback path end to end.
-  Current Unpack20 coverage includes plain LZ, 2-channel audio, solid member
-  state carry-over, a larger LZ history/table-stress fixture, and RAR 2.0
-  Feistel-encrypted file members.
+  Current Unpack20 coverage includes plain LZ, `-mm` multimedia-switch inputs
+  that still select LZ, solid member state carry-over, audio-shaped/text
+  archives, a larger LZ history/table-stress fixture, explicit multiblock
+  streams, synthetic codec-level one-channel and archive-level 1..4-channel
+  audio blocks, and RAR 2.0 Feistel-encrypted file members. The RAR 1.5
+  `CRYPT_RAR15` stream cipher is implemented and covered
+  by crypto vectors plus a WinRAR 1.54-derived archive fixture that is accepted
+  by RAR 3.93.
+  RAR 3.x/4.x AES encryption is covered for normal encrypted file members and
+  `MHD_PASSWORD` header-encrypted archives, including small RAR4 junrar
+  fixtures with encrypted compressed data and compact Unicode filenames.
   Current PPMd coverage includes a normal text member, literal escape-byte
   handling, a mixed text/binary multi-file archive, solid PPMd model reuse, and
-  PPMd-embedded RARVM filter records.
-- RAR 3.x header-encrypted archives are detected from `MHD_PASSWORD` and
-  rejected with a clear unsupported-feature error before encrypted block bytes
-  are parsed.
+  PPMd-embedded RARVM filter records. RAR 1.54 coverage includes single-file,
+  multi-file, solid-flagged, audio-shaped WAV payloads with Windows and DOS
+  names, and old-numbered multivolume Unpack15 archives.
 - Extraction is reader-backed for normal archive paths and avoids cloning packed
   payloads into parsed entries. Stored and compressed RAR 3.x volume sets stream
   through `extract_volumes_to`.
@@ -71,17 +78,26 @@ Keep this section short. Detailed behavioural claims belong in tests.
 
 ## Priority Backlog
 
-### 1. RAR 1.5-4.x Decoder Coverage
+### 1. RAR 1.5-4.x Decoder Watchlist
 
-- Finish Unpack20:
-  - Add more audio fixtures if examples with 1, 3, or 4 channels become
-    available; current coverage pins normal 2-channel RAR 2.50 audio blocks.
-- Broaden PPMd coverage for RAR 2.9+:
+- Blocked on external/vintage-encoder evidence:
+  - Find or generate RAR 2.50-authored true audio-block fixtures. Current
+    RAR 2.50 `-mm` probes,
+    including the historical `AUDIO.RAR`, have bit 15 clear in the first
+    table-read peek word and therefore exercise normal LZ blocks rather than
+    the Unpack20 audio predictor. The code has synthetic one-channel audio
+    coverage at codec level and synthetic archive-level coverage for channel
+    counts 1, 2, 3, and 4, but promoted vintage-encoder fixtures should still
+    pin bit 15 set and the selected channel count.
+- Watch for new corpus bugs:
   - Add more adversarial PPMd fixtures as corpus bugs appear.
-- Add RAR 1.5-4.x encryption:
-  - RAR 3.x/4.x AES file encryption.
-  - Header encryption (`MHD_PASSWORD`) decryption, including salt/KDF handling
-    and parsing decrypted block streams.
+  - Continue treating `node-unrar-js/FileEncByName.rar` as a partial oracle:
+    metadata, visible compact Unicode names, the unencrypted stored member, and
+    wrong-password/NeedPassword behaviour are covered; encrypted payload success
+    still needs the unknown member passwords. The libarchive mixed encrypted
+    fixture covers its RAR 3.93-validated positive member `b.txt`; its later
+    `d.txt` member is intentionally excluded from the success oracle because
+    RAR 3.93 reports a CRC/password failure.
 
 ### 2. RAR 5.0/7.x Reader
 
@@ -137,10 +153,6 @@ Keep this section short. Detailed behavioural claims belong in tests.
   stable behaviour.
 - Add failing tests before changing format or codec behaviour.
 - Add coverage for:
-  - RAR 1.54 multi-file and multivolume fixtures,
-  - RAR 2.0 explicitly observed multiblock fixtures,
-  - RAR 3.x PPMd,
-  - RAR 3.x encrypted file/header cases,
   - RAR 5 compressed, encrypted, service-heavy, SFX-prefixed, multivolume, and
     recovery cases.
 - Use `./scripts/coverage.sh` periodically; it writes HTML coverage to

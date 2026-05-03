@@ -159,15 +159,28 @@ impl ArchiveReader {
     }
 
     pub fn read(input: &[u8]) -> Result<Archive> {
+        Self::read_with_password(input, None)
+    }
+
+    pub fn read_with_password(input: &[u8], password: Option<&[u8]>) -> Result<Archive> {
         let signature = find_archive_start(input, 128 * 1024).ok_or(Error::UnsupportedSignature)?;
         match signature.family {
             ArchiveFamily::Rar13 => Ok(Archive::Rar13(rar13::Archive::parse(input)?)),
-            ArchiveFamily::Rar15To40 => Ok(Archive::Rar15To40(rar15_40::Archive::parse(input)?)),
+            ArchiveFamily::Rar15To40 => Ok(Archive::Rar15To40(
+                rar15_40::Archive::parse_with_password(input, password)?,
+            )),
             ArchiveFamily::Rar50Plus => Ok(Archive::Rar50Plus(rar50::Archive::parse(input)?)),
         }
     }
 
     pub fn read_path(path: impl AsRef<Path>) -> Result<Archive> {
+        Self::read_path_with_password(path, None)
+    }
+
+    pub fn read_path_with_password(
+        path: impl AsRef<Path>,
+        password: Option<&[u8]>,
+    ) -> Result<Archive> {
         let path = path.as_ref();
         let mut file = std::fs::File::open(path)?;
         let len = file.metadata()?.len();
@@ -176,9 +189,9 @@ impl ArchiveReader {
         let signature = find_archive_start(&scan, 128 * 1024).ok_or(Error::UnsupportedSignature)?;
         match signature.family {
             ArchiveFamily::Rar13 => Ok(Archive::Rar13(rar13::Archive::parse_path(path)?)),
-            ArchiveFamily::Rar15To40 => {
-                Ok(Archive::Rar15To40(rar15_40::Archive::parse_path(path)?))
-            }
+            ArchiveFamily::Rar15To40 => Ok(Archive::Rar15To40(
+                rar15_40::Archive::parse_path_with_password(path, password)?,
+            )),
             ArchiveFamily::Rar50Plus => Ok(Archive::Rar50Plus(rar50::Archive::parse_path(path)?)),
         }
     }

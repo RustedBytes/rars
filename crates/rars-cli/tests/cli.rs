@@ -108,6 +108,35 @@ fn test_verifies_rar15_40_stored_fixture() {
 }
 
 #[test]
+fn test_verifies_rar15_40_header_encrypted_fixture() {
+    for fixture in [
+        "encrypted/header_rar300_password.rar",
+        "encrypted/header_rar420_password.rar",
+    ] {
+        let output = rars()
+            .args(["test", "--password", "password"])
+            .arg(fixture_rar15_40(fixture))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "stderr: {}", stderr(&output));
+        assert!(stdout(&output).contains("OK hello.txt"));
+    }
+}
+
+#[test]
+fn rejects_wrong_password_for_rar15_40_encrypted_fixture() {
+    let output = rars()
+        .args(["test", "--password", "wrong-password"])
+        .arg(fixture_rar15_40("encrypted/per_file_rar300_password.rar"))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = stderr(&output);
+    assert!(stderr.contains("failed to test archive"));
+    assert!(stderr.contains("wrong password or corrupt encrypted data"));
+}
+
+#[test]
 fn extracts_rar15_40_stored_fixture() {
     let out_dir = scratch("extract-rar15-40");
     let output = rars()
@@ -121,6 +150,33 @@ fn extracts_rar15_40_stored_fixture() {
         fs::read(out_dir.join("hello.txt")).unwrap(),
         b"Hello, RAR 3.x fixture world.\n"
     );
+}
+
+#[test]
+fn extracts_rar15_40_header_encrypted_fixture() {
+    for (case, fixture) in [
+        (
+            "extract-rar15-40-header-encrypted-rar300",
+            "encrypted/header_rar300_password.rar",
+        ),
+        (
+            "extract-rar15-40-header-encrypted-rar420",
+            "encrypted/header_rar420_password.rar",
+        ),
+    ] {
+        let out_dir = scratch(case);
+        let output = rars()
+            .args(["x", "--password", "password"])
+            .arg(fixture_rar15_40(fixture))
+            .arg(&out_dir)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "stderr: {}", stderr(&output));
+        assert_eq!(
+            fs::read(out_dir.join("hello.txt")).unwrap(),
+            b"Hello, RAR 3.x fixture world.\n"
+        );
+    }
 }
 
 #[test]

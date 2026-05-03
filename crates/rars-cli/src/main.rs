@@ -187,7 +187,7 @@ fn cmd_test(args: &[String]) -> CliResult<()> {
     }
 
     if paths.len() == 1 {
-        let archive = ArchiveReader::read_path(&paths[0])
+        let archive = ArchiveReader::read_path_with_password(&paths[0], password.as_deref())
             .map_err(|err| read_archive_error(&paths[0], err))?;
         let mut entries = Vec::new();
         archive
@@ -200,7 +200,7 @@ fn cmd_test(args: &[String]) -> CliResult<()> {
             print_ok_entry(entry);
         }
     } else {
-        let archives = parse_archives(&paths)?;
+        let archives = parse_archives(&paths, password.as_deref())?;
         let mut entries = Vec::new();
         extract_volumes_to(&archives, password.as_deref(), |meta| {
             entries.push(meta.clone());
@@ -222,7 +222,7 @@ fn cmd_extract(args: &[String]) -> CliResult<()> {
     let out_dir = PathBuf::from(paths.pop().expect("outdir"));
 
     if paths.len() == 1 {
-        let archive = ArchiveReader::read_path(&paths[0])
+        let archive = ArchiveReader::read_path_with_password(&paths[0], password.as_deref())
             .map_err(|err| read_archive_error(&paths[0], err))?;
         let mut names = Vec::new();
         archive
@@ -240,7 +240,7 @@ fn cmd_extract(args: &[String]) -> CliResult<()> {
             println!("x {}", String::from_utf8_lossy(name));
         }
     } else {
-        let archives = parse_archives(&paths)?;
+        let archives = parse_archives(&paths, password.as_deref())?;
         let mut names = Vec::new();
         extract_volumes_to(&archives, password.as_deref(), |meta| {
             names.push(meta.name.clone());
@@ -428,10 +428,13 @@ fn parse_password(args: &[String]) -> CliResult<(Option<Vec<u8>>, Vec<String>)> 
     Ok((password, rest))
 }
 
-fn parse_archives(paths: &[String]) -> CliResult<Vec<DetectedArchive>> {
+fn parse_archives(paths: &[String], password: Option<&[u8]>) -> CliResult<Vec<DetectedArchive>> {
     let mut archives = Vec::new();
     for path in paths {
-        archives.push(ArchiveReader::read_path(path).map_err(|err| read_archive_error(path, err))?);
+        archives.push(
+            ArchiveReader::read_path_with_password(path, password)
+                .map_err(|err| read_archive_error(path, err))?,
+        );
     }
     Ok(archives)
 }

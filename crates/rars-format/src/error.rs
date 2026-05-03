@@ -14,6 +14,7 @@ pub enum Error {
     },
     Io(String),
     NeedPassword,
+    WrongPasswordOrCorruptData,
     CrcMismatch {
         expected: u16,
         actual: u16,
@@ -36,6 +37,9 @@ impl std::fmt::Display for Error {
             }
             Self::Io(message) => write!(f, "I/O error: {message}"),
             Self::NeedPassword => write!(f, "a password is required"),
+            Self::WrongPasswordOrCorruptData => {
+                write!(f, "wrong password or corrupt encrypted data")
+            }
             Self::CrcMismatch { expected, actual } => {
                 write!(
                     f,

@@ -727,7 +727,68 @@ mod tests {
         assert_eq!(output, expected_text());
     }
 
+    #[test]
+    fn decodes_synthetic_audio_block() {
+        let packed = synthetic_audio_block(8);
+        let mut decoder = Unpack20::new();
+
+        assert_eq!(decoder.decode_member(&packed, 8).unwrap(), vec![0; 8]);
+    }
+
     fn expected_text() -> Vec<u8> {
         b"Hello text not audio.\r\n".repeat(100)
+    }
+
+    fn synthetic_audio_block(samples: usize) -> Vec<u8> {
+        let mut bits = TestBitWriter::default();
+
+        bits.write_bits(0b10, 2); // audio block, do not keep previous tables.
+        bits.write_bits(0, 2); // one channel.
+
+        for symbol in 0..19 {
+            let len = if symbol == 1 || symbol == 18 { 1 } else { 0 };
+            bits.write_bits(len, 4);
+        }
+
+        bits.write_bit(false); // level symbol 1: audio delta 0 has code length 1.
+        bits.write_bit(true); // level symbol 18: 138 zeros.
+        bits.write_bits(127, 7);
+        bits.write_bit(true); // level symbol 18: 118 zeros.
+        bits.write_bits(107, 7);
+
+        for _ in 0..samples {
+            bits.write_bit(false); // audio delta 0.
+        }
+
+        bits.finish()
+    }
+
+    #[derive(Default)]
+    struct TestBitWriter {
+        bytes: Vec<u8>,
+        bit_pos: usize,
+    }
+
+    impl TestBitWriter {
+        fn write_bit(&mut self, bit: bool) {
+            if self.bit_pos.is_multiple_of(8) {
+                self.bytes.push(0);
+            }
+            if bit {
+                let shift = 7 - (self.bit_pos % 8);
+                *self.bytes.last_mut().unwrap() |= 1 << shift;
+            }
+            self.bit_pos += 1;
+        }
+
+        fn write_bits(&mut self, value: u32, count: u8) {
+            for shift in (0..count).rev() {
+                self.write_bit(((value >> shift) & 1) != 0);
+            }
+        }
+
+        fn finish(self) -> Vec<u8> {
+            self.bytes
+        }
     }
 }

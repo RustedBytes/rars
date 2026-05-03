@@ -4,7 +4,9 @@ use crate::version::ArchiveFamily;
 use rars_codec::rar13::Unpack15;
 use rars_codec::rar20::Unpack20;
 use rars_codec::rar29::Unpack29;
+use rars_crypto::rar15::Rar15Cipher;
 use rars_crypto::rar20::Rar20Cipher;
+use rars_crypto::rar30::Rar30Cipher;
 use std::fs::File;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
@@ -33,6 +35,7 @@ const FHD_PASSWORD: u16 = 0x0004;
 const FHD_COMMENT: u16 = 0x0008;
 const FHD_SOLID: u16 = 0x0010;
 const FHD_LARGE: u16 = 0x0100;
+const FHD_UNICODE: u16 = 0x0200;
 const FHD_SALT: u16 = 0x0400;
 const FHD_EXTTIME: u16 = 0x1000;
 const FHD_DIRECTORY_MASK: u16 = 0x00e0;
@@ -344,8 +347,16 @@ impl FileHeader {
             Rar20Cipher::new(password).decrypt_in_place(data);
             return Ok(());
         }
+        if self.unp_ver == 15 {
+            Rar15Cipher::new(password).crypt_in_place(data);
+            return Ok(());
+        }
+        if self.unp_ver >= 29 {
+            Rar30Cipher::new(password, self.salt).decrypt_in_place(data);
+            return Ok(());
+        }
         Err(Error::InvalidHeader(
-            "RAR 3.x/4.x encrypted file extraction is not implemented",
+            "RAR 1.5 encrypted file extraction is not implemented",
         ))
     }
 
@@ -423,8 +434,11 @@ impl FileHeader {
             });
         }
 
-        let data = self.unpacked_data_with_password(archive, password)?;
-        self.verify_crc32(&data)?;
+        let data = self
+            .unpacked_data_with_password(archive, password)
+            .map_err(|error| self.map_encrypted_payload_error(password, error))?;
+        self.verify_crc32(&data)
+            .map_err(|error| self.map_encrypted_payload_error(password, error))?;
         Ok(ExtractedEntry {
             name: self.name.clone(),
             data,
@@ -451,16 +465,56 @@ impl FileHeader {
                 "RAR 1.5 stored file has mismatched packed and unpacked sizes",
             ));
         }
-        let data = self.stored_data_with_password(archive, password)?;
+        let data = self
+            .stored_data_with_password(archive, password)
+            .map_err(|error| self.map_encrypted_payload_error(password, error))?;
         let actual = crc32(&data);
         if actual == self.file_crc {
             out.write_all(&data)?;
             Ok(())
         } else {
-            Err(Error::Crc32Mismatch {
-                expected: self.file_crc,
-                actual,
-            })
+            Err(self.map_encrypted_payload_error(
+                password,
+                Error::Crc32Mismatch {
+                    expected: self.file_crc,
+                    actual,
+                },
+            ))
+        }
+    }
+
+    fn map_encrypted_payload_error(&self, password: Option<&[u8]>, error: Error) -> Error {
+        if !self.is_encrypted() || password.is_none() {
+            return error;
+        }
+        match error {
+            Error::NeedPassword => Error::NeedPassword,
+            Error::InvalidHeader(message) if message.contains("not implemented") => {
+                Error::InvalidHeader(message)
+            }
+            Error::UnsupportedSignature
+            | Error::UnsupportedVersion(_)
+            | Error::UnsupportedFeature { .. }
+            | Error::TooShort
+            | Error::Io(_) => error,
+            Error::InvalidHeader(_)
+            | Error::CrcMismatch { .. }
+            | Error::Crc32Mismatch { .. }
+            | Error::WrongPasswordOrCorruptData => Error::WrongPasswordOrCorruptData,
+        }
+    }
+
+    fn crc_result(&self, actual: u32, password: Option<&[u8]>) -> Result<()> {
+        if actual == self.file_crc {
+            Ok(())
+        } else {
+            Err(self.map_encrypted_payload_error(
+                password,
+                Error::Crc32Mismatch {
+                    expected: self.file_crc,
+                    actual,
+                },
+            ))
         }
     }
 
@@ -514,15 +568,11 @@ impl FileHeader {
         archive: &Archive,
         decoder: &mut Unpack15,
         solid: bool,
+        password: Option<&[u8]>,
         out: &mut impl Write,
     ) -> Result<()> {
         if self.is_stored() {
-            return self.write_stored_to(archive, None, out);
-        }
-        if self.is_encrypted() {
-            return Err(Error::InvalidHeader(
-                "RAR 1.5 encrypted file extraction is not implemented",
-            ));
+            return self.write_stored_to(archive, password, out);
         }
         if self.unp_ver != 15 {
             return Err(Error::InvalidHeader(
@@ -530,7 +580,26 @@ impl FileHeader {
             ));
         }
 
-        let mut packed = archive.range_reader(self.packed_range.clone())?;
+        if self.is_encrypted() {
+            let decrypted = self.packed_data_for_decode(archive, password)?;
+            let mut input = Cursor::new(decrypted.as_slice());
+            return self
+                .write_unpack15_decoded(decoder, solid, &mut input, out, password)
+                .map_err(|error| self.map_encrypted_payload_error(password, error));
+        }
+
+        let mut input = archive.range_reader(self.packed_range.clone())?;
+        self.write_unpack15_decoded(decoder, solid, &mut input, out, password)
+    }
+
+    fn write_unpack15_decoded(
+        &self,
+        decoder: &mut Unpack15,
+        solid: bool,
+        input: &mut impl Read,
+        out: &mut impl Write,
+        password: Option<&[u8]>,
+    ) -> Result<()> {
         let mut crc = Crc32::new();
         let mut crc_writer = CrcWriter {
             inner: out,
@@ -538,7 +607,7 @@ impl FileHeader {
         };
         decoder
             .decode_member_from_reader(
-                &mut packed,
+                input,
                 usize::try_from(self.unp_size)
                     .map_err(|_| Error::InvalidHeader("RAR 1.5 unpacked size overflows usize"))?,
                 solid,
@@ -546,14 +615,7 @@ impl FileHeader {
             )
             .map_err(Error::from)?;
         let actual = crc.finish();
-        if actual == self.file_crc {
-            Ok(())
-        } else {
-            Err(Error::Crc32Mismatch {
-                expected: self.file_crc,
-                actual,
-            })
-        }
+        self.crc_result(actual, password)
     }
 
     fn write_unpack20_to(
@@ -582,7 +644,8 @@ impl FileHeader {
         if self.is_encrypted() {
             let data = decoder
                 .decode_member(&self.packed_data_for_decode(archive, password)?, target)
-                .map_err(Error::from)?;
+                .map_err(Error::from)
+                .map_err(|error| self.map_encrypted_payload_error(password, error))?;
             crc_writer.write_all(&data)?;
         } else {
             let mut packed = archive.range_reader(self.packed_range.clone())?;
@@ -591,14 +654,7 @@ impl FileHeader {
                 .map_err(Error::from)?;
         }
         let actual = crc.finish();
-        if actual == self.file_crc {
-            Ok(())
-        } else {
-            Err(Error::Crc32Mismatch {
-                expected: self.file_crc,
-                actual,
-            })
-        }
+        self.crc_result(actual, password)
     }
 }
 
@@ -610,11 +666,22 @@ impl NewSubHeader {
 
 impl Archive {
     pub fn parse(input: &[u8]) -> Result<Self> {
+        Self::parse_with_password(input, None)
+    }
+
+    pub fn parse_with_password(input: &[u8], password: Option<&[u8]>) -> Result<Self> {
         let data: Arc<[u8]> = Arc::from(input.to_vec().into_boxed_slice());
-        Self::parse_shared(data)
+        Self::parse_shared(data, password)
     }
 
     pub fn parse_path(path: impl AsRef<Path>) -> Result<Self> {
+        Self::parse_path_with_password(path, None)
+    }
+
+    pub fn parse_path_with_password(
+        path: impl AsRef<Path>,
+        password: Option<&[u8]>,
+    ) -> Result<Self> {
         let path = Arc::new(path.as_ref().to_path_buf());
         let mut file = File::open(path.as_ref())?;
         let len = file.metadata()?.len();
@@ -625,10 +692,10 @@ impl Archive {
         if sig.family != ArchiveFamily::Rar15To40 {
             return Err(Error::UnsupportedSignature);
         }
-        Self::parse_seekable(file, len, sig.offset, ArchiveSource::File(path))
+        Self::parse_seekable(file, len, sig.offset, ArchiveSource::File(path), password)
     }
 
-    fn parse_shared(input: Arc<[u8]>) -> Result<Self> {
+    fn parse_shared(input: Arc<[u8]>, password: Option<&[u8]>) -> Result<Self> {
         let sig = find_archive_start(&input, 128 * 1024).ok_or(Error::UnsupportedSignature)?;
         if sig.family != ArchiveFamily::Rar15To40 {
             return Err(Error::UnsupportedSignature);
@@ -649,7 +716,6 @@ impl Archive {
             return Err(Error::InvalidHeader("RAR 1.5 main header is missing"));
         }
         let main = parse_main_header(archive, &main_block)?;
-        reject_encrypted_headers(&main)?;
         let mut pos = main_block.offset + main_block.head_size as usize;
         let mut blocks = Vec::new();
 
@@ -657,8 +723,16 @@ impl Archive {
             if archive.len() - pos < 7 {
                 break;
             }
-            let block = parse_block_header(archive, pos)?;
-            let total = block_total_size(&block)?;
+            let (block, header, total) = if main.has_encrypted_headers() {
+                let password = password.ok_or(Error::NeedPassword)?;
+                let encrypted = decrypt_encrypted_header_at(archive, pos, password)?;
+                (encrypted.block, encrypted.header, encrypted.total_size)
+            } else {
+                let block = parse_block_header(archive, pos)?;
+                let total = block_total_size(&block)?;
+                let header = archive[pos..pos + block.head_size as usize].to_vec();
+                (block, header, total)
+            };
             let next = block
                 .offset
                 .checked_add(total)
@@ -668,11 +742,18 @@ impl Archive {
             }
 
             match block.head_type {
-                FILE_HEAD => blocks.push(Block::File(parse_file_like_header(
-                    archive, block, sig.offset,
-                )?)),
+                FILE_HEAD => {
+                    let mut file = parse_file_like_header(&header, relative_block(&block), 0)?;
+                    file.block.offset = block.offset;
+                    file.packed_range = sig.offset + block.offset + total - file.pack_size as usize
+                        ..sig.offset + block.offset + total;
+                    blocks.push(Block::File(file));
+                }
                 NEWSUB_HEAD => {
-                    let file = parse_file_like_header(archive, block, sig.offset)?;
+                    let mut file = parse_file_like_header(&header, relative_block(&block), 0)?;
+                    file.block.offset = block.offset;
+                    file.packed_range = sig.offset + block.offset + total - file.pack_size as usize
+                        ..sig.offset + block.offset + total;
                     let kind = classify_new_sub(&file.name);
                     blocks.push(Block::NewSub(NewSubHeader { file, kind }));
                 }
@@ -698,6 +779,7 @@ impl Archive {
         file_len: u64,
         sfx_offset: usize,
         source: ArchiveSource,
+        password: Option<&[u8]>,
     ) -> Result<Self> {
         let marker = read_block_header_at(&mut file, file_len, sfx_offset, 0)?;
         if marker.head_type != MARK_HEAD || marker.head_size != RAR15_SIGNATURE.len() as u16 {
@@ -715,13 +797,21 @@ impl Archive {
             main_block.head_size as usize,
         )?;
         let main = parse_main_header(&main_header, &relative_block(&main_block))?;
-        reject_encrypted_headers(&main)?;
         let mut pos = main_block.offset + main_block.head_size as usize;
         let mut blocks = Vec::new();
 
         while (sfx_offset + pos) as u64 + 7 <= file_len {
-            let block = read_block_header_at(&mut file, file_len, sfx_offset, pos)?;
-            let total = block_total_size(&block)?;
+            let (block, header, total) = if main.has_encrypted_headers() {
+                let password = password.ok_or(Error::NeedPassword)?;
+                let encrypted =
+                    read_encrypted_header_at(&mut file, file_len, sfx_offset, pos, password)?;
+                (encrypted.block, encrypted.header, encrypted.total_size)
+            } else {
+                let block = read_block_header_at(&mut file, file_len, sfx_offset, pos)?;
+                let total = block_total_size(&block)?;
+                let header = read_exact_at(&mut file, sfx_offset + pos, block.head_size as usize)?;
+                (block, header, total)
+            };
             let next = block
                 .offset
                 .checked_add(total)
@@ -731,12 +821,22 @@ impl Archive {
             }
 
             match block.head_type {
-                FILE_HEAD => blocks.push(Block::File(read_file_like_header(
-                    &mut file, file_len, sfx_offset, block,
-                )?)),
+                FILE_HEAD => {
+                    let mut file_header =
+                        parse_file_like_header(&header, relative_block(&block), 0)?;
+                    file_header.block.offset = block.offset;
+                    file_header.packed_range = sfx_offset + block.offset + total
+                        - file_header.pack_size as usize
+                        ..sfx_offset + block.offset + total;
+                    blocks.push(Block::File(file_header));
+                }
                 NEWSUB_HEAD => {
-                    let file_header =
-                        read_file_like_header(&mut file, file_len, sfx_offset, block)?;
+                    let mut file_header =
+                        parse_file_like_header(&header, relative_block(&block), 0)?;
+                    file_header.block.offset = block.offset;
+                    file_header.packed_range = sfx_offset + block.offset + total
+                        - file_header.pack_size as usize
+                        ..sfx_offset + block.offset + total;
                     let kind = classify_new_sub(&file_header.name);
                     blocks.push(Block::NewSub(NewSubHeader {
                         file: file_header,
@@ -818,12 +918,6 @@ impl Archive {
     }
 
     pub fn extract_stored(&self) -> Result<Vec<ExtractedEntry>> {
-        if self.main.has_encrypted_headers() {
-            return Err(Error::InvalidHeader(
-                "RAR 1.5 encrypted header extraction is not implemented",
-            ));
-        }
-
         let mut out = Vec::new();
         for file in self.files() {
             if file.is_split_before() || file.is_split_after() {
@@ -844,12 +938,6 @@ impl Archive {
     }
 
     pub fn extract_with_password(&self, password: Option<&[u8]>) -> Result<Vec<ExtractedEntry>> {
-        if self.main.has_encrypted_headers() {
-            return Err(Error::InvalidHeader(
-                "RAR 1.5 encrypted header extraction is not implemented",
-            ));
-        }
-
         let mut out = Vec::new();
         let mut session = DecoderSession::new_with_password(self.main.is_solid(), password);
         for file in self.files() {
@@ -875,12 +963,6 @@ impl Archive {
     where
         F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
     {
-        if self.main.has_encrypted_headers() {
-            return Err(Error::InvalidHeader(
-                "RAR 1.5 encrypted header extraction is not implemented",
-            ));
-        }
-
         let mut session = DecoderSession::new_with_password(self.main.is_solid(), password);
         for file in self.files() {
             if file.is_split_before() || file.is_split_after() {
@@ -924,11 +1006,6 @@ enum CodecState {
 
 impl CodecState {
     fn new_for(file: &FileHeader) -> Result<Self> {
-        if file.is_encrypted() && file.unp_ver != 20 && file.unp_ver != 26 {
-            return Err(Error::InvalidHeader(
-                "RAR 3.x/4.x encrypted file extraction is not implemented",
-            ));
-        }
         if file.unp_ver >= 29 {
             return Ok(Self::Unpack29(Box::default()));
         }
@@ -945,9 +1022,9 @@ impl CodecState {
 
     fn supports(&self, file: &FileHeader) -> bool {
         match self {
-            Self::Unpack15(_) => !file.is_encrypted() && file.unp_ver == 15,
+            Self::Unpack15(_) => file.unp_ver == 15,
             Self::Unpack20(_) => file.unp_ver == 20 || file.unp_ver == 26,
-            Self::Unpack29(_) => !file.is_encrypted() && file.unp_ver >= 29,
+            Self::Unpack29(_) => file.unp_ver >= 29,
         }
     }
 
@@ -959,9 +1036,36 @@ impl CodecState {
         password: Option<&[u8]>,
     ) -> Result<Vec<u8>> {
         match self {
-            Self::Unpack15(decoder) => file.unpacked_data_with_unpack15(archive, decoder, solid),
+            Self::Unpack15(decoder) => {
+                if file.is_encrypted() {
+                    decoder
+                        .decode_member(
+                            &file.packed_data_for_decode(archive, password)?,
+                            usize::try_from(file.unp_size).map_err(|_| {
+                                Error::InvalidHeader("RAR 1.5 unpacked size overflows usize")
+                            })?,
+                            solid,
+                        )
+                        .map_err(Into::into)
+                } else {
+                    file.unpacked_data_with_unpack15(archive, decoder, solid)
+                }
+            }
             Self::Unpack20(decoder) => file.unpacked_data_with_unpack20(archive, decoder, password),
-            Self::Unpack29(decoder) => file.unpacked_data_with_rar29(archive, decoder),
+            Self::Unpack29(decoder) => {
+                if file.is_encrypted() {
+                    decoder
+                        .decode_member(
+                            &file.packed_data_for_decode(archive, password)?,
+                            usize::try_from(file.unp_size).map_err(|_| {
+                                Error::InvalidHeader("RAR 2.9 unpacked size overflows usize")
+                            })?,
+                        )
+                        .map_err(Into::into)
+                } else {
+                    file.unpacked_data_with_rar29(archive, decoder)
+                }
+            }
         }
     }
 
@@ -974,9 +1078,33 @@ impl CodecState {
         out: &mut impl Write,
     ) -> Result<()> {
         match self {
-            Self::Unpack15(decoder) => file.write_unpack15_to(archive, decoder, solid, out),
+            Self::Unpack15(decoder) => {
+                file.write_unpack15_to(archive, decoder, solid, password, out)
+            }
             Self::Unpack20(decoder) => file.write_unpack20_to(archive, decoder, password, out),
-            Self::Unpack29(decoder) => file.write_rar29_to(archive, decoder, out),
+            Self::Unpack29(decoder) => {
+                if file.is_encrypted() {
+                    let mut crc = Crc32::new();
+                    let mut crc_writer = CrcWriter {
+                        inner: out,
+                        crc: &mut crc,
+                    };
+                    let data = decoder
+                        .decode_member(
+                            &file.packed_data_for_decode(archive, password)?,
+                            usize::try_from(file.unp_size).map_err(|_| {
+                                Error::InvalidHeader("RAR 1.5 unpacked size overflows usize")
+                            })?,
+                        )
+                        .map_err(Error::from)
+                        .map_err(|error| file.map_encrypted_payload_error(password, error))?;
+                    crc_writer.write_all(&data)?;
+                    let actual = crc.finish();
+                    file.crc_result(actual, password)
+                } else {
+                    file.write_rar29_to(archive, decoder, out)
+                }
+            }
         }
     }
 
@@ -1042,8 +1170,11 @@ impl<'a> DecoderSession<'a> {
         if file.is_directory() || file.is_stored() {
             return file.extract_with_password(archive, self.password);
         }
-        let data = self.decode_file_data(archive, file)?;
-        file.verify_crc32(&data)?;
+        let data = self
+            .decode_file_data(archive, file)
+            .map_err(|error| file.map_encrypted_payload_error(self.password, error))?;
+        file.verify_crc32(&data)
+            .map_err(|error| file.map_encrypted_payload_error(self.password, error))?;
         self.decoded_files += 1;
         Ok(ExtractedEntry {
             name: file.name.clone(),
@@ -1160,12 +1291,6 @@ where
             .is_some_and(|archive| archive.main.is_solid()),
     );
     for (volume_index, archive) in volumes.iter().enumerate() {
-        if archive.main.has_encrypted_headers() {
-            return Err(Error::InvalidHeader(
-                "RAR 1.5 encrypted header extraction is not implemented",
-            ));
-        }
-
         for (file_index, file) in archive.files().enumerate() {
             match (
                 pending.is_some(),
@@ -1426,13 +1551,122 @@ fn parse_main_header(input: &[u8], block: &BlockHeader) -> Result<MainHeader> {
     })
 }
 
-fn reject_encrypted_headers(main: &MainHeader) -> Result<()> {
-    if main.has_encrypted_headers() {
-        return Err(Error::InvalidHeader(
-            "RAR 1.5 encrypted headers are not implemented",
-        ));
+struct EncryptedHeader {
+    block: BlockHeader,
+    header: Vec<u8>,
+    total_size: usize,
+}
+
+fn decrypt_encrypted_header_at(
+    archive: &[u8],
+    offset: usize,
+    password: &[u8],
+) -> Result<EncryptedHeader> {
+    let salt = read_header_salt(archive, offset)?;
+    let first_ciphertext = archive
+        .get(offset + 8..offset + 24)
+        .ok_or(Error::TooShort)?;
+    let mut cipher = Rar30Cipher::new(password, Some(salt));
+    let mut first_block: [u8; 16] = first_ciphertext
+        .try_into()
+        .expect("RAR encrypted header first block size");
+    cipher.decrypt_block(&mut first_block);
+    let head_size = read_u16(&first_block, 5)? as usize;
+    if head_size < 7 {
+        return Err(Error::InvalidHeader("RAR 1.5 block header is too short"));
     }
-    Ok(())
+    let encrypted_header_size = align16(head_size)?;
+    let encrypted_start = offset
+        .checked_add(8)
+        .ok_or(Error::InvalidHeader("RAR 1.5 block offset overflows usize"))?;
+    let encrypted_end = encrypted_start
+        .checked_add(encrypted_header_size)
+        .ok_or(Error::InvalidHeader("RAR 1.5 block size overflows usize"))?;
+    let encrypted = archive
+        .get(encrypted_start..encrypted_end)
+        .ok_or(Error::TooShort)?;
+    let mut header = encrypted.to_vec();
+    let mut cipher = Rar30Cipher::new(password, Some(salt));
+    cipher.decrypt_in_place(&mut header);
+    header.truncate(head_size);
+
+    let mut block = parse_block_header(&header, 0)?;
+    block.offset = offset;
+    let payload_size = usize::try_from(block.add_size.unwrap_or(0))
+        .map_err(|_| Error::InvalidHeader("RAR 1.5 block size overflows usize"))?;
+    let total_size = 8usize
+        .checked_add(encrypted_header_size)
+        .and_then(|size| size.checked_add(payload_size))
+        .ok_or(Error::InvalidHeader("RAR 1.5 block size overflows usize"))?;
+    Ok(EncryptedHeader {
+        block,
+        header,
+        total_size,
+    })
+}
+
+fn read_encrypted_header_at(
+    file: &mut File,
+    file_len: u64,
+    archive_offset: usize,
+    offset: usize,
+    password: &[u8],
+) -> Result<EncryptedHeader> {
+    let absolute = archive_offset
+        .checked_add(offset)
+        .ok_or(Error::InvalidHeader("RAR 1.5 block offset overflows usize"))?;
+    if absolute as u64 + 24 > file_len {
+        return Err(Error::TooShort);
+    }
+    let first = read_exact_at(file, absolute, 24)?;
+    let salt = read_header_salt(&first, 0)?;
+    let mut cipher = Rar30Cipher::new(password, Some(salt));
+    let mut first_block: [u8; 16] = first[8..24]
+        .try_into()
+        .expect("RAR encrypted header first block size");
+    cipher.decrypt_block(&mut first_block);
+    let head_size = read_u16(&first_block, 5)? as usize;
+    if head_size < 7 {
+        return Err(Error::InvalidHeader("RAR 1.5 block header is too short"));
+    }
+    let encrypted_header_size = align16(head_size)?;
+    let encrypted_start = absolute
+        .checked_add(8)
+        .ok_or(Error::InvalidHeader("RAR 1.5 block offset overflows usize"))?;
+    if encrypted_start as u64 + encrypted_header_size as u64 > file_len {
+        return Err(Error::TooShort);
+    }
+    let mut header = read_exact_at(file, encrypted_start, encrypted_header_size)?;
+    let mut cipher = Rar30Cipher::new(password, Some(salt));
+    cipher.decrypt_in_place(&mut header);
+    header.truncate(head_size);
+
+    let mut block = parse_block_header(&header, 0)?;
+    block.offset = offset;
+    let payload_size = usize::try_from(block.add_size.unwrap_or(0))
+        .map_err(|_| Error::InvalidHeader("RAR 1.5 block size overflows usize"))?;
+    let total_size = 8usize
+        .checked_add(encrypted_header_size)
+        .and_then(|size| size.checked_add(payload_size))
+        .ok_or(Error::InvalidHeader("RAR 1.5 block size overflows usize"))?;
+    Ok(EncryptedHeader {
+        block,
+        header,
+        total_size,
+    })
+}
+
+fn read_header_salt(input: &[u8], offset: usize) -> Result<[u8; 8]> {
+    input
+        .get(offset..offset + 8)
+        .ok_or(Error::TooShort)
+        .map(|salt| salt.try_into().expect("RAR 3 salt size"))
+}
+
+fn align16(size: usize) -> Result<usize> {
+    size.checked_add(15)
+        .map(|size| size & !15)
+        .ok_or(Error::InvalidHeader("RAR 1.5 block size overflows usize"))
 }
 
 fn parse_file_like_header(
@@ -1483,7 +1717,7 @@ fn parse_file_like_header(
             "RAR 1.5 file name extends beyond header",
         ));
     }
-    let name = input[pos..name_end].to_vec();
+    let name = decode_file_name(&input[pos..name_end], block.flags);
     pos = name_end;
 
     let salt = if block.flags & FHD_SALT != 0 {
@@ -1528,31 +1762,94 @@ fn parse_file_like_header(
     })
 }
 
-fn read_file_like_header(
-    file: &mut File,
-    file_len: u64,
-    archive_offset: usize,
-    block: BlockHeader,
-) -> Result<FileHeader> {
-    let header = read_exact_at(
-        file,
-        archive_offset + block.offset,
-        block.head_size as usize,
-    )?;
-    let relative = relative_block(&block);
-    let data_start = archive_offset + block.offset + block.head_size as usize;
-    let data_end = data_start
-        .checked_add(
-            usize::try_from(block.add_size.unwrap_or(0))
-                .map_err(|_| Error::InvalidHeader("RAR 1.5 packed file size overflows usize"))?,
-        )
-        .ok_or(Error::InvalidHeader(
-            "RAR 1.5 packed file size overflows usize",
-        ))?;
-    if data_end as u64 > file_len {
-        return Err(Error::TooShort);
+fn decode_file_name(raw: &[u8], flags: u16) -> Vec<u8> {
+    if flags & FHD_UNICODE == 0 {
+        return raw.to_vec();
     }
-    parse_file_like_header(&header, relative, archive_offset + block.offset)
+
+    let Some(zero_pos) = raw.iter().position(|byte| *byte == 0) else {
+        return raw.to_vec();
+    };
+    if zero_pos + 1 >= raw.len() {
+        return raw[..zero_pos].to_vec();
+    }
+
+    let fallback = &raw[..zero_pos];
+    let high_byte = raw[zero_pos + 1];
+    let encoded = &raw[zero_pos + 2..];
+    let mut pos = 0usize;
+    let mut flag_byte = 0u8;
+    let mut flag_bits = 0u8;
+    let mut dst_pos = 0usize;
+    let mut units = Vec::new();
+
+    while pos < encoded.len() {
+        if flag_bits == 0 {
+            flag_byte = encoded[pos];
+            pos += 1;
+            flag_bits = 8;
+        }
+        let mode = flag_byte >> 6;
+        flag_byte <<= 2;
+        flag_bits -= 2;
+
+        match mode {
+            0 => {
+                let Some(&low) = encoded.get(pos) else {
+                    return raw.to_vec();
+                };
+                pos += 1;
+                units.push(u16::from(low));
+                dst_pos += 1;
+            }
+            1 => {
+                let Some(&low) = encoded.get(pos) else {
+                    return raw.to_vec();
+                };
+                pos += 1;
+                units.push((u16::from(high_byte) << 8) | u16::from(low));
+                dst_pos += 1;
+            }
+            2 => {
+                let Some((&low, &high)) = encoded.get(pos).zip(encoded.get(pos + 1)) else {
+                    return raw.to_vec();
+                };
+                pos += 2;
+                units.push((u16::from(high) << 8) | u16::from(low));
+                dst_pos += 1;
+            }
+            3 => {
+                let Some(&length_byte) = encoded.get(pos) else {
+                    return raw.to_vec();
+                };
+                pos += 1;
+                let (count, correction, high) = if length_byte & 0x80 != 0 {
+                    let Some(&correction) = encoded.get(pos) else {
+                        return raw.to_vec();
+                    };
+                    pos += 1;
+                    ((length_byte & 0x7f) as usize + 2, correction, high_byte)
+                } else {
+                    (length_byte as usize + 2, 0, 0)
+                };
+                for _ in 0..count {
+                    let low = fallback
+                        .get(dst_pos)
+                        .copied()
+                        .unwrap_or(b'?')
+                        .wrapping_add(correction);
+                    units.push((u16::from(high) << 8) | u16::from(low));
+                    dst_pos += 1;
+                }
+            }
+            _ => unreachable!("2-bit filename mode"),
+        }
+    }
+
+    char::decode_utf16(units)
+        .map(|unit| unit.unwrap_or(char::REPLACEMENT_CHARACTER))
+        .collect::<String>()
+        .into_bytes()
 }
 
 fn read_block_header_at(
