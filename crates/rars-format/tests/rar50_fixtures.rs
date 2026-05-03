@@ -175,6 +175,21 @@ fn extracts_rar50_solid_archive() {
 }
 
 #[test]
+fn rar50_solid_extraction_uses_file_compression_info_flag() {
+    let mut archive = Archive::parse_path(fixture("solid.rar")).unwrap();
+    archive.main.archive_flags = 0;
+
+    assert!(!archive.main.is_solid());
+    assert!(archive
+        .files()
+        .any(|file| file.decoded_compression_info().unwrap().solid));
+
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted.len(), 2);
+    assert!(extracted.iter().all(|entry| !entry.data.is_empty()));
+}
+
+#[test]
 fn extracts_rar50_compressed_multivolume_archive() {
     let volumes = [
         Archive::parse_path(fixture("multivol.part1.rar")).unwrap(),

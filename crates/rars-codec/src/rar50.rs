@@ -721,7 +721,7 @@ impl<'a> BitReader<'a> {
     }
 
     fn read_bits(&mut self, count: u8) -> Result<u32> {
-        if count > 24 {
+        if count > 32 {
             return Err(Error::InvalidData("RAR 5 bit read is too wide"));
         }
         let mut value = 0;
@@ -999,6 +999,18 @@ mod tests {
         assert_eq!(slot_to_distance(4, 1).unwrap(), 6);
         assert_eq!(distance_slot_bit_count(10).unwrap(), 4);
         assert_eq!(slot_to_distance(10, 15).unwrap(), 48);
+    }
+
+    #[test]
+    fn bit_reader_accepts_large_rar5_distance_extras() {
+        let mut bits = BitReader::new(&[0xff, 0x00, 0xaa, 0x55]);
+
+        assert_eq!(bits.read_bits(32).unwrap(), 0xff00_aa55);
+        assert_eq!(
+            bits.read_bits(1),
+            Err(Error::NeedMoreInput),
+            "32-bit reads must not leave a partial cursor state"
+        );
     }
 
     #[test]

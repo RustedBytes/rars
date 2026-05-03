@@ -122,6 +122,8 @@ pub struct BlockHeader {
     pub extra_area_size: Option<u64>,
     pub data_size: Option<u64>,
     pub offset: usize,
+    // Type-specific header bytes are archive-relative. Payload bytes are
+    // source-absolute so SFX-prefixed archives can be read directly.
     pub header_range: Range<usize>,
     pub data_range: Range<usize>,
 }
@@ -262,14 +264,13 @@ impl FileHeader {
 
     pub fn extract(&self, archive: &Archive) -> Result<ExtractedEntry> {
         let mut decoder = Unpack50Decoder::new();
-        self.extract_with_decoder(archive, &mut decoder, false)
+        self.extract_with_decoder(archive, &mut decoder)
     }
 
     fn extract_with_decoder(
         &self,
         archive: &Archive,
         decoder: &mut Unpack50Decoder,
-        solid: bool,
     ) -> Result<ExtractedEntry> {
         if self.is_directory() {
             return Ok(ExtractedEntry {
@@ -281,7 +282,7 @@ impl FileHeader {
                 is_directory: true,
             });
         }
-        let data = self.decoded_data_with_decoder(archive, decoder, solid)?;
+        let data = self.decoded_data_with_decoder(archive, decoder)?;
         self.verify_integrity(&data)?;
         Ok(ExtractedEntry {
             name: self.name.clone(),
@@ -297,20 +298,18 @@ impl FileHeader {
         &self,
         archive: &Archive,
         decoder: &mut Unpack50Decoder,
-        solid: bool,
     ) -> Result<Vec<u8>> {
         if self.encrypted {
             return Err(Error::NeedPassword);
         }
         let packed = self.packed_data(archive)?;
-        self.decode_packed_with_decoder(&packed, decoder, solid)
+        self.decode_packed_with_decoder(&packed, decoder)
     }
 
     fn decode_packed_with_decoder(
         &self,
         packed: &[u8],
         decoder: &mut Unpack50Decoder,
-        solid: bool,
     ) -> Result<Vec<u8>> {
         if self.is_stored() {
             if packed.len() as u64 != self.unpacked_size {
@@ -327,7 +326,7 @@ impl FileHeader {
                 packed,
                 info.algorithm_version,
                 self.unpacked_size as usize,
-                solid,
+                info.solid,
                 DecodeMode::Lz,
             )
             .map_err(Error::from)
@@ -523,14 +522,13 @@ impl Archive {
     pub fn extract(&self) -> Result<Vec<ExtractedEntry>> {
         let mut out = Vec::new();
         let mut decoder = Unpack50Decoder::new();
-        let solid = self.main.is_solid();
         for file in self.files() {
             if file.is_split_before() || file.is_split_after() {
                 return Err(Error::InvalidHeader(
                     "RAR 5 split entry requires multivolume extraction",
                 ));
             }
-            out.push(file.extract_with_decoder(self, &mut decoder, solid)?);
+            out.push(file.extract_with_decoder(self, &mut decoder)?);
         }
         Ok(out)
     }
@@ -540,7 +538,6 @@ impl Archive {
         F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
     {
         let mut decoder = Unpack50Decoder::new();
-        let solid = self.main.is_solid();
         for file in self.files() {
             if file.is_split_before() || file.is_split_after() {
                 return Err(Error::InvalidHeader(
@@ -550,7 +547,7 @@ impl Archive {
             let meta = file.metadata();
             let mut writer = open(&meta)?;
             if !meta.is_directory {
-                let data = file.decoded_data_with_decoder(self, &mut decoder, solid)?;
+                let data = file.decoded_data_with_decoder(self, &mut decoder)?;
                 file.verify_integrity(&data)?;
                 writer.write_all(&data)?;
             }
@@ -612,9 +609,6 @@ where
 
     let mut pending: Option<PendingSplitRefs> = None;
     let mut decoder = Unpack50Decoder::new();
-    let solid = volumes
-        .first()
-        .is_some_and(|archive| archive.main.is_solid());
 
     for (volume_index, archive) in volumes.iter().enumerate() {
         for (file_index, file) in archive.files().enumerate() {
@@ -627,7 +621,7 @@ where
                     let meta = file.metadata();
                     let mut writer = open(&meta)?;
                     if !meta.is_directory {
-                        let data = file.decoded_data_with_decoder(archive, &mut decoder, solid)?;
+                        let data = file.decoded_data_with_decoder(archive, &mut decoder)?;
                         file.verify_integrity(&data)?;
                         writer.write_all(&data)?;
                     }
@@ -645,7 +639,7 @@ where
                     let mut completed = pending.take().expect("pending split");
                     validate_split_continuation_refs(&completed, file)?;
                     completed.append(volume_index, file_index);
-                    completed.write_to(volumes, file, &mut decoder, solid, &mut open)?;
+                    completed.write_to(volumes, file, &mut decoder, &mut open)?;
                 }
                 (false, true, _) => {
                     return Err(Error::InvalidHeader(
@@ -730,7 +724,6 @@ impl PendingSplitRefs {
         volumes: &[Archive],
         final_file: &FileHeader,
         decoder: &mut Unpack50Decoder,
-        solid: bool,
         open: &mut F,
     ) -> Result<()>
     where
@@ -745,7 +738,7 @@ impl PendingSplitRefs {
         };
         let mut writer = open(&meta)?;
         let packed = self.packed_data(volumes)?;
-        let data = final_file.decode_packed_with_decoder(&packed, decoder, solid)?;
+        let data = final_file.decode_packed_with_decoder(&packed, decoder)?;
         final_file.verify_integrity(&data)?;
         writer.write_all(&data)?;
         Ok(())
@@ -1261,10 +1254,11 @@ fn read_vint_at(input: &[u8], offset: usize, end: usize) -> Result<(u64, usize)>
     let mut value = 0u64;
     let mut shift = 0u32;
     for i in 0..10 {
-        let byte = *input.get(offset + i).ok_or(Error::TooShort)?;
-        if offset + i >= end {
+        let pos = offset.checked_add(i).ok_or(Error::TooShort)?;
+        if pos >= end {
             return Err(Error::TooShort);
         }
+        let byte = *input.get(pos).ok_or(Error::TooShort)?;
         value = value
             .checked_add(((byte & 0x7f) as u64) << shift)
             .ok_or(Error::InvalidHeader("RAR 5 vint overflows u64"))?;
@@ -1338,4 +1332,16 @@ fn decode_compression_info(raw: u64) -> Result<CompressionInfo> {
         rar5_compat,
         dictionary_size,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_vint_at_honors_logical_end_before_decoding() {
+        assert_eq!(read_vint_at(&[0x01], 0, 0), Err(Error::TooShort));
+        assert_eq!(read_vint_at(&[0x81, 0x01], 0, 1), Err(Error::TooShort));
+        assert_eq!(read_vint_at(&[0x81, 0x01], 0, 2).unwrap(), (129, 2));
+    }
 }

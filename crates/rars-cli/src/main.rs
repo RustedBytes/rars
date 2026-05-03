@@ -17,6 +17,7 @@ type CliResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 const ADD_USAGE: &str =
     "usage: rars a [--password <password>] --format <rar14|rar15> [--store] [--solid] [--comment <text>] [--file-comment <text>] [--volume-size <bytes>] <archive> <files...>";
+const DOS_DIRECTORY_ATTR: u8 = 0x10;
 
 fn main() {
     if let Err(err) = run() {
@@ -335,9 +336,6 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
     }
     if target == ArchiveVersion::Rar15 {
         validate_rar15_add_options(
-            store,
-            solid,
-            password.as_deref(),
             archive_comment.as_deref(),
             file_comment.as_deref(),
             volume_size,
@@ -365,7 +363,7 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
         };
         if let Some(volume_size) = volume_size {
             let entry = owned.first().expect("one input checked above");
-            if entry.file_attr == 0x10 {
+            if entry.file_attr == DOS_DIRECTORY_ATTR {
                 return Err("RAR 1.5 writer currently rejects directories".into());
             }
             let parts = if store {
@@ -404,7 +402,7 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
         let bytes = if store {
             let mut entries = Vec::with_capacity(owned.len());
             for entry in &owned {
-                if entry.file_attr == 0x10 {
+                if entry.file_attr == DOS_DIRECTORY_ATTR {
                     return Err("RAR 1.5 writer currently rejects directories".into());
                 }
                 entries.push(Rar15StoredEntry {
@@ -425,7 +423,7 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
         } else {
             let mut entries = Vec::with_capacity(owned.len());
             for entry in &owned {
-                if entry.file_attr == 0x10 {
+                if entry.file_attr == DOS_DIRECTORY_ATTR {
                     return Err("RAR 1.5 writer currently rejects directories".into());
                 }
                 entries.push(Rar15FileEntry {
@@ -528,17 +526,14 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
 }
 
 fn validate_rar15_add_options(
-    _store: bool,
-    _solid: bool,
-    _password: Option<&[u8]>,
     archive_comment: Option<&[u8]>,
     file_comment: Option<&[u8]>,
-    _volume_size: Option<usize>,
+    volume_size: Option<usize>,
 ) -> CliResult<()> {
-    if archive_comment.is_some() && _volume_size.is_some() {
+    if archive_comment.is_some() && volume_size.is_some() {
         return Err("RAR 1.5 writer does not support comments on volumes yet".into());
     }
-    if file_comment.is_some() && _volume_size.is_some() {
+    if file_comment.is_some() && volume_size.is_some() {
         return Err("RAR 1.5 writer does not support file comments on volumes yet".into());
     }
     Ok(())
