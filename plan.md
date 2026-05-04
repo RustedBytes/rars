@@ -40,8 +40,9 @@ Keep `rars-format` as the crate boundary for now, but split large family
 modules internally before adding more RAR5 encryption or RAR7 work. The target
 shape is wire parsing and typed block models in the family root module, with
 extraction/session/multivolume orchestration in sibling modules such as
-`rar15_40/extract.rs` and `rar50/extract.rs`; writers should get the same
-treatment when they become the review bottleneck.
+`rar15_40/extract.rs` and `rar50/extract.rs`, and writer serialization in
+sibling modules such as `rar15_40/write.rs` when it is large enough to affect
+reviewability.
 
 ## Current Baseline
 
