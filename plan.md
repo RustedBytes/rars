@@ -96,10 +96,11 @@ Keep this section short. Detailed behavioural claims belong in tests.
   verification, per-file AES-256-CBC encrypted stream extraction with
   password-check records and CRC32/BLAKE2sp HashMAC verification,
   archive-wide `HEAD_CRYPT` encrypted-header parsing, and encrypted compressed
-  multivolume extraction. RAR 7.x shared-format archives are handled through
-  the RAR 5 reader, and the WinRAR 7 `-ams` archive metadata main-extra record
-  is parsed. True Unpack70 remains fixture-blocked because it requires a
-  >4 GiB dictionary input.
+  multivolume extraction. Encrypted service payloads are covered by a
+  header-encrypted archive-comment fixture. RAR 7.x shared-format archives are
+  handled through the RAR 5 reader, and the WinRAR 7 `-ams` archive metadata
+  main-extra record is parsed. True Unpack70 remains fixture-blocked because
+  it requires a >4 GiB dictionary input.
 
 ## Priority Backlog
 
@@ -173,8 +174,6 @@ Keep this section short. Detailed behavioural claims belong in tests.
     practical >4 GiB fixture is worth committing. Small WinRAR 7 archives still
     use Unpack50-compatible streams; the current promoted RAR 7 fixture covers
     the `-ams` archive metadata main-extra record instead.
-- Add RAR 5 encryption:
-  - Encrypted service-data extraction when a fixture requires it.
 - Extend RAR 5 multivolume extraction:
   - Compressed split extraction is implemented for the promoted
     `multivol.part*.rar` fixture and preserves the Unpack50 decoder across the

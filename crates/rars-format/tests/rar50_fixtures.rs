@@ -159,6 +159,35 @@ fn parses_and_extracts_rar50_header_encrypted_archive_with_password() {
 }
 
 #[test]
+fn extracts_rar50_header_encrypted_comment_service_with_password() {
+    let bytes = std::fs::read(fixture("header_encrypted_comment.rar")).unwrap();
+
+    assert!(matches!(Archive::parse(&bytes), Err(Error::NeedPassword)));
+    assert!(matches!(
+        Archive::parse_with_password(&bytes, Some(b"wrong")),
+        Err(Error::WrongPasswordOrCorruptData)
+    ));
+
+    let archive = Archive::parse_with_password(&bytes, Some(b"password")).unwrap();
+    let services: Vec<_> = archive.services().collect();
+    assert_eq!(services.len(), 1);
+    assert_eq!(services[0].name, b"CMT");
+    assert!(services[0].encrypted);
+
+    let comment = services[0].extract(&archive).unwrap();
+    assert_eq!(comment.name, b"CMT");
+    assert_eq!(comment.data.len(), 48);
+    assert!(comment
+        .data
+        .starts_with(b"Encrypted archive comment fixture.\n"));
+
+    let files = archive.extract().unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].name, b"hello.txt");
+    assert_eq!(files[0].data, b"Hello, RAR 5 encrypted service fixture.\n");
+}
+
+#[test]
 fn extract_to_reports_rar50_entry_context_on_write_failure() {
     struct FailingWriter;
 
