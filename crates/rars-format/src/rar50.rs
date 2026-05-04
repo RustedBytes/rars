@@ -2,6 +2,7 @@ use crate::detect::{find_archive_start, RAR50_SIGNATURE};
 use crate::error::{Error, Result};
 use crate::rar15_40::crc32;
 use crate::version::ArchiveFamily;
+use rars_crypto::rar50::{Rar50Cipher, Rar50Keys};
 use std::fs::File;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::ops::Range;
@@ -11,7 +12,10 @@ use std::sync::Arc;
 mod blake2sp;
 mod extract;
 
-pub use extract::{extract_volumes, extract_volumes_to};
+pub use extract::{
+    extract_volumes, extract_volumes_to, extract_volumes_to_with_password,
+    extract_volumes_with_password,
+};
 
 const HEAD_MAIN: u64 = 1;
 const HEAD_FILE: u64 = 2;
@@ -270,11 +274,22 @@ impl FileHeader {
 
 impl Archive {
     pub fn parse(input: &[u8]) -> Result<Self> {
+        Self::parse_with_password(input, None)
+    }
+
+    pub fn parse_with_password(input: &[u8], password: Option<&[u8]>) -> Result<Self> {
         let data: Arc<[u8]> = Arc::from(input.to_vec().into_boxed_slice());
-        Self::parse_shared(data)
+        Self::parse_shared(data, password)
     }
 
     pub fn parse_path(path: impl AsRef<Path>) -> Result<Self> {
+        Self::parse_path_with_password(path, None)
+    }
+
+    pub fn parse_path_with_password(
+        path: impl AsRef<Path>,
+        password: Option<&[u8]>,
+    ) -> Result<Self> {
         let path = Arc::new(path.as_ref().to_path_buf());
         let mut file = File::open(path.as_ref())?;
         let len = file.metadata()?.len();
@@ -294,30 +309,45 @@ impl Archive {
             archive_len,
             sig.offset,
             ArchiveSource::File(path),
+            password,
         )
     }
 
-    fn parse_shared(input: Arc<[u8]>) -> Result<Self> {
+    fn parse_shared(input: Arc<[u8]>, password: Option<&[u8]>) -> Result<Self> {
         let sig = find_archive_start(&input, 128 * 1024).ok_or(Error::UnsupportedSignature)?;
         if sig.family != ArchiveFamily::Rar50Plus {
             return Err(Error::UnsupportedSignature);
         }
         let archive = input.get(sig.offset..).ok_or(Error::TooShort)?;
-        let mut parsed =
-            Self::parse_seekable(archive.to_vec(), sig.offset, ArchiveSource::Memory(input))?;
+        let mut parsed = Self::parse_seekable(
+            archive.to_vec(),
+            sig.offset,
+            ArchiveSource::Memory(input),
+            password,
+        )?;
         parsed.sfx_offset = sig.offset;
         Ok(parsed)
     }
 
-    fn parse_seekable(input: Vec<u8>, sfx_offset: usize, source: ArchiveSource) -> Result<Self> {
+    fn parse_seekable(
+        input: Vec<u8>,
+        sfx_offset: usize,
+        source: ArchiveSource,
+        password: Option<&[u8]>,
+    ) -> Result<Self> {
         if !input.starts_with(RAR50_SIGNATURE) {
             return Err(Error::UnsupportedSignature);
         }
 
         let archive_len = input.len();
-        let (main, blocks) = parse_archive_blocks(archive_len, |offset| {
-            parse_block_header_bytes(&input, offset, archive_len, sfx_offset)
-        })?;
+        let (main, blocks) = parse_archive_blocks(
+            archive_len,
+            password,
+            |offset| parse_block_header_bytes(&input, offset, archive_len, sfx_offset),
+            |offset, keys| {
+                parse_encrypted_block_header_bytes(&input, offset, archive_len, sfx_offset, keys)
+            },
+        )?;
 
         Ok(Self {
             sfx_offset,
@@ -332,15 +362,30 @@ impl Archive {
         archive_len: usize,
         sfx_offset: usize,
         source: ArchiveSource,
+        password: Option<&[u8]>,
     ) -> Result<Self> {
         let signature = read_exact_at(file, sfx_offset, RAR50_SIGNATURE.len())?;
         if signature != RAR50_SIGNATURE {
             return Err(Error::UnsupportedSignature);
         }
 
-        let (main, blocks) = parse_archive_blocks(archive_len, |offset| {
-            read_block_header_at(file, offset, archive_len, sfx_offset)
-        })?;
+        let file_cell = std::cell::RefCell::new(file);
+        let (main, blocks) = parse_archive_blocks(
+            archive_len,
+            password,
+            |offset| {
+                read_block_header_at(&mut file_cell.borrow_mut(), offset, archive_len, sfx_offset)
+            },
+            |offset, keys| {
+                read_encrypted_block_header_at(
+                    &mut file_cell.borrow_mut(),
+                    offset,
+                    archive_len,
+                    sfx_offset,
+                    keys,
+                )
+            },
+        )?;
 
         Ok(Self {
             sfx_offset,
@@ -532,6 +577,50 @@ fn parse_file_encryption_record(input: &[u8], range: Range<usize>) -> Result<Fil
     })
 }
 
+fn parse_archive_encryption_header(
+    parsed: &ParsedBlockHeader,
+    password: Option<&[u8]>,
+) -> Result<Rar50Keys> {
+    let password = password.ok_or(Error::NeedPassword)?;
+    let mut reader = HeaderReader::new(&parsed.header, parsed.type_specific_range.clone())?;
+    let version = reader.read_vint()?;
+    if version != 0 {
+        return Err(Error::UnsupportedFeature {
+            version: crate::version::ArchiveVersion::Rar50,
+            feature: "RAR 5 unknown header encryption version",
+        });
+    }
+    let flags = reader.read_vint()?;
+    let kdf_count = reader.read_byte()?;
+    let salt = reader.read_array::<16>()?;
+    let check_value = if flags & 0x0001 != 0 {
+        Some(reader.read_array::<12>()?)
+    } else {
+        None
+    };
+    if reader.pos != reader.range.end {
+        return Err(Error::InvalidHeader(
+            "RAR 5 archive encryption header has trailing bytes",
+        ));
+    }
+    let keys = Rar50Keys::derive(password, salt, kdf_count).map_err(map_rar50_crypto_error)?;
+    if let Some(check_value) = check_value {
+        keys.check_password(&check_value)
+            .map_err(map_rar50_crypto_error)?;
+    }
+    Ok(keys)
+}
+
+fn map_rar50_crypto_error(error: rars_crypto::rar50::Error) -> Error {
+    match error {
+        rars_crypto::rar50::Error::KdfCountTooLarge => Error::UnsupportedFeature {
+            version: crate::version::ArchiveVersion::Rar50,
+            feature: "RAR 5 KDF count",
+        },
+        rars_crypto::rar50::Error::BadPassword => Error::WrongPasswordOrCorruptData,
+    }
+}
+
 fn read_array_at<const N: usize>(input: &[u8], pos: &mut usize, end: usize) -> Result<[u8; N]> {
     if pos.checked_add(N).is_none_or(|next| next > end) {
         return Err(Error::TooShort);
@@ -542,30 +631,56 @@ fn read_array_at<const N: usize>(input: &[u8], pos: &mut usize, end: usize) -> R
     Ok(out)
 }
 
-fn parse_archive_blocks<F>(
+fn align16(value: usize) -> Result<usize> {
+    value
+        .checked_add(15)
+        .map(|value| value & !15)
+        .ok_or(Error::InvalidHeader(
+            "RAR 5 encrypted header size overflows",
+        ))
+}
+
+fn parse_archive_blocks<F, G>(
     archive_len: usize,
+    password: Option<&[u8]>,
     mut read_block: F,
+    mut read_encrypted_block: G,
 ) -> Result<(MainHeader, Vec<Block>)>
 where
     F: FnMut(usize) -> Result<ParsedBlockHeader>,
+    G: FnMut(usize, &Rar50Keys) -> Result<ParsedBlockHeader>,
 {
     let mut pos = RAR50_SIGNATURE.len();
     let first = read_block(pos).map_err(|error| error.at_archive_offset(pos))?;
-    if first.block.header_type == HEAD_CRYPT {
-        return Err(Error::UnsupportedFeature {
-            version: crate::version::ArchiveVersion::Rar50,
-            feature: "RAR 5 encrypted headers",
-        });
-    }
+    let header_keys = if first.block.header_type == HEAD_CRYPT {
+        pos = first.next_offset;
+        Some(parse_archive_encryption_header(&first, password)?)
+    } else {
+        None
+    };
+
+    let main_pos = pos;
+    let main_block;
+    let first = if let Some(keys) = &header_keys {
+        main_block =
+            read_encrypted_block(pos, keys).map_err(|error| error.at_archive_offset(pos))?;
+        &main_block
+    } else {
+        &first
+    };
     if first.block.header_type != HEAD_MAIN {
         return Err(Error::InvalidHeader("RAR 5 main header is missing"));
     }
-    let main = parse_main_header_bytes(&first).map_err(|error| error.at_archive_offset(pos))?;
+    let main = parse_main_header_bytes(first).map_err(|error| error.at_archive_offset(main_pos))?;
     pos = first.next_offset;
 
     let mut blocks = Vec::new();
     while pos < archive_len {
-        let parsed = read_block(pos).map_err(|error| error.at_archive_offset(pos))?;
+        let parsed = if let Some(keys) = &header_keys {
+            read_encrypted_block(pos, keys).map_err(|error| error.at_archive_offset(pos))?
+        } else {
+            read_block(pos).map_err(|error| error.at_archive_offset(pos))?
+        };
         let next = parsed.next_offset;
         match parsed.block.header_type {
             HEAD_FILE => blocks.push(Block::File(
@@ -667,6 +782,57 @@ fn parse_block_header_bytes(
         sfx_offset,
         header_crc,
         header_size,
+        header_total,
+    )
+}
+
+fn parse_encrypted_block_header_bytes(
+    input: &[u8],
+    offset: usize,
+    archive_len: usize,
+    sfx_offset: usize,
+    keys: &Rar50Keys,
+) -> Result<ParsedBlockHeader> {
+    let remaining = archive_len.checked_sub(offset).ok_or(Error::TooShort)?;
+    if remaining < 32 {
+        return Err(Error::TooShort);
+    }
+    let first = input.get(offset..offset + 32).ok_or(Error::TooShort)?;
+    let mut iv = [0; 16];
+    iv.copy_from_slice(&first[..16]);
+    let mut first_plain = first[16..32].to_vec();
+    Rar50Cipher::new(keys.key, iv).decrypt_in_place(&mut first_plain);
+    let header_crc = read_u32(&first_plain, 0)?;
+    let (header_size, header_size_len) = read_vint_at(&first_plain, 4, first_plain.len())?;
+    let header_body_len = usize_from_u64(header_size, "RAR 5 header size overflows usize")?;
+    let header_total = 4usize
+        .checked_add(header_size_len)
+        .and_then(|size| size.checked_add(header_body_len))
+        .ok_or(Error::InvalidHeader("RAR 5 header size overflows usize"))?;
+    let encrypted_len = align16(header_total)?;
+    let disk_header_len = 16usize
+        .checked_add(encrypted_len)
+        .ok_or(Error::InvalidHeader(
+            "RAR 5 encrypted header size overflows",
+        ))?;
+    if disk_header_len > remaining {
+        return Err(Error::TooShort);
+    }
+    let encrypted = input
+        .get(offset + 16..offset + disk_header_len)
+        .ok_or(Error::TooShort)?;
+    let mut header = encrypted.to_vec();
+    Rar50Cipher::new(keys.key, iv).decrypt_in_place(&mut header);
+    header.truncate(header_total);
+
+    parse_block_header_image(
+        header,
+        offset,
+        archive_len,
+        sfx_offset,
+        header_crc,
+        header_size,
+        disk_header_len,
     )
 }
 
@@ -709,6 +875,55 @@ fn read_block_header_at(
         sfx_offset,
         header_crc,
         header_size,
+        header_total,
+    )
+}
+
+fn read_encrypted_block_header_at(
+    file: &mut File,
+    offset: usize,
+    archive_len: usize,
+    sfx_offset: usize,
+    keys: &Rar50Keys,
+) -> Result<ParsedBlockHeader> {
+    let remaining = archive_len.checked_sub(offset).ok_or(Error::TooShort)?;
+    if remaining < 32 {
+        return Err(Error::TooShort);
+    }
+    let first = read_exact_at(file, sfx_offset + offset, 32)?;
+    let mut iv = [0; 16];
+    iv.copy_from_slice(&first[..16]);
+    let mut first_plain = first[16..32].to_vec();
+    Rar50Cipher::new(keys.key, iv).decrypt_in_place(&mut first_plain);
+    let header_crc = read_u32(&first_plain, 0)?;
+    let (header_size, header_size_len) = read_vint_at(&first_plain, 4, first_plain.len())?;
+    let header_body_len = usize_from_u64(header_size, "RAR 5 header size overflows usize")?;
+    let header_total = 4usize
+        .checked_add(header_size_len)
+        .and_then(|size| size.checked_add(header_body_len))
+        .ok_or(Error::InvalidHeader("RAR 5 header size overflows usize"))?;
+    let encrypted_len = align16(header_total)?;
+    let disk_header_len = 16usize
+        .checked_add(encrypted_len)
+        .ok_or(Error::InvalidHeader(
+            "RAR 5 encrypted header size overflows",
+        ))?;
+    if disk_header_len > remaining {
+        return Err(Error::TooShort);
+    }
+    let encrypted = read_exact_at(file, sfx_offset + offset + 16, encrypted_len)?;
+    let mut header = encrypted;
+    Rar50Cipher::new(keys.key, iv).decrypt_in_place(&mut header);
+    header.truncate(header_total);
+
+    parse_block_header_image(
+        header,
+        offset,
+        archive_len,
+        sfx_offset,
+        header_crc,
+        header_size,
+        disk_header_len,
     )
 }
 
@@ -719,6 +934,7 @@ fn parse_block_header_image(
     sfx_offset: usize,
     header_crc: u32,
     header_size: u64,
+    disk_header_len: usize,
 ) -> Result<ParsedBlockHeader> {
     let actual = crc32(&header[4..]);
     if actual != header_crc {
@@ -760,7 +976,7 @@ fn parse_block_header_image(
         .transpose()?
         .unwrap_or(0);
     let next_offset = offset
-        .checked_add(header_total)
+        .checked_add(disk_header_len)
         .and_then(|pos| pos.checked_add(data_len))
         .ok_or(Error::InvalidHeader("RAR 5 data size overflows usize"))?;
     if next_offset > archive_len {
@@ -769,7 +985,7 @@ fn parse_block_header_image(
     let type_specific_start = reader.pos;
     let data_start = sfx_offset
         .checked_add(offset)
-        .and_then(|pos| pos.checked_add(header_total))
+        .and_then(|pos| pos.checked_add(disk_header_len))
         .ok_or(Error::InvalidHeader("RAR 5 data offset overflows usize"))?;
     let data_end = data_start
         .checked_add(data_len)
@@ -822,6 +1038,19 @@ impl<'a> HeaderReader<'a> {
         let value = read_u32(self.input, self.pos)?;
         self.pos += 4;
         Ok(value)
+    }
+
+    fn read_byte(&mut self) -> Result<u8> {
+        if self.pos >= self.range.end {
+            return Err(Error::TooShort);
+        }
+        let value = self.input[self.pos];
+        self.pos += 1;
+        Ok(value)
+    }
+
+    fn read_array<const N: usize>(&mut self) -> Result<[u8; N]> {
+        read_array_at::<N>(self.input, &mut self.pos, self.range.end)
     }
 
     fn read_bytes(&mut self, len: usize) -> Result<&'a [u8]> {

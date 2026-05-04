@@ -111,16 +111,29 @@ fn rejects_wrong_password_for_rar50_encrypted_file() {
 }
 
 #[test]
-fn rejects_rar50_header_encrypted_archive_until_head_crypt_lands() {
+fn rejects_rar50_header_encrypted_archive_without_or_with_wrong_password() {
     let bytes = std::fs::read(fixture("header_encrypted.rar")).unwrap();
 
+    assert!(matches!(Archive::parse(&bytes), Err(Error::NeedPassword)));
     assert!(matches!(
-        Archive::parse(&bytes),
-        Err(Error::UnsupportedFeature {
-            version: rars_format::ArchiveVersion::Rar50,
-            feature: "RAR 5 encrypted headers"
-        })
+        Archive::parse_with_password(&bytes, Some(b"wrong")),
+        Err(Error::WrongPasswordOrCorruptData)
     ));
+}
+
+#[test]
+fn parses_and_extracts_rar50_header_encrypted_archive_with_password() {
+    let bytes = std::fs::read(fixture("header_encrypted.rar")).unwrap();
+    let archive = Archive::parse_with_password(&bytes, Some(b"password")).unwrap();
+
+    let files: Vec<_> = archive.files().collect();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].name, b"hello.txt");
+    assert!(files[0].encrypted);
+
+    let extracted = archive.extract_with_password(Some(b"password")).unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].data, b"Hello, RAR 5.0 fixture world.\n");
 }
 
 #[test]
@@ -308,6 +321,31 @@ fn extracts_rar50_compressed_multivolume_archive() {
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"random_4k.bin");
     assert_eq!(extracted[0].data.len(), 4096);
+}
+
+#[test]
+fn extracts_rar50_encrypted_compressed_multivolume_archive() {
+    let volumes = [
+        Archive::parse_path(fixture("encrypted_multivol.part1.rar")).unwrap(),
+        Archive::parse_path(fixture("encrypted_multivol.part2.rar")).unwrap(),
+        Archive::parse_path(fixture("encrypted_multivol.part3.rar")).unwrap(),
+    ];
+
+    assert!(volumes.iter().all(|archive| archive.main.is_volume()));
+    assert!(volumes
+        .iter()
+        .all(|archive| { archive.files().next().is_some_and(|file| file.encrypted) }));
+
+    let extracted =
+        rars_format::rar50::extract_volumes_with_password(&volumes, Some(b"password")).unwrap();
+
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].name, b"random_4k.bin");
+    assert_eq!(extracted[0].data.len(), 4096);
+    assert_eq!(
+        rars_format::rar15_40::crc32(&extracted[0].data),
+        0xb9c5_4415
+    );
 }
 
 #[test]

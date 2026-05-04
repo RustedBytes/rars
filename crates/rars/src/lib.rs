@@ -190,7 +190,9 @@ impl ArchiveReader {
             ArchiveFamily::Rar15To40 => Ok(Archive::Rar15To40(
                 rar15_40::Archive::parse_with_password(input, options.password)?,
             )),
-            ArchiveFamily::Rar50Plus => Ok(Archive::Rar50Plus(rar50::Archive::parse(input)?)),
+            ArchiveFamily::Rar50Plus => Ok(Archive::Rar50Plus(
+                rar50::Archive::parse_with_password(input, options.password)?,
+            )),
         }
     }
 
@@ -220,7 +222,9 @@ impl ArchiveReader {
             ArchiveFamily::Rar15To40 => Ok(Archive::Rar15To40(
                 rar15_40::Archive::parse_path_with_password(path, options.password)?,
             )),
-            ArchiveFamily::Rar50Plus => Ok(Archive::Rar50Plus(rar50::Archive::parse_path(path)?)),
+            ArchiveFamily::Rar50Plus => Ok(Archive::Rar50Plus(
+                rar50::Archive::parse_path_with_password(path, options.password)?,
+            )),
         }
     }
 }
@@ -272,7 +276,7 @@ pub fn extract_volumes(
                     }
                 }
             }
-            rar50::extract_volumes(&typed)
+            rar50::extract_volumes_with_password(&typed, password)
                 .map(|entries| entries.into_iter().map(Into::into).collect())
         }
     }
@@ -340,7 +344,7 @@ where
                     }
                 }
             }
-            rar50::extract_volumes_to(&typed, |meta| {
+            rar50::extract_volumes_to_with_password(&typed, password, |meta| {
                 open(&ExtractedEntryMeta {
                     name: meta.name.clone(),
                     file_time: meta.file_time,

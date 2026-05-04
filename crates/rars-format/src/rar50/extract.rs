@@ -265,6 +265,13 @@ struct DecodedData {
 /// Convenience multivolume extraction API that buffers each extracted entry in
 /// memory. Prefer [`extract_volumes_to`] for large archives.
 pub fn extract_volumes(volumes: &[Archive]) -> Result<Vec<ExtractedEntry>> {
+    extract_volumes_with_password(volumes, None)
+}
+
+pub fn extract_volumes_with_password(
+    volumes: &[Archive],
+    password: Option<&[u8]>,
+) -> Result<Vec<ExtractedEntry>> {
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -282,7 +289,7 @@ pub fn extract_volumes(volumes: &[Archive]) -> Result<Vec<ExtractedEntry>> {
     }
 
     let mut captured: Vec<(ExtractedEntryMeta, Rc<RefCell<Vec<u8>>>)> = Vec::new();
-    extract_volumes_to(volumes, |meta| {
+    extract_volumes_to_with_password(volumes, password, |meta| {
         let data = Rc::new(RefCell::new(Vec::new()));
         captured.push((meta.clone(), data.clone()));
         Ok(Box::new(SharedWriter(data)))
@@ -302,7 +309,18 @@ pub fn extract_volumes(volumes: &[Archive]) -> Result<Vec<ExtractedEntry>> {
 }
 
 /// Streams a RAR 5 multivolume archive set to caller-provided writers.
-pub fn extract_volumes_to<F>(volumes: &[Archive], mut open: F) -> Result<()>
+pub fn extract_volumes_to<F>(volumes: &[Archive], open: F) -> Result<()>
+where
+    F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
+{
+    extract_volumes_to_with_password(volumes, None, open)
+}
+
+pub fn extract_volumes_to_with_password<F>(
+    volumes: &[Archive],
+    password: Option<&[u8]>,
+    mut open: F,
+) -> Result<()>
 where
     F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
 {
@@ -325,25 +343,25 @@ where
                     let mut writer = open(&meta)?;
                     if !meta.is_directory {
                         let decoded =
-                            file.decoded_data_with_decoder(archive, &mut decoder, None)?;
+                            file.decoded_data_with_decoder(archive, &mut decoder, password)?;
                         file.verify_integrity_with_keys(&decoded.data, decoded.keys.as_ref())?;
                         writer.write_all(&decoded.data)?;
                     }
                 }
                 (false, false, true) => {
-                    validate_split_fragment(file)?;
+                    validate_split_fragment(file, password)?;
                     pending = Some(PendingSplitRefs::new(file, volume_index, file_index));
                 }
                 (true, true, true) => {
                     let current = pending.as_mut().expect("pending split");
-                    validate_split_continuation_refs(current, file)?;
+                    validate_split_continuation_refs(current, file, password)?;
                     current.append(volume_index, file_index);
                 }
                 (true, true, false) => {
                     let mut completed = pending.take().expect("pending split");
-                    validate_split_continuation_refs(&completed, file)?;
+                    validate_split_continuation_refs(&completed, file, password)?;
                     completed.append(volume_index, file_index);
-                    completed.write_to(volumes, file, &mut decoder, &mut open)?;
+                    completed.write_to(volumes, file, &mut decoder, password, &mut open)?;
                 }
                 (false, true, _) => {
                     return Err(Error::InvalidHeader(
@@ -366,20 +384,24 @@ where
     Ok(())
 }
 
-fn validate_split_fragment(file: &FileHeader) -> Result<()> {
+fn validate_split_fragment(file: &FileHeader, password: Option<&[u8]>) -> Result<()> {
     if file.is_directory() {
         return Err(Error::InvalidHeader(
             "RAR 5 split directory entry is invalid",
         ));
     }
-    if file.encrypted {
+    if file.encrypted && password.is_none() {
         return Err(Error::NeedPassword);
     }
     Ok(())
 }
 
-fn validate_split_continuation_refs(pending: &PendingSplitRefs, file: &FileHeader) -> Result<()> {
-    validate_split_fragment(file)?;
+fn validate_split_continuation_refs(
+    pending: &PendingSplitRefs,
+    file: &FileHeader,
+    password: Option<&[u8]>,
+) -> Result<()> {
+    validate_split_fragment(file, password)?;
     if file.name != pending.name {
         return Err(Error::InvalidHeader("RAR 5 split entry name changed"));
     }
@@ -428,11 +450,13 @@ impl PendingSplitRefs {
         volumes: &[Archive],
         final_file: &FileHeader,
         decoder: &mut Unpack50Decoder,
+        password: Option<&[u8]>,
         open: &mut F,
     ) -> Result<()>
     where
         F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
     {
+        let decryptor = self.split_decryptor(volumes, password)?;
         let meta = ExtractedEntryMeta {
             name: self.name.clone(),
             file_time: self.file_time,
@@ -443,15 +467,15 @@ impl PendingSplitRefs {
         let mut writer = open(&meta)?;
         if final_file.is_stored() {
             return self
-                .write_stored_to(volumes, final_file, &mut writer)
+                .write_stored_to(volumes, final_file, decryptor.as_ref(), &mut writer)
                 .map_err(|error| final_file.entry_error("extracting", error));
         }
 
         let data = final_file
-            .decode_split_with_decoder(volumes, &self, decoder)
+            .decode_split_with_decoder(volumes, &self, decoder, decryptor.as_ref())
             .map_err(|error| final_file.entry_error("decoding", error))?;
         final_file
-            .verify_integrity(&data)
+            .verify_integrity_with_keys(&data, decryptor.as_ref().map(|decryptor| &decryptor.keys))
             .map_err(|error| final_file.entry_error("verifying", error))?;
         writer
             .write_all(&data)
@@ -464,9 +488,10 @@ impl PendingSplitRefs {
         &self,
         volumes: &[Archive],
         final_file: &FileHeader,
+        decryptor: Option<&SplitDecryptor>,
         writer: &mut dyn Write,
     ) -> Result<()> {
-        let mut reader = self.fragment_reader(volumes)?;
+        let mut reader = self.fragment_reader(volumes, decryptor)?;
         let mut crc = StreamingCrc32::new();
         let mut hash = streaming_hash_verifier(final_file)?;
         let mut written = 0u64;
@@ -508,7 +533,49 @@ impl PendingSplitRefs {
         Ok(())
     }
 
-    fn fragment_reader<'a>(&self, volumes: &'a [Archive]) -> Result<ChainedReader<'a>> {
+    fn split_decryptor(
+        &self,
+        volumes: &[Archive],
+        password: Option<&[u8]>,
+    ) -> Result<Option<SplitDecryptor>> {
+        if !self.encrypted {
+            return Ok(None);
+        }
+        let password = password.ok_or(Error::NeedPassword)?;
+        let (volume_index, file_index) = self.fragments[0];
+        let archive = volumes
+            .get(volume_index)
+            .ok_or(Error::InvalidHeader("RAR 5 split volume is missing"))?;
+        let file = archive
+            .files()
+            .nth(file_index)
+            .ok_or(Error::InvalidHeader("RAR 5 split entry is missing"))?;
+        let encryption = file.encryption.as_ref().ok_or(Error::InvalidHeader(
+            "RAR 5 encrypted split entry is missing encryption record",
+        ))?;
+        if encryption.version != 0 {
+            return Err(Error::UnsupportedFeature {
+                version: crate::version::ArchiveVersion::Rar50,
+                feature: "RAR 5 unknown file encryption version",
+            });
+        }
+        let keys = Rar50Keys::derive(password, encryption.salt, encryption.kdf_count)
+            .map_err(map_rar50_crypto_error)?;
+        if let Some(check_value) = encryption.check_value {
+            keys.check_password(&check_value)
+                .map_err(map_rar50_crypto_error)?;
+        }
+        Ok(Some(SplitDecryptor {
+            keys,
+            iv: encryption.iv,
+        }))
+    }
+
+    fn fragment_reader<'a>(
+        &self,
+        volumes: &'a [Archive],
+        decryptor: Option<&SplitDecryptor>,
+    ) -> Result<Box<dyn Read + 'a>> {
         let mut readers = Vec::with_capacity(self.fragments.len());
         for &(volume_index, file_index) in &self.fragments {
             let archive = volumes
@@ -520,8 +587,22 @@ impl PendingSplitRefs {
                 .ok_or(Error::InvalidHeader("RAR 5 split entry is missing"))?;
             readers.push(archive.range_reader(file.block.data_range.clone())?);
         }
-        Ok(ChainedReader { readers, index: 0 })
+        let chained = ChainedReader { readers, index: 0 };
+        if let Some(decryptor) = decryptor {
+            Ok(Box::new(Rar50DecryptingReader::new(
+                chained,
+                decryptor.keys.key,
+                decryptor.iv,
+            )))
+        } else {
+            Ok(Box::new(chained))
+        }
     }
+}
+
+struct SplitDecryptor {
+    keys: Rar50Keys,
+    iv: [u8; 16],
 }
 
 fn streaming_hash_verifier(file: &FileHeader) -> Result<Option<([u8; 32], blake2sp::Hasher)>> {
@@ -550,10 +631,11 @@ impl FileHeader {
         volumes: &[Archive],
         split: &PendingSplitRefs,
         decoder: &mut Unpack50Decoder,
+        decryptor: Option<&SplitDecryptor>,
     ) -> Result<Vec<u8>> {
         if self.is_stored() {
             let mut data = Vec::new();
-            let mut reader = split.fragment_reader(volumes)?;
+            let mut reader = split.fragment_reader(volumes, decryptor)?;
             reader.read_to_end(&mut data)?;
             if data.len() as u64 != self.unpacked_size {
                 return Err(Error::InvalidHeader(
@@ -567,7 +649,7 @@ impl FileHeader {
         let dictionary_size = usize::try_from(info.dictionary_size).map_err(|_| {
             Error::InvalidHeader("RAR 5 dictionary size overflows host address size")
         })?;
-        let mut reader = split.fragment_reader(volumes)?;
+        let mut reader = split.fragment_reader(volumes, decryptor)?;
         decoder
             .decode_member_from_reader_with_dictionary(
                 &mut reader,
@@ -596,6 +678,64 @@ impl Read for ChainedReader<'_> {
             self.index += 1;
         }
         Ok(0)
+    }
+}
+
+struct Rar50DecryptingReader<R> {
+    inner: R,
+    cipher: Rar50Cipher,
+    buffer: [u8; 16],
+    pos: usize,
+    len: usize,
+}
+
+impl<R: Read> Rar50DecryptingReader<R> {
+    fn new(inner: R, key: [u8; 32], iv: [u8; 16]) -> Self {
+        Self {
+            inner,
+            cipher: Rar50Cipher::new(key, iv),
+            buffer: [0; 16],
+            pos: 0,
+            len: 0,
+        }
+    }
+
+    fn fill_buffer(&mut self) -> std::io::Result<bool> {
+        let mut encrypted = [0; 16];
+        let mut read = 0;
+        while read < encrypted.len() {
+            let count = self.inner.read(&mut encrypted[read..])?;
+            if count == 0 {
+                if read == 0 {
+                    return Ok(false);
+                }
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "truncated RAR 5 encrypted stream",
+                ));
+            }
+            read += count;
+        }
+        self.buffer = encrypted;
+        self.cipher.decrypt_in_place(&mut self.buffer);
+        self.pos = 0;
+        self.len = self.buffer.len();
+        Ok(true)
+    }
+}
+
+impl<R: Read> Read for Rar50DecryptingReader<R> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        if out.is_empty() {
+            return Ok(0);
+        }
+        if self.pos == self.len && !self.fill_buffer()? {
+            return Ok(0);
+        }
+        let count = out.len().min(self.len - self.pos);
+        out[..count].copy_from_slice(&self.buffer[self.pos..self.pos + count]);
+        self.pos += count;
+        Ok(count)
     }
 }
 
