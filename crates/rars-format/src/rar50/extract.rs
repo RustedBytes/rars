@@ -1,9 +1,97 @@
 use super::{blake2sp, Archive, ExtractedEntry, ExtractedEntryMeta, FileHeader};
 use crate::error::{Error, Result};
 use rars_codec::rar50::{DecodeMode, Unpack50Decoder};
+use rars_crypto::rar50::{Rar50Cipher, Rar50Keys};
 use std::io::{Read, Write};
 
 impl FileHeader {
+    fn packed_data_with_password(
+        &self,
+        archive: &Archive,
+        password: Option<&[u8]>,
+    ) -> Result<(Vec<u8>, Option<Rar50Keys>)> {
+        let mut packed = self.packed_data(archive)?;
+        if !self.encrypted {
+            return Ok((packed, None));
+        }
+        let password = password.ok_or(Error::NeedPassword)?;
+        let encryption = self.encryption.as_ref().ok_or(Error::InvalidHeader(
+            "RAR 5 encrypted file is missing encryption record",
+        ))?;
+        if encryption.version != 0 {
+            return Err(Error::UnsupportedFeature {
+                version: crate::version::ArchiveVersion::Rar50,
+                feature: "RAR 5 unknown file encryption version",
+            });
+        }
+        if packed.len() % 16 != 0 {
+            return Err(Error::InvalidHeader(
+                "RAR 5 encrypted file payload is not block aligned",
+            ));
+        }
+
+        let keys = Rar50Keys::derive(password, encryption.salt, encryption.kdf_count)
+            .map_err(map_rar50_crypto_error)?;
+        if let Some(check_value) = encryption.check_value {
+            keys.check_password(&check_value)
+                .map_err(map_rar50_crypto_error)?;
+        }
+        Rar50Cipher::new(keys.key, encryption.iv).decrypt_in_place(&mut packed);
+        Ok((packed, Some(keys)))
+    }
+
+    fn verify_integrity_with_keys(&self, data: &[u8], keys: Option<&Rar50Keys>) -> Result<()> {
+        if let Some(expected) = self.data_crc32 {
+            let actual = crate::rar15_40::crc32(data);
+            let actual = if self.uses_hash_mac() {
+                let keys = keys.ok_or(Error::InvalidHeader(
+                    "RAR 5 encrypted hash MAC needs encryption keys",
+                ))?;
+                keys.mac_crc32(actual)
+            } else {
+                actual
+            };
+            if actual != expected {
+                return Err(Error::Crc32Mismatch { expected, actual });
+            }
+        }
+
+        let Some(hash) = &self.hash else {
+            return Ok(());
+        };
+        match hash.hash_type {
+            0 if hash.data.len() == 32 => {
+                let actual = blake2sp::hash(data);
+                let actual = if self.uses_hash_mac() {
+                    let keys = keys.ok_or(Error::InvalidHeader(
+                        "RAR 5 encrypted hash MAC needs encryption keys",
+                    ))?;
+                    keys.mac_hash32(actual)
+                } else {
+                    actual
+                };
+                if hash.data == actual {
+                    Ok(())
+                } else {
+                    Err(Error::HashMismatch { hash_type: 0 })
+                }
+            }
+            0 => Err(Error::InvalidHeader(
+                "RAR 5 BLAKE2sp hash record has invalid length",
+            )),
+            _ => Err(Error::UnsupportedFeature {
+                version: crate::version::ArchiveVersion::Rar50,
+                feature: "RAR 5 unknown file hash type",
+            }),
+        }
+    }
+
+    fn uses_hash_mac(&self) -> bool {
+        self.encryption
+            .as_ref()
+            .is_some_and(|encryption| encryption.flags & 0x0002 != 0)
+    }
+
     pub fn metadata(&self) -> ExtractedEntryMeta {
         ExtractedEntryMeta {
             name: self.name.clone(),
@@ -15,14 +103,23 @@ impl FileHeader {
     }
 
     pub fn extract(&self, archive: &Archive) -> Result<ExtractedEntry> {
+        self.extract_with_password(archive, None)
+    }
+
+    pub fn extract_with_password(
+        &self,
+        archive: &Archive,
+        password: Option<&[u8]>,
+    ) -> Result<ExtractedEntry> {
         let mut decoder = Unpack50Decoder::new();
-        self.extract_with_decoder(archive, &mut decoder)
+        self.extract_with_decoder(archive, &mut decoder, password)
     }
 
     fn extract_with_decoder(
         &self,
         archive: &Archive,
         decoder: &mut Unpack50Decoder,
+        password: Option<&[u8]>,
     ) -> Result<ExtractedEntry> {
         if self.is_directory() {
             return Ok(ExtractedEntry {
@@ -34,14 +131,14 @@ impl FileHeader {
                 is_directory: true,
             });
         }
-        let data = self
-            .decoded_data_with_decoder(archive, decoder)
+        let decoded = self
+            .decoded_data_with_decoder(archive, decoder, password)
             .map_err(|error| self.entry_error("decoding", error))?;
-        self.verify_integrity(&data)
+        self.verify_integrity_with_keys(&decoded.data, decoded.keys.as_ref())
             .map_err(|error| self.entry_error("verifying", error))?;
         Ok(ExtractedEntry {
             name: self.name.clone(),
-            data,
+            data: decoded.data,
             file_time: self.mtime.unwrap_or(0),
             attr: self.attributes,
             host_os: self.host_os,
@@ -53,12 +150,11 @@ impl FileHeader {
         &self,
         archive: &Archive,
         decoder: &mut Unpack50Decoder,
-    ) -> Result<Vec<u8>> {
-        if self.encrypted {
-            return Err(Error::NeedPassword);
-        }
-        let packed = self.packed_data(archive)?;
-        self.decode_packed_with_decoder(&packed, decoder)
+        password: Option<&[u8]>,
+    ) -> Result<DecodedData> {
+        let (packed, keys) = self.packed_data_with_password(archive, password)?;
+        let data = self.decode_packed_with_decoder(&packed, decoder)?;
+        Ok(DecodedData { data, keys })
     }
 
     fn decode_packed_with_decoder(
@@ -96,8 +192,22 @@ impl FileHeader {
     }
 }
 
+fn map_rar50_crypto_error(error: rars_crypto::rar50::Error) -> Error {
+    match error {
+        rars_crypto::rar50::Error::KdfCountTooLarge => Error::UnsupportedFeature {
+            version: crate::version::ArchiveVersion::Rar50,
+            feature: "RAR 5 KDF count",
+        },
+        rars_crypto::rar50::Error::BadPassword => Error::WrongPasswordOrCorruptData,
+    }
+}
+
 impl Archive {
     pub fn extract(&self) -> Result<Vec<ExtractedEntry>> {
+        self.extract_with_password(None)
+    }
+
+    pub fn extract_with_password(&self, password: Option<&[u8]>) -> Result<Vec<ExtractedEntry>> {
         let mut out = Vec::new();
         let mut decoder = Unpack50Decoder::new();
         for file in self.files() {
@@ -106,12 +216,19 @@ impl Archive {
                     "RAR 5 split entry requires multivolume extraction",
                 ));
             }
-            out.push(file.extract_with_decoder(self, &mut decoder)?);
+            out.push(file.extract_with_decoder(self, &mut decoder, password)?);
         }
         Ok(out)
     }
 
-    pub fn extract_to<F>(&self, mut open: F) -> Result<()>
+    pub fn extract_to<F>(&self, open: F) -> Result<()>
+    where
+        F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
+    {
+        self.extract_to_with_password(None, open)
+    }
+
+    pub fn extract_to_with_password<F>(&self, password: Option<&[u8]>, mut open: F) -> Result<()>
     where
         F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
     {
@@ -125,19 +242,24 @@ impl Archive {
             let meta = file.metadata();
             let mut writer = open(&meta)?;
             if !meta.is_directory {
-                let data = file
-                    .decoded_data_with_decoder(self, &mut decoder)
+                let decoded = file
+                    .decoded_data_with_decoder(self, &mut decoder, password)
                     .map_err(|error| file.entry_error("decoding", error))?;
-                file.verify_integrity(&data)
+                file.verify_integrity_with_keys(&decoded.data, decoded.keys.as_ref())
                     .map_err(|error| file.entry_error("verifying", error))?;
                 writer
-                    .write_all(&data)
+                    .write_all(&decoded.data)
                     .map_err(Error::from)
                     .map_err(|error| file.entry_error("writing", error))?;
             }
         }
         Ok(())
     }
+}
+
+struct DecodedData {
+    data: Vec<u8>,
+    keys: Option<Rar50Keys>,
 }
 
 /// Convenience multivolume extraction API that buffers each extracted entry in
@@ -202,9 +324,10 @@ where
                     let meta = file.metadata();
                     let mut writer = open(&meta)?;
                     if !meta.is_directory {
-                        let data = file.decoded_data_with_decoder(archive, &mut decoder)?;
-                        file.verify_integrity(&data)?;
-                        writer.write_all(&data)?;
+                        let decoded =
+                            file.decoded_data_with_decoder(archive, &mut decoder, None)?;
+                        file.verify_integrity_with_keys(&decoded.data, decoded.keys.as_ref())?;
+                        writer.write_all(&decoded.data)?;
                     }
                 }
                 (false, false, true) => {
@@ -571,6 +694,7 @@ mod tests {
                     data: blake2sp::hash(full).to_vec(),
                 }),
                 encrypted: false,
+                encryption: None,
             })],
             source: ArchiveSource::Memory(source),
         }

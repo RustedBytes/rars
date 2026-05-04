@@ -142,6 +142,7 @@ pub struct FileHeader {
     pub name: Vec<u8>,
     pub hash: Option<FileHash>,
     pub encrypted: bool,
+    pub encryption: Option<FileEncryption>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,6 +150,17 @@ pub struct FileHeader {
 pub struct FileHash {
     pub hash_type: u64,
     pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FileEncryption {
+    pub version: u64,
+    pub flags: u64,
+    pub kdf_count: u8,
+    pub salt: [u8; 16],
+    pub iv: [u8; 16],
+    pub check_value: Option<[u8; 12]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -459,6 +471,7 @@ fn parse_file_header_bytes(parsed: &ParsedBlockHeader) -> Result<FileHeader> {
         name,
         hash: None,
         encrypted: false,
+        encryption: None,
     };
     parse_file_extra_area(&parsed.header, parsed.extra_range.clone(), &mut file)?;
     Ok(file)
@@ -470,7 +483,10 @@ fn parse_file_extra_area(input: &[u8], range: Range<usize>, file: &mut FileHeade
     }
     parse_extra_records(input, range, |record_type, data| {
         match record_type {
-            FHEXTRA_CRYPT => file.encrypted = true,
+            FHEXTRA_CRYPT => {
+                file.encrypted = true;
+                file.encryption = Some(parse_file_encryption_record(input, data)?);
+            }
             FHEXTRA_HASH => {
                 let (hash_type, hash_type_len) = read_vint_at(input, data.start, data.end)?;
                 file.hash = Some(FileHash {
@@ -482,6 +498,48 @@ fn parse_file_extra_area(input: &[u8], range: Range<usize>, file: &mut FileHeade
         }
         Ok(())
     })
+}
+
+fn parse_file_encryption_record(input: &[u8], range: Range<usize>) -> Result<FileEncryption> {
+    let (version, version_len) = read_vint_at(input, range.start, range.end)?;
+    let flags_pos = range.start + version_len;
+    let (flags, flags_len) = read_vint_at(input, flags_pos, range.end)?;
+    let mut pos = flags_pos + flags_len;
+    if pos >= range.end {
+        return Err(Error::TooShort);
+    }
+    let kdf_count = input[pos];
+    pos += 1;
+    let salt = read_array_at::<16>(input, &mut pos, range.end)?;
+    let iv = read_array_at::<16>(input, &mut pos, range.end)?;
+    let check_value = if flags & 0x0001 != 0 {
+        Some(read_array_at::<12>(input, &mut pos, range.end)?)
+    } else {
+        None
+    };
+    if pos != range.end {
+        return Err(Error::InvalidHeader(
+            "RAR 5 file encryption record has trailing bytes",
+        ));
+    }
+    Ok(FileEncryption {
+        version,
+        flags,
+        kdf_count,
+        salt,
+        iv,
+        check_value,
+    })
+}
+
+fn read_array_at<const N: usize>(input: &[u8], pos: &mut usize, end: usize) -> Result<[u8; N]> {
+    if pos.checked_add(N).is_none_or(|next| next > end) {
+        return Err(Error::TooShort);
+    }
+    let mut out = [0; N];
+    out.copy_from_slice(&input[*pos..*pos + N]);
+    *pos += N;
+    Ok(out)
 }
 
 fn parse_archive_blocks<F>(

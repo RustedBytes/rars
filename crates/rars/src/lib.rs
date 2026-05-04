@@ -51,7 +51,7 @@ impl Archive {
                 .extract_with_password(password)
                 .map(|entries| entries.into_iter().map(Into::into).collect()),
             Self::Rar50Plus(archive) => archive
-                .extract()
+                .extract_with_password(password)
                 .map(|entries| entries.into_iter().map(Into::into).collect()),
         }
     }
@@ -78,7 +78,7 @@ impl Archive {
                     is_directory: meta.is_directory,
                 })
             }),
-            Self::Rar50Plus(archive) => archive.extract_to(|meta| {
+            Self::Rar50Plus(archive) => archive.extract_to_with_password(password, |meta| {
                 open(&ExtractedEntryMeta {
                     name: meta.name.clone(),
                     file_time: meta.file_time,

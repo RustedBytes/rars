@@ -93,9 +93,10 @@ Keep this section short. Detailed behavioural claims belong in tests.
   fixed filters, single-archive solid state carry-over, compressed
   multivolume extraction for the promoted `multivol.part*.rar` fixture,
   optional file CRC32 validation, BLAKE2sp hash-record parsing and
-  verification, and clear rejections for encrypted headers and encrypted
-  files. RAR 7.x remains format-detected but codec-unsupported beyond the
-  shared RAR 5 signature family.
+  verification, per-file AES-256-CBC encrypted stream extraction with
+  password-check records and CRC32/BLAKE2sp HashMAC verification, and a clear
+  rejection for encrypted headers. RAR 7.x remains format-detected but
+  codec-unsupported beyond the shared RAR 5 signature family.
 
 ## Priority Backlog
 
@@ -167,7 +168,8 @@ Keep this section short. Detailed behavioural claims belong in tests.
     across files in the same archive.
   - RAR 7 distance/table-size changes.
 - Add RAR 5 encryption:
-  - password KDF, AES-256-CBC, header encryption, password-check records.
+  - Archive-wide header encryption (`HEAD_CRYPT`).
+  - Encrypted service-data extraction and encrypted multivolume cases.
 - Extend RAR 5 multivolume extraction:
   - Compressed split extraction is implemented for the promoted
     `multivol.part*.rar` fixture and preserves the Unpack50 decoder across the

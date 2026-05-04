@@ -57,6 +57,73 @@ fn parses_and_extracts_rar50_stored_file() {
 }
 
 #[test]
+fn decrypts_rar50_crc32_mac_file_with_password() {
+    let bytes = std::fs::read(fixture("password_crc32.rar")).unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+
+    let files: Vec<_> = archive.files().collect();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].name, b"hello.txt");
+    assert!(files[0].encrypted);
+    assert_eq!(files[0].packed_size(), 48);
+    assert!(matches!(
+        archive.extract(),
+        Err(Error::AtEntry {
+            name,
+            operation: "decoding",
+            source
+        }) if name == b"hello.txt" && matches!(*source, Error::NeedPassword)
+    ));
+
+    let extracted = archive.extract_with_password(Some(b"password")).unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].data, b"Hello, RAR 5.0 fixture world.\n");
+}
+
+#[test]
+fn decrypts_rar50_blake2_mac_file_with_password() {
+    let bytes = std::fs::read(fixture("password_aes.rar")).unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+
+    let files: Vec<_> = archive.files().collect();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].name, b"hello.txt");
+    assert!(files[0].encrypted);
+
+    let extracted = archive.extract_with_password(Some(b"password")).unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].data, b"Hello, RAR 5.0 fixture world.\n");
+}
+
+#[test]
+fn rejects_wrong_password_for_rar50_encrypted_file() {
+    let bytes = std::fs::read(fixture("password_crc32.rar")).unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+
+    assert!(matches!(
+        archive.extract_with_password(Some(b"wrong")),
+        Err(Error::AtEntry {
+            name,
+            operation: "decoding",
+            source
+        }) if name == b"hello.txt" && matches!(*source, Error::WrongPasswordOrCorruptData)
+    ));
+}
+
+#[test]
+fn rejects_rar50_header_encrypted_archive_until_head_crypt_lands() {
+    let bytes = std::fs::read(fixture("header_encrypted.rar")).unwrap();
+
+    assert!(matches!(
+        Archive::parse(&bytes),
+        Err(Error::UnsupportedFeature {
+            version: rars_format::ArchiveVersion::Rar50,
+            feature: "RAR 5 encrypted headers"
+        })
+    ));
+}
+
+#[test]
 fn extract_to_reports_rar50_entry_context_on_write_failure() {
     struct FailingWriter;
 
