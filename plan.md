@@ -79,7 +79,13 @@ Keep this section short. Detailed behavioural claims belong in tests.
   and basic compressed writing, including solid mode, old-numbered
   multivolumes, old-style archive comments, and RAR 1.5 per-file encryption
   including encrypted split volumes, are exposed through the public facade and
-  CLI, with reader round-trip tests for small generated archives.
+  CLI, with reader round-trip tests for small generated archives. RAR 2.0 has
+  baseline literal-only Unpack20 and Unpack29 compressed writers exposed
+  through the format crate, facade, and CLI; generated Unpack20 and Unpack29
+  archives are accepted by WinRAR/UnRAR 4.20. RAR 3.x/4.x has baseline
+  per-file AES writer support for stored and literal-only Unpack29 compressed
+  members, exposed through the format crate, facade, and CLI; generated RAR30
+  and RAR40 archives are accepted by WinRAR/UnRAR 4.20.
 - Extraction is reader-backed for normal archive paths and avoids cloning packed
   payloads into parsed entries. Stored, compressed, and encrypted RAR 1.5-4.x
   volume sets stream through `extract_volumes_to`; encrypted split sets use a
@@ -99,7 +105,9 @@ Keep this section short. Detailed behavioural claims belong in tests.
   multivolume extraction. Encrypted service payloads are covered by a
   header-encrypted archive-comment fixture. RAR 7.x shared-format archives are
   handled through the RAR 5 reader, and the WinRAR 7 `-ams` archive metadata
-  main-extra record is parsed. True Unpack70 remains fixture-blocked because
+  main-extra record is parsed. RAR 5.0 has a baseline store-only writer
+  exposed through the format crate, facade, and CLI; generated archives are
+  accepted by WinRAR/UnRAR 7.21. True Unpack70 remains fixture-blocked because
   it requires a >4 GiB dictionary input.
 
 ## Priority Backlog
@@ -200,10 +208,16 @@ Keep this section short. Detailed behavioural claims belong in tests.
   bytes are pinned.
 - Add later RAR 1.5-4.x writer families only where the corresponding read-side
   codec is already strong enough to validate the output:
-  - RAR 2.0/2.6 Unpack20 writer.
-  - RAR 2.9/3.x Unpack29 writer, including PPMd and RARVM filter records.
-  - RAR 3.x/4.x AES per-file and header-encrypted writer.
-- Add RAR 5 writer after the RAR 5 reader is proven.
+  - Improve the RAR 2.0/2.6 Unpack20 writer beyond the current literal-only
+    baseline: matches, solid mode, comments, volumes, and optional encryption.
+  - Improve the RAR 2.9/3.x Unpack29 writer beyond the current literal-only
+    baseline: matches, solid mode, PPMd, RARVM filter records, comments,
+    volumes, and optional encryption.
+  - Improve the RAR 3.x/4.x AES writer beyond the current per-file baseline:
+    encrypted volumes, randomized salts, and header-encrypted archives.
+- Improve the RAR 5 writer beyond the current store-only baseline: compressed
+  Unpack50 members, BLAKE2sp hash records, file encryption, header encryption,
+  comments/service records, volumes, and optional RAR7 target metadata.
 - Keep byte-identical WinRAR output out of scope for baseline writers; expose
   policy hooks so better heuristics can be added without changing wire writers.
 

@@ -247,6 +247,96 @@ fn writes_compressed_rar15_archive_that_reader_extracts() {
 }
 
 #[test]
+fn writes_literal_compressed_rar20_archive_that_reader_extracts() {
+    let entries = [
+        FileEntry {
+            name: b"rar20-alpha.txt",
+            data: b"RAR 2.0 literal writer baseline alpha alpha alpha\n",
+            file_time: 0x5a21_0000,
+            file_attr: 0x20,
+            host_os: 3,
+            password: None,
+            file_comment: None,
+        },
+        FileEntry {
+            name: b"rar20-binary.bin",
+            data: b"\x00\xff\x00\xff\x10\x20\x30\x40\x00\xff",
+            file_time: 0x5a21_0000,
+            file_attr: 0x20,
+            host_os: 3,
+            password: None,
+            file_comment: None,
+        },
+    ];
+    let bytes = write_compressed_archive(
+        &entries,
+        WriterOptions {
+            target: ArchiveVersion::Rar20,
+            features: FeatureSet::store_only(),
+        },
+    )
+    .unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let files: Vec<_> = archive.files().collect();
+
+    assert_eq!(files.len(), 2);
+    assert!(files.iter().all(|file| file.unp_ver == 20));
+    assert!(files.iter().all(|file| file.method == 0x33));
+    assert_eq!(files[0].file_crc, crc32(entries[0].data));
+    assert_eq!(files[1].file_crc, crc32(entries[1].data));
+
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted.len(), 2);
+    assert_eq!(extracted[0].data, entries[0].data);
+    assert_eq!(extracted[1].data, entries[1].data);
+}
+
+#[test]
+fn writes_literal_compressed_rar29_archive_that_reader_extracts() {
+    let entries = [
+        FileEntry {
+            name: b"rar29-alpha.txt",
+            data: b"RAR 2.9 literal writer baseline alpha alpha alpha\n",
+            file_time: 0x5a21_0000,
+            file_attr: 0x20,
+            host_os: 3,
+            password: None,
+            file_comment: None,
+        },
+        FileEntry {
+            name: b"rar29-binary.bin",
+            data: b"\x00\xff\x00\xff\x10\x20\x30\x40\x00\xff",
+            file_time: 0x5a21_0000,
+            file_attr: 0x20,
+            host_os: 3,
+            password: None,
+            file_comment: None,
+        },
+    ];
+    let bytes = write_compressed_archive(
+        &entries,
+        WriterOptions {
+            target: ArchiveVersion::Rar29,
+            features: FeatureSet::store_only(),
+        },
+    )
+    .unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let files: Vec<_> = archive.files().collect();
+
+    assert_eq!(files.len(), 2);
+    assert!(files.iter().all(|file| file.unp_ver == 29));
+    assert!(files.iter().all(|file| file.method == 0x33));
+    assert_eq!(files[0].file_crc, crc32(entries[0].data));
+    assert_eq!(files[1].file_crc, crc32(entries[1].data));
+
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted.len(), 2);
+    assert_eq!(extracted[0].data, entries[0].data);
+    assert_eq!(extracted[1].data, entries[1].data);
+}
+
+#[test]
 fn writes_solid_compressed_rar15_archive_that_reader_extracts() {
     let entries = [
         FileEntry {
@@ -351,6 +441,72 @@ fn writes_encrypted_rar15_archives_that_reader_extracts_with_password() {
         .extract_with_password(Some(b"password"))
         .unwrap();
     assert_eq!(extracted[0].data, compressed[0].data);
+}
+
+#[test]
+fn writes_aes_encrypted_rar3_and_rar4_archives_that_reader_extracts_with_password() {
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+
+    for target in [ArchiveVersion::Rar30, ArchiveVersion::Rar40] {
+        let stored = [StoredEntry {
+            name: b"aes-store.txt",
+            data: b"stored aes secret\n",
+            file_time: 0x5a21_0000,
+            file_attr: 0x20,
+            host_os: 3,
+            password: Some(b"password"),
+            file_comment: None,
+        }];
+        let stored_bytes = write_stored_archive(&stored, WriterOptions { target, features })
+            .unwrap_or_else(|error| panic!("{target:?} stored AES writer failed: {error}"));
+        let stored_archive = Archive::parse(&stored_bytes).unwrap();
+        let stored_file = stored_archive.files().next().unwrap();
+        assert!(stored_file.is_encrypted());
+        assert_eq!(stored_file.unp_ver, 29);
+        assert_eq!(stored_file.salt, Some(*b"rars30\0\0"));
+        assert_eq!(stored_file.pack_size % 16, 0);
+        assert!(matches!(stored_archive.extract(), Err(Error::NeedPassword)));
+        assert!(matches!(
+            stored_archive.extract_with_password(Some(b"wrong")),
+            Err(Error::WrongPasswordOrCorruptData)
+        ));
+        let extracted = stored_archive
+            .extract_with_password(Some(b"password"))
+            .unwrap();
+        assert_eq!(extracted[0].data, stored[0].data);
+
+        let compressed = [FileEntry {
+            name: b"aes-compressed.txt",
+            data: b"compressed aes secret compressed aes secret\n",
+            file_time: 0x5a21_0000,
+            file_attr: 0x20,
+            host_os: 3,
+            password: Some(b"password"),
+            file_comment: None,
+        }];
+        let compressed_bytes =
+            write_compressed_archive(&compressed, WriterOptions { target, features })
+                .unwrap_or_else(|error| panic!("{target:?} compressed AES writer failed: {error}"));
+        let compressed_archive = Archive::parse(&compressed_bytes).unwrap();
+        let compressed_file = compressed_archive.files().next().unwrap();
+        assert!(compressed_file.is_encrypted());
+        assert_eq!(compressed_file.unp_ver, 29);
+        assert_eq!(compressed_file.salt, Some(*b"rars30\0\0"));
+        assert_eq!(compressed_file.pack_size % 16, 0);
+        assert!(matches!(
+            compressed_archive.extract(),
+            Err(Error::NeedPassword)
+        ));
+        assert!(matches!(
+            compressed_archive.extract_with_password(Some(b"wrong")),
+            Err(Error::WrongPasswordOrCorruptData)
+        ));
+        let extracted = compressed_archive
+            .extract_with_password(Some(b"password"))
+            .unwrap();
+        assert_eq!(extracted[0].data, compressed[0].data);
+    }
 }
 
 #[test]

@@ -40,6 +40,111 @@ pub fn unpack29_decode(input: &[u8], output_size: usize) -> Result<Vec<u8>> {
     decoder.decode_member(input, output_size)
 }
 
+pub fn unpack29_encode_literals(input: &[u8]) -> Result<Vec<u8>> {
+    let mut used_main = [false; MAIN_COUNT];
+    for &byte in input {
+        used_main[byte as usize] = true;
+    }
+    used_main[256] = true;
+    let main_symbol_count = used_main.iter().filter(|&&used| used).count();
+    let main_len = literal_code_len(main_symbol_count)?;
+
+    let mut table_lengths = [0u8; TABLE_COUNT];
+    for (symbol, used) in used_main.iter().enumerate() {
+        if *used {
+            table_lengths[symbol] = main_len;
+        }
+    }
+
+    let level_symbols = encode_table_level_symbols(&table_lengths, main_len);
+    let level_lengths = level_code_lengths(main_len);
+    let level_codes = canonical_codes(&level_lengths)?;
+    let main_codes = canonical_codes(&table_lengths[..MAIN_COUNT])?;
+
+    let mut bits = BitWriter::default();
+    bits.write_bit(false); // LZ block.
+    bits.write_bit(false); // do not keep previous tables.
+    for &len in &level_lengths {
+        bits.write_bits(len as u32, 4);
+    }
+    for symbol in level_symbols {
+        let code = level_codes[symbol].ok_or(Error::InvalidData(
+            "RAR 2.9 encoder missing level Huffman code",
+        ))?;
+        bits.write_bits(code.code as u32, code.len);
+    }
+    for &byte in input {
+        let code = main_codes[byte as usize].ok_or(Error::InvalidData(
+            "RAR 2.9 encoder missing literal Huffman code",
+        ))?;
+        bits.write_bits(code.code as u32, code.len);
+    }
+    let end = main_codes[256].ok_or(Error::InvalidData(
+        "RAR 2.9 encoder missing end-of-block Huffman code",
+    ))?;
+    bits.write_bits(end.code as u32, end.len);
+    bits.write_bit(true); // end member, no following table.
+    Ok(bits.finish())
+}
+
+fn literal_code_len(symbol_count: usize) -> Result<u8> {
+    if symbol_count == 0 {
+        return Err(Error::InvalidData("RAR 2.9 encoder has no main symbols"));
+    }
+    let len = usize::BITS - (symbol_count - 1).leading_zeros();
+    u8::try_from(len.max(1)).map_err(|_| Error::InvalidData("RAR 2.9 literal table is too large"))
+}
+
+fn encode_table_level_symbols(lengths: &[u8; TABLE_COUNT], main_len: u8) -> Vec<usize> {
+    lengths
+        .iter()
+        .map(|&len| if len == 0 { 0 } else { main_len as usize })
+        .collect()
+}
+
+fn level_code_lengths(main_len: u8) -> [u8; LEVEL_COUNT] {
+    let mut lengths = [0u8; LEVEL_COUNT];
+    lengths[0] = 1;
+    lengths[main_len as usize] = 1;
+    lengths
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HuffmanCode {
+    code: u16,
+    len: u8,
+}
+
+fn canonical_codes(lengths: &[u8]) -> Result<Vec<Option<HuffmanCode>>> {
+    let mut count = [0u16; 16];
+    for &len in lengths {
+        if len > 15 {
+            return Err(Error::InvalidData("RAR 2.9 Huffman length is too large"));
+        }
+        if len != 0 {
+            count[len as usize] += 1;
+        }
+    }
+
+    let mut next_code = [0u16; 16];
+    let mut code = 0u16;
+    for len in 1..=15 {
+        code = (code + count[len - 1]) << 1;
+        next_code[len] = code;
+    }
+
+    let mut codes = vec![None; lengths.len()];
+    for (symbol, &len) in lengths.iter().enumerate() {
+        if len == 0 {
+            continue;
+        }
+        let code = next_code[len as usize];
+        next_code[len as usize] += 1;
+        codes[symbol] = Some(HuffmanCode { code, len });
+    }
+    Ok(codes)
+}
+
 #[derive(Debug, Clone)]
 pub struct Unpack29 {
     bits: BitReader,
@@ -1076,6 +1181,35 @@ impl PpmdByteReader for BitReader {
     }
 }
 
+#[derive(Default)]
+struct BitWriter {
+    bytes: Vec<u8>,
+    bit_pos: usize,
+}
+
+impl BitWriter {
+    fn write_bits(&mut self, value: u32, count: u8) {
+        for shift in (0..count).rev() {
+            self.write_bit(((value >> shift) & 1) != 0);
+        }
+    }
+
+    fn write_bit(&mut self, bit: bool) {
+        if self.bit_pos.is_multiple_of(8) {
+            self.bytes.push(0);
+        }
+        if bit {
+            let shift = 7 - (self.bit_pos % 8);
+            *self.bytes.last_mut().unwrap() |= 1 << shift;
+        }
+        self.bit_pos += 1;
+    }
+
+    fn finish(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
 fn identify_standard_filter(code: &[u8]) -> Option<StandardFilter> {
     if code.iter().fold(0u8, |acc, &byte| acc ^ byte) != 0 {
         return None;
@@ -1328,7 +1462,10 @@ fn crc32(input: &[u8]) -> u32 {
 mod tests {
     use crate::rarvm::{Instruction, Opcode, Operand, Program};
 
-    use super::{unpack29_decode, StandardFilter, Unpack29, VmFilter, VmProgram, VmProgramKind};
+    use super::{
+        unpack29_decode, unpack29_encode_literals, StandardFilter, Unpack29, VmFilter, VmProgram,
+        VmProgramKind,
+    };
 
     const COMPRESSED_TEXT: &[u8] = &[
         0x09, 0x10, 0x10, 0x93, 0xe4, 0xce, 0x7f, 0xa2, 0xba, 0x80, 0x46, 0x16, 0x82, 0x63, 0xe9,
@@ -1343,6 +1480,14 @@ mod tests {
             unpack29_decode(COMPRESSED_TEXT, 2400).unwrap(),
             expected_text()
         );
+    }
+
+    #[test]
+    fn literal_encoder_round_trips_rar29_lz_blocks() {
+        let input = b"literal-only RAR 2.9 baseline\nwith repeated text literal-only\n";
+        let packed = unpack29_encode_literals(input).unwrap();
+
+        assert_eq!(unpack29_decode(&packed, input.len()).unwrap(), input);
     }
 
     #[test]

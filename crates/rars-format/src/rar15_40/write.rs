@@ -1,5 +1,9 @@
 use super::*;
 use rars_codec::rar13::{unpack15_encode, Unpack15Encoder};
+use rars_codec::rar20::unpack20_encode_literals;
+use rars_codec::rar29::unpack29_encode_literals;
+
+const RARS_RAR30_WRITER_SALT: [u8; 8] = *b"rars30\0\0";
 
 pub fn write_stored_archive(
     entries: &[StoredEntry<'_>],
@@ -56,13 +60,10 @@ pub fn write_compressed_archive_with_comment(
     }
     write_main_header(&mut out, main_flags);
     write_comment_header(&mut out, archive_comment)?;
-    let mut solid_encoder = options.features.solid.then(Unpack15Encoder::new);
+    let mut solid_encoder = (options.target == ArchiveVersion::Rar15 && options.features.solid)
+        .then(Unpack15Encoder::new);
     for (index, entry) in entries.iter().enumerate() {
-        let packed = if let Some(encoder) = solid_encoder.as_mut() {
-            encoder.encode_member(entry.data)?
-        } else {
-            unpack15_encode(entry.data)?
-        };
+        let packed = encode_compressed_payload(entry.data, options.target, solid_encoder.as_mut())?;
         write_compressed_entry(&mut out, entry, &packed, options.target, index != 0)?;
     }
     Ok(out)
@@ -112,7 +113,7 @@ pub fn write_compressed_volumes(
         options,
     )?;
 
-    let packed = unpack15_encode(entry.data)?;
+    let packed = encode_compressed_payload(entry.data, options.target, None)?;
     write_split_volumes(SplitVolumeRecord {
         name: entry.name,
         unpacked: entry.data,
@@ -134,13 +135,21 @@ fn validate_stored_writer_options(
     has_archive_comment: bool,
     has_file_comment: bool,
 ) -> Result<()> {
-    if options.target != ArchiveVersion::Rar15 {
+    if !matches!(
+        options.target,
+        ArchiveVersion::Rar15
+            | ArchiveVersion::Rar20
+            | ArchiveVersion::Rar29
+            | ArchiveVersion::Rar30
+            | ArchiveVersion::Rar40
+    ) {
         return Err(Error::UnsupportedVersion(options.target));
     }
     let mut allowed = FeatureSet::store_only();
-    allowed.file_encryption = options.features.file_encryption;
-    allowed.archive_comment = has_archive_comment;
-    allowed.file_comment = has_file_comment;
+    allowed.file_encryption =
+        writer_supports_file_encryption(options.target) && options.features.file_encryption;
+    allowed.archive_comment = options.target == ArchiveVersion::Rar15 && has_archive_comment;
+    allowed.file_comment = options.target == ArchiveVersion::Rar15 && has_file_comment;
     if options.features != allowed {
         return Err(Error::UnsupportedFeature {
             version: options.target,
@@ -155,14 +164,22 @@ fn validate_compressed_writer_options(
     has_archive_comment: bool,
     has_file_comment: bool,
 ) -> Result<()> {
-    if options.target != ArchiveVersion::Rar15 {
+    if !matches!(
+        options.target,
+        ArchiveVersion::Rar15
+            | ArchiveVersion::Rar20
+            | ArchiveVersion::Rar29
+            | ArchiveVersion::Rar30
+            | ArchiveVersion::Rar40
+    ) {
         return Err(Error::UnsupportedVersion(options.target));
     }
     let mut allowed = FeatureSet::store_only();
-    allowed.solid = options.features.solid;
-    allowed.file_encryption = options.features.file_encryption;
-    allowed.archive_comment = has_archive_comment;
-    allowed.file_comment = has_file_comment;
+    allowed.solid = options.target == ArchiveVersion::Rar15 && options.features.solid;
+    allowed.file_encryption =
+        writer_supports_file_encryption(options.target) && options.features.file_encryption;
+    allowed.archive_comment = options.target == ArchiveVersion::Rar15 && has_archive_comment;
+    allowed.file_comment = options.target == ArchiveVersion::Rar15 && has_file_comment;
     if options.features != allowed {
         return Err(Error::UnsupportedFeature {
             version: options.target,
@@ -172,14 +189,44 @@ fn validate_compressed_writer_options(
     Ok(())
 }
 
+fn encode_compressed_payload(
+    data: &[u8],
+    target: ArchiveVersion,
+    solid_encoder: Option<&mut Unpack15Encoder>,
+) -> Result<Vec<u8>> {
+    match (target, solid_encoder) {
+        (ArchiveVersion::Rar15, Some(encoder)) => encoder.encode_member(data).map_err(Error::from),
+        (ArchiveVersion::Rar15, None) => unpack15_encode(data).map_err(Error::from),
+        (ArchiveVersion::Rar20, None) => unpack20_encode_literals(data).map_err(Error::from),
+        (ArchiveVersion::Rar29 | ArchiveVersion::Rar30 | ArchiveVersion::Rar40, None) => {
+            unpack29_encode_literals(data).map_err(Error::from)
+        }
+        (ArchiveVersion::Rar20, Some(_)) => Err(Error::UnsupportedFeature {
+            version: target,
+            feature: "RAR 2.0 solid writer",
+        }),
+        (ArchiveVersion::Rar29, Some(_)) => Err(Error::UnsupportedFeature {
+            version: target,
+            feature: "RAR 2.9 solid writer",
+        }),
+        _ => Err(Error::UnsupportedVersion(target)),
+    }
+}
+
 fn validate_volume_writer_inputs(
     name: &[u8],
     data: &[u8],
-    _password: Option<&[u8]>,
+    password: Option<&[u8]>,
     file_comment: Option<&[u8]>,
     options: WriterOptions,
 ) -> Result<()> {
     validate_file_entry(name, data)?;
+    if password.is_some() && options.target != ArchiveVersion::Rar15 {
+        return Err(Error::UnsupportedFeature {
+            version: options.target,
+            feature: "RAR 3.x encrypted volume writer",
+        });
+    }
     if file_comment.is_some() {
         return Err(Error::UnsupportedFeature {
             version: options.target,
@@ -236,6 +283,47 @@ fn encrypt_split_packed_data(
     }
 }
 
+fn writer_supports_file_encryption(target: ArchiveVersion) -> bool {
+    matches!(
+        target,
+        ArchiveVersion::Rar15 | ArchiveVersion::Rar30 | ArchiveVersion::Rar40
+    )
+}
+
+fn encrypt_packed_data_for_writer(
+    data: &mut Vec<u8>,
+    target: ArchiveVersion,
+    password: Option<&[u8]>,
+) -> Result<Option<[u8; 8]>> {
+    let Some(password) = password else {
+        return Ok(None);
+    };
+    validate_writer_password(target, Some(password))?;
+    match target {
+        ArchiveVersion::Rar15 => {
+            Rar15Cipher::new(password).crypt_in_place(data);
+            Ok(None)
+        }
+        ArchiveVersion::Rar30 | ArchiveVersion::Rar40 => {
+            let salt = RARS_RAR30_WRITER_SALT;
+            let padded_len =
+                data.len()
+                    .checked_add(15)
+                    .map(|len| len & !15)
+                    .ok_or(Error::InvalidHeader(
+                        "RAR 3.x encrypted data size overflows",
+                    ))?;
+            data.resize(padded_len, 0);
+            Rar30Cipher::new(password, Some(salt)).encrypt_in_place(data);
+            Ok(Some(salt))
+        }
+        _ => Err(Error::UnsupportedFeature {
+            version: target,
+            feature: "RAR writer file encryption",
+        }),
+    }
+}
+
 fn write_main_header(out: &mut Vec<u8>, flags: u16) {
     let start = out.len();
     out.extend_from_slice(&0u16.to_le_bytes());
@@ -281,9 +369,12 @@ fn write_stored_entry(
     target: ArchiveVersion,
 ) -> Result<()> {
     validate_stored_entry(entry)?;
+    validate_writer_password(target, entry.password)?;
     let mut packed = entry.data.to_vec();
-    if let Some(password) = entry.password {
-        Rar15Cipher::new(password).crypt_in_place(&mut packed);
+    let salt = encrypt_packed_data_for_writer(&mut packed, target, entry.password)?;
+    let mut flags = writer_file_flags(entry.password, entry.file_comment, false);
+    if salt.is_some() {
+        flags |= FHD_SALT;
     }
     let file_comment = encode_file_comment(entry.file_comment)?;
     write_file_header_and_data(
@@ -298,7 +389,8 @@ fn write_stored_entry(
             host_os: entry.host_os,
             target,
             method: 0x30,
-            flags: writer_file_flags(entry.password, entry.file_comment, false),
+            flags,
+            salt,
             extra: &file_comment,
         },
     )
@@ -312,9 +404,12 @@ fn write_compressed_entry(
     solid_continuation: bool,
 ) -> Result<()> {
     validate_file_entry(entry.name, entry.data)?;
+    validate_writer_password(target, entry.password)?;
     let mut packed = packed.to_vec();
-    if let Some(password) = entry.password {
-        Rar15Cipher::new(password).crypt_in_place(&mut packed);
+    let salt = encrypt_packed_data_for_writer(&mut packed, target, entry.password)?;
+    let mut flags = writer_file_flags(entry.password, entry.file_comment, solid_continuation);
+    if salt.is_some() {
+        flags |= FHD_SALT;
     }
     let file_comment = encode_file_comment(entry.file_comment)?;
     write_file_header_and_data(
@@ -329,10 +424,21 @@ fn write_compressed_entry(
             host_os: entry.host_os,
             target,
             method: 0x33,
-            flags: writer_file_flags(entry.password, entry.file_comment, solid_continuation),
+            flags,
+            salt,
             extra: &file_comment,
         },
     )
+}
+
+fn validate_writer_password(target: ArchiveVersion, password: Option<&[u8]>) -> Result<()> {
+    if password.is_some() && !writer_supports_file_encryption(target) {
+        return Err(Error::UnsupportedFeature {
+            version: target,
+            feature: "RAR writer file encryption",
+        });
+    }
+    Ok(())
 }
 
 fn validate_stored_entry(entry: &StoredEntry<'_>) -> Result<()> {
@@ -376,6 +482,7 @@ struct FileRecord<'a> {
     target: ArchiveVersion,
     method: u8,
     flags: u16,
+    salt: Option<[u8; 8]>,
     extra: &'a [u8],
 }
 
@@ -387,15 +494,17 @@ fn write_file_header_and_data(out: &mut Vec<u8>, record: FileRecord<'_>) -> Resu
         .map_err(|_| Error::InvalidHeader("RAR 1.5 unpacked size overflows u32"))?;
     let head_size = 32usize
         .checked_add(record.name.len())
+        .and_then(|size| size.checked_add(if record.salt.is_some() { 8 } else { 0 }))
         .and_then(|size| size.checked_add(record.extra.len()))
         .ok_or(Error::InvalidHeader("RAR 1.5 file header size overflows"))?;
     let head_size = u16::try_from(head_size)
         .map_err(|_| Error::InvalidHeader("RAR 1.5 file header size overflows"))?;
     let unp_ver = match record.target {
         ArchiveVersion::Rar15 => 15,
+        ArchiveVersion::Rar20 => 20,
+        ArchiveVersion::Rar29 | ArchiveVersion::Rar30 | ArchiveVersion::Rar40 => 29,
         _ => return Err(Error::UnsupportedVersion(record.target)),
     };
-
     out.extend_from_slice(&0u16.to_le_bytes());
     out.push(FILE_HEAD);
     out.extend_from_slice(&(LONG_BLOCK | record.flags).to_le_bytes());
@@ -410,6 +519,9 @@ fn write_file_header_and_data(out: &mut Vec<u8>, record: FileRecord<'_>) -> Resu
     out.extend_from_slice(&(record.name.len() as u16).to_le_bytes());
     out.extend_from_slice(&record.file_attr.to_le_bytes());
     out.extend_from_slice(record.name);
+    if let Some(salt) = record.salt {
+        out.extend_from_slice(&salt);
+    }
     out.extend_from_slice(record.extra);
     write_file_header_crc(out, start, record.name.len(), record.flags);
     out.extend_from_slice(record.packed);
@@ -489,6 +601,7 @@ fn write_split_volumes(entry: SplitVolumeRecord<'_>) -> Result<Vec<Vec<u8>>> {
                 target: entry.target,
                 method: entry.method,
                 flags: file_flags,
+                salt: None,
                 extra: &[],
             },
         )?;

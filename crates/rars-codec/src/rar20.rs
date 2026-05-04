@@ -36,6 +36,113 @@ pub fn unpack20_decode(input: &[u8], output_size: usize) -> Result<Vec<u8>> {
     decoder.decode_member(input, output_size)
 }
 
+pub fn unpack20_encode_literals(input: &[u8]) -> Result<Vec<u8>> {
+    if input.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut used_literals = [false; 256];
+    for &byte in input {
+        used_literals[byte as usize] = true;
+    }
+    let literal_count = used_literals.iter().filter(|&&used| used).count();
+    let literal_len = literal_code_len(literal_count)?;
+
+    let mut table_lengths = [0u8; TABLE_COUNT];
+    for (symbol, used) in used_literals.iter().enumerate() {
+        if *used {
+            table_lengths[symbol] = literal_len;
+        }
+    }
+
+    let level_symbols = encode_table_level_symbols(&table_lengths, literal_len);
+    let level_lengths = level_code_lengths(&level_symbols, literal_len);
+    let level_codes = canonical_codes(&level_lengths)?;
+    let main_codes = canonical_codes(&table_lengths)?;
+
+    let mut bits = BitWriter::default();
+    bits.write_bits(0, 2); // LZ block, do not keep previous tables.
+    for &len in &level_lengths {
+        bits.write_bits(len as u32, 4);
+    }
+    for symbol in level_symbols {
+        let code = level_codes[symbol].ok_or(Error::InvalidData(
+            "RAR 2.0 encoder missing level Huffman code",
+        ))?;
+        bits.write_bits(code.code as u32, code.len);
+        match symbol {
+            17 => bits.write_bits(0, 3),   // run of 3 zero lengths.
+            18 => bits.write_bits(127, 7), // run of 138 zero lengths.
+            _ => {}
+        }
+    }
+    for &byte in input {
+        let code = main_codes[byte as usize].ok_or(Error::InvalidData(
+            "RAR 2.0 encoder missing literal Huffman code",
+        ))?;
+        bits.write_bits(code.code as u32, code.len);
+    }
+    Ok(bits.finish())
+}
+
+fn literal_code_len(symbol_count: usize) -> Result<u8> {
+    if symbol_count == 0 {
+        return Err(Error::InvalidData("RAR 2.0 encoder has no literal symbols"));
+    }
+    let len = usize::BITS - (symbol_count - 1).leading_zeros();
+    u8::try_from(len.max(1)).map_err(|_| Error::InvalidData("RAR 2.0 literal table is too large"))
+}
+
+fn encode_table_level_symbols(lengths: &[u8; TABLE_COUNT], literal_len: u8) -> Vec<usize> {
+    lengths
+        .iter()
+        .map(|&len| if len == 0 { 0 } else { literal_len as usize })
+        .collect()
+}
+
+fn level_code_lengths(_symbols: &[usize], literal_len: u8) -> [u8; LEVEL_COUNT] {
+    let mut lengths = [0u8; LEVEL_COUNT];
+    lengths[0] = 1;
+    lengths[literal_len as usize] = 1;
+    lengths
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HuffmanCode {
+    code: u16,
+    len: u8,
+}
+
+fn canonical_codes(lengths: &[u8]) -> Result<Vec<Option<HuffmanCode>>> {
+    let mut count = [0u16; 16];
+    for &len in lengths {
+        if len > 15 {
+            return Err(Error::InvalidData("RAR 2.0 Huffman length is too large"));
+        }
+        if len != 0 {
+            count[len as usize] += 1;
+        }
+    }
+
+    let mut next_code = [0u16; 16];
+    let mut code = 0u16;
+    for len in 1..=15 {
+        code = (code + count[len - 1]) << 1;
+        next_code[len] = code;
+    }
+
+    let mut codes = vec![None; lengths.len()];
+    for (symbol, &len) in lengths.iter().enumerate() {
+        if len == 0 {
+            continue;
+        }
+        let code = next_code[len as usize];
+        next_code[len as usize] += 1;
+        codes[symbol] = Some(HuffmanCode { code, len });
+    }
+    Ok(codes)
+}
+
 #[derive(Debug, Clone)]
 pub struct Unpack20 {
     bits: BitReader,
@@ -678,9 +785,38 @@ impl BitReader {
     }
 }
 
+#[derive(Default)]
+struct BitWriter {
+    bytes: Vec<u8>,
+    bit_pos: usize,
+}
+
+impl BitWriter {
+    fn write_bits(&mut self, value: u32, count: u8) {
+        for shift in (0..count).rev() {
+            self.write_bit(((value >> shift) & 1) != 0);
+        }
+    }
+
+    fn write_bit(&mut self, bit: bool) {
+        if self.bit_pos.is_multiple_of(8) {
+            self.bytes.push(0);
+        }
+        if bit {
+            let shift = 7 - (self.bit_pos % 8);
+            *self.bytes.last_mut().unwrap() |= 1 << shift;
+        }
+        self.bit_pos += 1;
+    }
+
+    fn finish(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{unpack20_decode, Unpack20};
+    use super::{unpack20_decode, unpack20_encode_literals, BitWriter, Unpack20};
 
     const AUTOREJ_PACKED: &[u8] = &[
         0x09, 0x14, 0x0c, 0x94, 0x00, 0x00, 0x00, 0x00, 0x00, 0xce, 0xf8, 0x1f, 0xc1, 0xe6, 0x05,
@@ -740,7 +876,7 @@ mod tests {
     }
 
     fn synthetic_audio_block(samples: usize) -> Vec<u8> {
-        let mut bits = TestBitWriter::default();
+        let mut bits = BitWriter::default();
 
         bits.write_bits(0b10, 2); // audio block, do not keep previous tables.
         bits.write_bits(0, 2); // one channel.
@@ -763,32 +899,11 @@ mod tests {
         bits.finish()
     }
 
-    #[derive(Default)]
-    struct TestBitWriter {
-        bytes: Vec<u8>,
-        bit_pos: usize,
-    }
+    #[test]
+    fn literal_encoder_round_trips_rar20_lz_blocks() {
+        let input = b"literal-only RAR 2.0 baseline\nwith repeated text literal-only\n";
+        let packed = unpack20_encode_literals(input).unwrap();
 
-    impl TestBitWriter {
-        fn write_bit(&mut self, bit: bool) {
-            if self.bit_pos.is_multiple_of(8) {
-                self.bytes.push(0);
-            }
-            if bit {
-                let shift = 7 - (self.bit_pos % 8);
-                *self.bytes.last_mut().unwrap() |= 1 << shift;
-            }
-            self.bit_pos += 1;
-        }
-
-        fn write_bits(&mut self, value: u32, count: u8) {
-            for shift in (0..count).rev() {
-                self.write_bit(((value >> shift) & 1) != 0);
-            }
-        }
-
-        fn finish(self) -> Vec<u8> {
-            self.bytes
-        }
+        assert_eq!(unpack20_decode(&packed, input.len()).unwrap(), input);
     }
 }

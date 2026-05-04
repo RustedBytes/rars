@@ -1,6 +1,6 @@
 use rars_codec::rar50::{decode_lz, parse_compressed_block, read_table_lengths, DecodeTables};
-use rars_format::rar50::{extract_volumes, Archive, Rev5Volume};
-use rars_format::{detect_archive_family, ArchiveFamily, Error};
+use rars_format::rar50::{extract_volumes, write_stored_archive, Archive, Rev5Volume};
+use rars_format::{detect_archive_family, rar50, ArchiveFamily, ArchiveVersion, Error, FeatureSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -72,6 +72,56 @@ fn parses_and_extracts_rar50_stored_file() {
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"hello.txt");
     assert_eq!(extracted[0].data, b"Hello, RAR 5.0 fixture world.\n");
+}
+
+#[test]
+fn writes_store_only_rar50_archive_that_reader_extracts() {
+    let entries = [
+        rar50::StoredEntry {
+            name: b"hello5.txt",
+            data: b"hello from rars rar5 writer\n",
+            mtime: Some(0x5a21_0000),
+            attributes: 0x20,
+            host_os: 3,
+        },
+        rar50::StoredEntry {
+            name: b"empty.bin",
+            data: b"",
+            mtime: None,
+            attributes: 0x20,
+            host_os: 3,
+        },
+    ];
+    let bytes = write_stored_archive(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features: FeatureSet::store_only(),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(&bytes[..8], b"Rar!\x1a\x07\x01\0");
+    let archive = Archive::parse(&bytes).unwrap();
+    assert_eq!(archive.main.archive_flags, 0);
+    let files: Vec<_> = archive.files().collect();
+    assert_eq!(files.len(), 2);
+    assert!(files.iter().all(|file| file.is_stored()));
+    assert_eq!(
+        files[0].data_crc32,
+        Some(rars_format::rar15_40::crc32(entries[0].data))
+    );
+    assert_eq!(
+        files[1].data_crc32,
+        Some(rars_format::rar15_40::crc32(entries[1].data))
+    );
+
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].name, entries[0].name);
+    assert_eq!(extracted[0].data, entries[0].data);
+    assert_eq!(extracted[0].file_time, 0x5a21_0000);
+    assert_eq!(extracted[1].name, entries[1].name);
+    assert_eq!(extracted[1].data, entries[1].data);
 }
 
 #[test]

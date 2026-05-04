@@ -365,11 +365,12 @@ pub struct ArchiveWriter {
 impl ArchiveWriter {
     pub fn new(target: ArchiveVersion) -> Result<Self> {
         match target.family() {
-            ArchiveFamily::Rar13 | ArchiveFamily::Rar15To40 => Ok(Self {
-                target,
-                features: FeatureSet::store_only(),
-            }),
-            ArchiveFamily::Rar50Plus => Err(Error::UnsupportedVersion(target)),
+            ArchiveFamily::Rar13 | ArchiveFamily::Rar15To40 | ArchiveFamily::Rar50Plus => {
+                Ok(Self {
+                    target,
+                    features: FeatureSet::store_only(),
+                })
+            }
         }
     }
 
@@ -483,6 +484,16 @@ impl ArchiveWriter {
             max_packed_per_volume,
         )
     }
+
+    pub fn write_rar50_stored(self, entries: &[rar50::StoredEntry<'_>]) -> Result<Vec<u8>> {
+        rar50::write_stored_archive(
+            entries,
+            rar50::WriterOptions {
+                target: self.target,
+                features: self.features,
+            },
+        )
+    }
 }
 
 #[cfg(test)]
@@ -545,6 +556,60 @@ mod tests {
         assert_eq!(
             extracted[0].data,
             b"facade compressed facade compressed facade compressed\n"
+        );
+    }
+
+    #[test]
+    fn archive_writer_creates_rar20_compressed_archive() {
+        let bytes = ArchiveWriter::new(ArchiveVersion::Rar20)
+            .unwrap()
+            .write_rar15_compressed(&[rar15_40::FileEntry {
+                name: b"rar20.txt",
+                data: b"facade rar20 literal compressed payload\n",
+                file_time: 0,
+                file_attr: 0x20,
+                host_os: 3,
+                password: None,
+                file_comment: None,
+            }])
+            .unwrap();
+
+        let archive = ArchiveReader::read(&bytes).unwrap();
+        assert_eq!(archive.family(), ArchiveFamily::Rar15To40);
+        let raw = archive.as_rar15_40().unwrap();
+        let file = raw.files().next().unwrap();
+        assert_eq!(file.unp_ver, 20);
+        assert_eq!(file.method, 0x33);
+        assert_eq!(
+            archive.extract(None).unwrap()[0].data,
+            b"facade rar20 literal compressed payload\n"
+        );
+    }
+
+    #[test]
+    fn archive_writer_creates_rar29_compressed_archive() {
+        let bytes = ArchiveWriter::new(ArchiveVersion::Rar29)
+            .unwrap()
+            .write_rar15_compressed(&[rar15_40::FileEntry {
+                name: b"rar29.txt",
+                data: b"facade rar29 literal compressed payload\n",
+                file_time: 0,
+                file_attr: 0x20,
+                host_os: 3,
+                password: None,
+                file_comment: None,
+            }])
+            .unwrap();
+
+        let archive = ArchiveReader::read(&bytes).unwrap();
+        assert_eq!(archive.family(), ArchiveFamily::Rar15To40);
+        let raw = archive.as_rar15_40().unwrap();
+        let file = raw.files().next().unwrap();
+        assert_eq!(file.unp_ver, 29);
+        assert_eq!(file.method, 0x33);
+        assert_eq!(
+            archive.extract(None).unwrap()[0].data,
+            b"facade rar29 literal compressed payload\n"
         );
     }
 
@@ -734,5 +799,48 @@ mod tests {
             extracted[0].data,
             b"facade encrypted split facade encrypted split\n"
         );
+    }
+
+    #[test]
+    fn archive_writer_creates_rar30_aes_encrypted_compressed_archive() {
+        let mut features = FeatureSet::store_only();
+        features.file_encryption = true;
+        let bytes = ArchiveWriter::new(ArchiveVersion::Rar30)
+            .unwrap()
+            .with_features(features)
+            .write_rar15_compressed(&[rar15_40::FileEntry {
+                name: b"rar30-secret.txt",
+                data: b"facade rar30 aes encrypted payload\n",
+                file_time: 0,
+                file_attr: 0x20,
+                host_os: 3,
+                password: Some(b"password"),
+                file_comment: None,
+            }])
+            .unwrap();
+
+        let archive = ArchiveReader::read(&bytes).unwrap();
+        assert!(matches!(archive.extract(None), Err(Error::NeedPassword)));
+        let extracted = archive.extract(Some(b"password")).unwrap();
+        assert_eq!(extracted[0].data, b"facade rar30 aes encrypted payload\n");
+    }
+
+    #[test]
+    fn archive_writer_creates_rar50_stored_archive() {
+        let bytes = ArchiveWriter::new(ArchiveVersion::Rar50)
+            .unwrap()
+            .write_rar50_stored(&[rar50::StoredEntry {
+                name: b"rar5-store.txt",
+                data: b"facade rar5 stored payload\n",
+                mtime: Some(0),
+                attributes: 0x20,
+                host_os: 3,
+            }])
+            .unwrap();
+
+        let archive = ArchiveReader::read(&bytes).unwrap();
+        assert_eq!(archive.family(), ArchiveFamily::Rar50Plus);
+        let extracted = archive.extract(None).unwrap();
+        assert_eq!(extracted[0].data, b"facade rar5 stored payload\n");
     }
 }

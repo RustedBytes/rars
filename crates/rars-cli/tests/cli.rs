@@ -634,6 +634,58 @@ fn creates_rar15_compressed_archive_that_can_be_tested() {
 }
 
 #[test]
+fn creates_rar20_compressed_archive_that_can_be_tested() {
+    let dir = scratch("create-rar20-compressed");
+    let source = dir.join("hello.txt");
+    let archive = dir.join("created20.rar");
+    fs::write(&source, b"hello from rar20 cli hello from rar20 cli\n").unwrap();
+
+    let create = rars()
+        .args(["a", "--format", "rar20"])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(create.status.success(), "stderr: {}", stderr(&create));
+
+    let info = rars().arg("info").arg(&archive).output().unwrap();
+    assert!(info.status.success(), "stderr: {}", stderr(&info));
+    let info_stdout = stdout(&info);
+    assert!(info_stdout.contains("method=0x33"));
+    assert!(info_stdout.contains("ver=20"));
+
+    let test = rars().arg("test").arg(&archive).output().unwrap();
+    assert!(test.status.success(), "stderr: {}", stderr(&test));
+    assert!(stdout(&test).contains("OK hello.txt"));
+}
+
+#[test]
+fn creates_rar29_compressed_archive_that_can_be_tested() {
+    let dir = scratch("create-rar29-compressed");
+    let source = dir.join("hello.txt");
+    let archive = dir.join("created29.rar");
+    fs::write(&source, b"hello from rar29 cli hello from rar29 cli\n").unwrap();
+
+    let create = rars()
+        .args(["a", "--format", "rar29"])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(create.status.success(), "stderr: {}", stderr(&create));
+
+    let info = rars().arg("info").arg(&archive).output().unwrap();
+    assert!(info.status.success(), "stderr: {}", stderr(&info));
+    let info_stdout = stdout(&info);
+    assert!(info_stdout.contains("method=0x33"));
+    assert!(info_stdout.contains("ver=29"));
+
+    let test = rars().arg("test").arg(&archive).output().unwrap();
+    assert!(test.status.success(), "stderr: {}", stderr(&test));
+    assert!(stdout(&test).contains("OK hello.txt"));
+}
+
+#[test]
 fn creates_rar15_archive_comment() {
     let dir = scratch("create-rar15-comment");
     let source = dir.join("commented.txt");
@@ -1025,6 +1077,71 @@ fn creates_rar15_encrypted_multivolume_archive_that_can_be_tested() {
         .unwrap();
     assert!(test.status.success(), "stderr: {}", stderr(&test));
     assert!(stdout(&test).contains("OK secret.txt"));
+}
+
+#[test]
+fn creates_rar30_aes_encrypted_archive_that_can_be_tested() {
+    let dir = scratch("create-rar30-aes-encrypted");
+    let source = dir.join("secret.txt");
+    let archive = dir.join("created.rar");
+    fs::write(&source, b"rar30 aes encrypted cli payload\n").unwrap();
+
+    let create = rars()
+        .args(["a", "--password", "pass", "--format", "rar30"])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(create.status.success(), "stderr: {}", stderr(&create));
+
+    let missing_password = rars().arg("test").arg(&archive).output().unwrap();
+    assert!(!missing_password.status.success());
+    assert!(stderr(&missing_password).contains("password is required"));
+
+    let test = rars()
+        .args(["test", "--password", "pass"])
+        .arg(&archive)
+        .output()
+        .unwrap();
+    assert!(test.status.success(), "stderr: {}", stderr(&test));
+    assert!(stdout(&test).contains("OK secret.txt"));
+}
+
+#[test]
+fn creates_rar50_stored_archive_that_can_be_tested() {
+    let dir = scratch("create-rar50-stored");
+    let source = dir.join("payload.txt");
+    let archive = dir.join("created.rar");
+    fs::write(&source, b"rar50 stored cli payload\n").unwrap();
+
+    let create = rars()
+        .args(["a", "--format", "rar50", "--store"])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(create.status.success(), "stderr: {}", stderr(&create));
+
+    let test = rars().arg("test").arg(&archive).output().unwrap();
+    assert!(test.status.success(), "stderr: {}", stderr(&test));
+    assert!(stdout(&test).contains("OK payload.txt"));
+}
+
+#[test]
+fn rejects_rar50_compressed_writer_until_implemented() {
+    let dir = scratch("reject-rar50-compressed");
+    let source = dir.join("payload.txt");
+    let archive = dir.join("created.rar");
+    fs::write(&source, b"rar50 compressed later\n").unwrap();
+
+    let output = rars()
+        .args(["a", "--format", "rar50"])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("RAR 5 compressed writer is not implemented yet"));
 }
 
 #[test]

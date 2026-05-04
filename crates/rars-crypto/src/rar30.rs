@@ -1,4 +1,4 @@
-use aes::cipher::{BlockDecrypt, KeyInit};
+use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
 use aes::Aes128;
 
 const HASH_ROUNDS: u32 = 0x40000;
@@ -21,6 +21,20 @@ impl Rar30Cipher {
         for block in data.chunks_exact_mut(16) {
             self.decrypt_block(block);
         }
+    }
+
+    pub fn encrypt_in_place(&mut self, data: &mut [u8]) {
+        for block in data.chunks_exact_mut(16) {
+            self.encrypt_block(block);
+        }
+    }
+
+    pub fn encrypt_block(&mut self, block: &mut [u8]) {
+        for (byte, iv_byte) in block.iter_mut().zip(self.iv) {
+            *byte ^= iv_byte;
+        }
+        self.cipher.encrypt_block(block.into());
+        self.iv.copy_from_slice(block);
     }
 
     pub fn decrypt_block(&mut self, block: &mut [u8]) {
@@ -201,4 +215,22 @@ fn sha1_transform(state: &mut [u32; 5], block: &[u8], writeback: Option<&mut [u8
     state[2] = state[2].wrapping_add(c);
     state[3] = state[3].wrapping_add(d);
     state[4] = state[4].wrapping_add(e);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rar30_aes_encrypt_decrypt_round_trips_blocks() {
+        let salt = Some(*b"rarsalt!");
+        let mut data = *b"0123456789abcdefRAR AES CBC data";
+        let plain = data;
+
+        Rar30Cipher::new(b"password", salt).encrypt_in_place(&mut data);
+        assert_ne!(data, plain);
+
+        Rar30Cipher::new(b"password", salt).decrypt_in_place(&mut data);
+        assert_eq!(data, plain);
+    }
 }

@@ -11,11 +11,13 @@ use std::sync::Arc;
 
 mod blake2sp;
 mod extract;
+mod write;
 
 pub use extract::{
     extract_volumes, extract_volumes_to, extract_volumes_to_with_password,
     extract_volumes_with_password,
 };
+pub use write::{write_stored_archive, StoredEntry, WriterOptions};
 
 const HEAD_MAIN: u64 = 1;
 const HEAD_FILE: u64 = 2;

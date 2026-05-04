@@ -16,7 +16,7 @@ use std::path::{Component, Path, PathBuf};
 type CliResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 const ADD_USAGE: &str =
-    "usage: rars a [--password <password>] --format <rar14|rar15> [--store] [--solid] [--comment <text>] [--file-comment <text>] [--volume-size <bytes>] <archive> <files...>";
+    "usage: rars a [--password <password>] --format <rar14|rar15|rar20|rar29|rar30|rar40|rar50> [--store] [--solid] [--comment <text>] [--file-comment <text>] [--volume-size <bytes>] <archive> <files...>";
 const DOS_DIRECTORY_ATTR: u8 = 0x10;
 
 fn main() {
@@ -277,6 +277,11 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
     let target = match args[1].as_str() {
         "rar14" => ArchiveVersion::Rar14,
         "rar15" => ArchiveVersion::Rar15,
+        "rar20" => ArchiveVersion::Rar20,
+        "rar29" => ArchiveVersion::Rar29,
+        "rar30" => ArchiveVersion::Rar30,
+        "rar40" => ArchiveVersion::Rar40,
+        "rar50" => ArchiveVersion::Rar50,
         _ => return Err(ADD_USAGE.into()),
     };
     let mut store = false;
@@ -334,22 +339,94 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
     if input_paths.is_empty() {
         return Err("no input files".into());
     }
-    if target == ArchiveVersion::Rar15 {
-        validate_rar15_add_options(
+    if matches!(
+        target,
+        ArchiveVersion::Rar15
+            | ArchiveVersion::Rar20
+            | ArchiveVersion::Rar29
+            | ArchiveVersion::Rar30
+            | ArchiveVersion::Rar40
+    ) {
+        validate_rar15_40_add_options(
+            target,
+            password.as_deref(),
             archive_comment.as_deref(),
             file_comment.as_deref(),
             volume_size,
+            solid,
         )?;
     }
-    if matches!(target, ArchiveVersion::Rar14 | ArchiveVersion::Rar15)
-        && volume_size.is_some()
+    if matches!(
+        target,
+        ArchiveVersion::Rar14
+            | ArchiveVersion::Rar15
+            | ArchiveVersion::Rar20
+            | ArchiveVersion::Rar29
+            | ArchiveVersion::Rar30
+            | ArchiveVersion::Rar40
+    ) && volume_size.is_some()
         && input_paths.len() != 1
     {
         return Err("multivolume writer currently supports one input file".into());
     }
 
     let owned = read_inputs(input_paths, password.as_deref())?;
-    if target == ArchiveVersion::Rar15 {
+    if target == ArchiveVersion::Rar50 {
+        if !store {
+            return Err("RAR 5 compressed writer is not implemented yet; use --store".into());
+        }
+        if password.is_some() {
+            return Err("RAR 5 writer encryption is not implemented yet".into());
+        }
+        if solid {
+            return Err("RAR 5 solid writer is not implemented yet".into());
+        }
+        if archive_comment.is_some() || file_comment.is_some() {
+            return Err("RAR 5 writer comments are not implemented yet".into());
+        }
+        if volume_size.is_some() {
+            return Err("RAR 5 volume writer is not implemented yet".into());
+        }
+        let entries: Vec<_> = owned
+            .iter()
+            .map(|entry| {
+                if entry.file_attr == DOS_DIRECTORY_ATTR {
+                    return Err("RAR 5 writer currently rejects directories");
+                }
+                Ok(rars::rar50::StoredEntry {
+                    name: &entry.name,
+                    data: &entry.data,
+                    mtime: Some(0),
+                    attributes: u64::from(entry.file_attr),
+                    host_os: 3,
+                })
+            })
+            .collect::<std::result::Result<_, _>>()?;
+        let bytes = rars::rar50::write_stored_archive(
+            &entries,
+            rars::rar50::WriterOptions {
+                target,
+                features: FeatureSet::store_only(),
+            },
+        )?;
+        fs::write(&archive_path, bytes).map_err(|err| {
+            format!(
+                "failed to write archive '{}': {err}",
+                archive_path.display()
+            )
+        })?;
+        println!("created {}", archive_path.display());
+        return Ok(());
+    }
+
+    if matches!(
+        target,
+        ArchiveVersion::Rar15
+            | ArchiveVersion::Rar20
+            | ArchiveVersion::Rar29
+            | ArchiveVersion::Rar30
+            | ArchiveVersion::Rar40
+    ) {
         let options = Rar15WriterOptions {
             target,
             features: {
@@ -525,16 +602,39 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
     Ok(())
 }
 
-fn validate_rar15_add_options(
+fn validate_rar15_40_add_options(
+    target: ArchiveVersion,
+    password: Option<&[u8]>,
     archive_comment: Option<&[u8]>,
     file_comment: Option<&[u8]>,
     volume_size: Option<usize>,
+    solid: bool,
 ) -> CliResult<()> {
     if archive_comment.is_some() && volume_size.is_some() {
         return Err("RAR 1.5 writer does not support comments on volumes yet".into());
     }
     if file_comment.is_some() && volume_size.is_some() {
         return Err("RAR 1.5 writer does not support file comments on volumes yet".into());
+    }
+    if matches!(
+        target,
+        ArchiveVersion::Rar20
+            | ArchiveVersion::Rar29
+            | ArchiveVersion::Rar30
+            | ArchiveVersion::Rar40
+    ) {
+        if password.is_some() && volume_size.is_some() {
+            return Err("RAR 3.x encrypted volume writer is not implemented yet".into());
+        }
+        if password.is_some() && matches!(target, ArchiveVersion::Rar20 | ArchiveVersion::Rar29) {
+            return Err("RAR 2.0/2.9 writer encryption is not implemented yet".into());
+        }
+        if archive_comment.is_some() || file_comment.is_some() {
+            return Err("RAR 2.0+ writer comments are not implemented yet".into());
+        }
+        if solid {
+            return Err("RAR 2.0+ solid writer is not implemented yet".into());
+        }
     }
     Ok(())
 }
