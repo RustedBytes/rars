@@ -22,6 +22,7 @@ const HEAD_FILE: u64 = 2;
 const HEAD_SERVICE: u64 = 3;
 const HEAD_CRYPT: u64 = 4;
 const HEAD_END: u64 = 5;
+const REV5_SIGNATURE: &[u8] = b"Rar!\x1aRev";
 
 const HFL_EXTRA: u64 = 0x0001;
 const HFL_DATA: u64 = 0x0002;
@@ -44,6 +45,10 @@ const MHEXTRA_LOCATOR_RECOVERY: u64 = 0x0002;
 
 const FHEXTRA_CRYPT: u64 = 0x01;
 const FHEXTRA_HASH: u64 = 0x02;
+const FHEXTRA_SUBDATA: u64 = 0x07;
+const MHEXTRA_ARCHIVE_METADATA: u64 = 0x02;
+const MHEXTRA_ARCHIVE_METADATA_NAME: u64 = 0x0001;
+const MHEXTRA_ARCHIVE_METADATA_TIME: u64 = 0x0002;
 
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -87,8 +92,16 @@ impl MainHeader {
     }
 
     pub fn locator(&self) -> Option<&LocatorRecord> {
-        self.extras.first().map(|record| match record {
-            MainExtraRecord::Locator(locator) => locator,
+        self.extras.iter().find_map(|record| match record {
+            MainExtraRecord::Locator(locator) => Some(locator),
+            _ => None,
+        })
+    }
+
+    pub fn archive_metadata(&self) -> Option<&ArchiveMetadataRecord> {
+        self.extras.iter().find_map(|record| match record {
+            MainExtraRecord::ArchiveMetadata(metadata) => Some(metadata),
+            _ => None,
         })
     }
 }
@@ -97,6 +110,7 @@ impl MainHeader {
 #[non_exhaustive]
 pub enum MainExtraRecord {
     Locator(LocatorRecord),
+    ArchiveMetadata(ArchiveMetadataRecord),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,6 +119,14 @@ pub struct LocatorRecord {
     pub flags: u64,
     pub quick_open_offset: Option<u64>,
     pub recovery_record_offset: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ArchiveMetadataRecord {
+    pub flags: u64,
+    pub name: Option<Vec<u8>>,
+    pub creation_time: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,8 +167,10 @@ pub struct FileHeader {
     pub host_os: u64,
     pub name: Vec<u8>,
     pub hash: Option<FileHash>,
+    pub service_data: Option<Vec<u8>>,
     pub encrypted: bool,
     pub encryption: Option<FileEncryption>,
+    crypto: Option<FileCryptoState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,6 +182,13 @@ pub struct FileHash {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
+pub struct RecoveryRecord {
+    pub percent: u64,
+    pub payload_size: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FileEncryption {
     pub version: u64,
     pub flags: u64,
@@ -165,6 +196,31 @@ pub struct FileEncryption {
     pub salt: [u8; 16],
     pub iv: [u8; 16],
     pub check_value: Option<[u8; 12]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileCryptoState {
+    keys: Rar50Keys,
+    iv: [u8; 16],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Rev5Volume {
+    pub version: u8,
+    pub data_count: u16,
+    pub recovery_count: u16,
+    pub recovery_number: u16,
+    pub payload_crc32: u32,
+    pub payload_size: u64,
+    pub data_volumes: Vec<Rev5DataVolume>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Rev5DataVolume {
+    pub file_size: u64,
+    pub crc32: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -269,6 +325,27 @@ impl FileHeader {
     pub fn verify_integrity(&self, data: &[u8]) -> Result<()> {
         self.verify_crc32(data)?;
         self.verify_hash(data)
+    }
+
+    pub fn recovery_record(&self) -> Result<Option<RecoveryRecord>> {
+        if self.name != b"RR" {
+            return Ok(None);
+        }
+        let Some(data) = &self.service_data else {
+            return Err(Error::InvalidHeader(
+                "RAR 5 recovery service is missing service data",
+            ));
+        };
+        let (percent, len) = read_vint_at(data, 0, data.len())?;
+        if len != data.len() {
+            return Err(Error::InvalidHeader(
+                "RAR 5 recovery service data has trailing bytes",
+            ));
+        }
+        Ok(Some(RecoveryRecord {
+            percent,
+            payload_size: self.packed_size(),
+        }))
     }
 }
 
@@ -437,6 +514,97 @@ impl Archive {
     }
 }
 
+impl Rev5Volume {
+    pub fn parse(input: &[u8]) -> Result<Self> {
+        if !input.starts_with(REV5_SIGNATURE) {
+            return Err(Error::UnsupportedSignature);
+        }
+        if input.len() < 16 {
+            return Err(Error::TooShort);
+        }
+        let header_crc = read_u32(input, 8)?;
+        let header_size = read_u32(input, 12)? as usize;
+        if header_size <= 5 || header_size > 0x100000 {
+            return Err(Error::InvalidHeader("RAR 5 REV header size is invalid"));
+        }
+        let header_end = 16usize
+            .checked_add(header_size)
+            .ok_or(Error::InvalidHeader("RAR 5 REV header size overflows"))?;
+        if header_end > input.len() {
+            return Err(Error::TooShort);
+        }
+        let actual_header_crc = crc32(&input[12..header_end]);
+        if actual_header_crc != header_crc {
+            return Err(Error::Crc32Mismatch {
+                expected: header_crc,
+                actual: actual_header_crc,
+            });
+        }
+
+        let body = &input[16..header_end];
+        if body.len() < 11 {
+            return Err(Error::TooShort);
+        }
+        let version = body[0];
+        if version != 1 {
+            return Err(Error::UnsupportedFeature {
+                version: crate::version::ArchiveVersion::Rar50,
+                feature: "RAR 5 REV version",
+            });
+        }
+        let data_count = u16::from_le_bytes(body[1..3].try_into().unwrap());
+        let recovery_count = u16::from_le_bytes(body[3..5].try_into().unwrap());
+        let recovery_number = u16::from_le_bytes(body[5..7].try_into().unwrap());
+        let payload_crc32 = u32::from_le_bytes(body[7..11].try_into().unwrap());
+        let first_recovery_number = u32::from(data_count);
+        let recovery_end = first_recovery_number + u32::from(recovery_count);
+        let recovery_number = u32::from(recovery_number);
+        if recovery_count == 0
+            || recovery_number < first_recovery_number
+            || recovery_number >= recovery_end
+        {
+            return Err(Error::InvalidHeader("RAR 5 REV volume number is invalid"));
+        }
+
+        let expected_table_len = data_count as usize * 12;
+        if body.len() != 11 + expected_table_len {
+            return Err(Error::InvalidHeader(
+                "RAR 5 REV metadata table size is invalid",
+            ));
+        }
+        let mut data_volumes = Vec::with_capacity(data_count as usize);
+        let mut pos = 11;
+        for _ in 0..data_count {
+            let file_size = u64::from_le_bytes(body[pos..pos + 8].try_into().unwrap());
+            let crc = u32::from_le_bytes(body[pos + 8..pos + 12].try_into().unwrap());
+            data_volumes.push(Rev5DataVolume {
+                file_size,
+                crc32: crc,
+            });
+            pos += 12;
+        }
+
+        let payload = &input[header_end..];
+        let actual_payload_crc = crc32(payload);
+        if actual_payload_crc != payload_crc32 {
+            return Err(Error::Crc32Mismatch {
+                expected: payload_crc32,
+                actual: actual_payload_crc,
+            });
+        }
+
+        Ok(Self {
+            version,
+            data_count,
+            recovery_count,
+            recovery_number: recovery_number as u16,
+            payload_crc32,
+            payload_size: payload.len() as u64,
+            data_volumes,
+        })
+    }
+}
+
 fn parse_main_header_bytes(parsed: &ParsedBlockHeader) -> Result<MainHeader> {
     let mut reader = HeaderReader::new(&parsed.header, parsed.type_specific_range.clone())?;
     let archive_flags = reader.read_vint()?;
@@ -474,6 +642,35 @@ fn parse_main_extra_area(input: &[u8], range: Range<usize>) -> Result<Vec<MainEx
                 flags,
                 quick_open_offset,
                 recovery_record_offset,
+            }));
+            Ok(())
+        }
+        MHEXTRA_ARCHIVE_METADATA => {
+            let mut reader = SliceReader::new(input, data.start, data.end);
+            let flags = reader.read_vint()?;
+            let name = if flags & MHEXTRA_ARCHIVE_METADATA_NAME != 0 {
+                let name_len = usize_from_u64(
+                    reader.read_vint()?,
+                    "RAR 5 archive metadata name length overflows usize",
+                )?;
+                Some(reader.read_bytes(name_len)?.to_vec())
+            } else {
+                None
+            };
+            let creation_time = if flags & MHEXTRA_ARCHIVE_METADATA_TIME != 0 {
+                Some(reader.read_u64()?)
+            } else {
+                None
+            };
+            if reader.pos != reader.end {
+                return Err(Error::InvalidHeader(
+                    "RAR 5 archive metadata record has trailing bytes",
+                ));
+            }
+            records.push(MainExtraRecord::ArchiveMetadata(ArchiveMetadataRecord {
+                flags,
+                name,
+                creation_time,
             }));
             Ok(())
         }
@@ -515,8 +712,10 @@ fn parse_file_header_bytes(parsed: &ParsedBlockHeader) -> Result<FileHeader> {
         host_os,
         name,
         hash: None,
+        service_data: None,
         encrypted: false,
         encryption: None,
+        crypto: None,
     };
     parse_file_extra_area(&parsed.header, parsed.extra_range.clone(), &mut file)?;
     Ok(file)
@@ -538,6 +737,9 @@ fn parse_file_extra_area(input: &[u8], range: Range<usize>, file: &mut FileHeade
                     hash_type,
                     data: input[data.start + hash_type_len..data.end].to_vec(),
                 });
+            }
+            FHEXTRA_SUBDATA => {
+                file.service_data = Some(input[data].to_vec());
             }
             _ => {}
         }
@@ -609,6 +811,35 @@ fn parse_archive_encryption_header(
             .map_err(map_rar50_crypto_error)?;
     }
     Ok(keys)
+}
+
+fn attach_file_crypto(file: &mut FileHeader, password: Option<&[u8]>) -> Result<()> {
+    if !file.encrypted || file.crypto.is_some() {
+        return Ok(());
+    }
+    let Some(password) = password else {
+        return Ok(());
+    };
+    let encryption = file.encryption.as_ref().ok_or(Error::InvalidHeader(
+        "RAR 5 encrypted file is missing encryption record",
+    ))?;
+    if encryption.version != 0 {
+        return Err(Error::UnsupportedFeature {
+            version: crate::version::ArchiveVersion::Rar50,
+            feature: "RAR 5 unknown file encryption version",
+        });
+    }
+    let keys = Rar50Keys::derive(password, encryption.salt, encryption.kdf_count)
+        .map_err(map_rar50_crypto_error)?;
+    if let Some(check_value) = encryption.check_value {
+        keys.check_password(&check_value)
+            .map_err(map_rar50_crypto_error)?;
+    }
+    file.crypto = Some(FileCryptoState {
+        keys,
+        iv: encryption.iv,
+    });
+    Ok(())
 }
 
 fn map_rar50_crypto_error(error: rars_crypto::rar50::Error) -> Error {
@@ -683,12 +914,20 @@ where
         };
         let next = parsed.next_offset;
         match parsed.block.header_type {
-            HEAD_FILE => blocks.push(Block::File(
-                parse_file_header_bytes(&parsed).map_err(|error| error.at_archive_offset(pos))?,
-            )),
-            HEAD_SERVICE => blocks.push(Block::Service(
-                parse_file_header_bytes(&parsed).map_err(|error| error.at_archive_offset(pos))?,
-            )),
+            HEAD_FILE => {
+                let mut file = parse_file_header_bytes(&parsed)
+                    .map_err(|error| error.at_archive_offset(pos))?;
+                attach_file_crypto(&mut file, password)
+                    .map_err(|error| error.at_archive_offset(pos))?;
+                blocks.push(Block::File(file));
+            }
+            HEAD_SERVICE => {
+                let mut service = parse_file_header_bytes(&parsed)
+                    .map_err(|error| error.at_archive_offset(pos))?;
+                attach_file_crypto(&mut service, password)
+                    .map_err(|error| error.at_archive_offset(pos))?;
+                blocks.push(Block::Service(service));
+            }
             HEAD_CRYPT => {
                 return Err(Error::UnsupportedFeature {
                     version: crate::version::ArchiveVersion::Rar50,
@@ -1082,6 +1321,24 @@ impl<'a> SliceReader<'a> {
         let (value, len) = read_vint_at(self.input, self.pos, self.end)?;
         self.pos += len;
         Ok(value)
+    }
+
+    fn read_u64(&mut self) -> Result<u64> {
+        let bytes = self.read_bytes(8)?;
+        Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
+    }
+
+    fn read_bytes(&mut self, len: usize) -> Result<&'a [u8]> {
+        let end = self
+            .pos
+            .checked_add(len)
+            .ok_or(Error::InvalidHeader("RAR 5 field size overflows usize"))?;
+        if end > self.end {
+            return Err(Error::TooShort);
+        }
+        let bytes = &self.input[self.pos..end];
+        self.pos = end;
+        Ok(bytes)
     }
 }
 

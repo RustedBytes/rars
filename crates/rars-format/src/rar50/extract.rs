@@ -5,14 +5,12 @@ use rars_crypto::rar50::{Rar50Cipher, Rar50Keys};
 use std::io::{Read, Write};
 
 impl FileHeader {
-    fn packed_data_with_password(
-        &self,
-        archive: &Archive,
-        password: Option<&[u8]>,
-    ) -> Result<(Vec<u8>, Option<Rar50Keys>)> {
-        let mut packed = self.packed_data(archive)?;
+    fn crypto_with_password(&self, password: Option<&[u8]>) -> Result<Option<Rar50Keys>> {
         if !self.encrypted {
-            return Ok((packed, None));
+            return Ok(None);
+        }
+        if let Some(crypto) = &self.crypto {
+            return Ok(Some(crypto.keys.clone()));
         }
         let password = password.ok_or(Error::NeedPassword)?;
         let encryption = self.encryption.as_ref().ok_or(Error::InvalidHeader(
@@ -24,19 +22,46 @@ impl FileHeader {
                 feature: "RAR 5 unknown file encryption version",
             });
         }
-        if packed.len() % 16 != 0 {
-            return Err(Error::InvalidHeader(
-                "RAR 5 encrypted file payload is not block aligned",
-            ));
-        }
-
         let keys = Rar50Keys::derive(password, encryption.salt, encryption.kdf_count)
             .map_err(map_rar50_crypto_error)?;
         if let Some(check_value) = encryption.check_value {
             keys.check_password(&check_value)
                 .map_err(map_rar50_crypto_error)?;
         }
-        Rar50Cipher::new(keys.key, encryption.iv).decrypt_in_place(&mut packed);
+        Ok(Some(keys))
+    }
+
+    fn encryption_iv(&self) -> Result<[u8; 16]> {
+        if let Some(crypto) = &self.crypto {
+            return Ok(crypto.iv);
+        }
+        self.encryption
+            .as_ref()
+            .map(|encryption| encryption.iv)
+            .ok_or(Error::InvalidHeader(
+                "RAR 5 encrypted file is missing encryption record",
+            ))
+    }
+
+    fn packed_data_with_password(
+        &self,
+        archive: &Archive,
+        password: Option<&[u8]>,
+    ) -> Result<(Vec<u8>, Option<Rar50Keys>)> {
+        let mut packed = self.packed_data(archive)?;
+        if !self.encrypted {
+            return Ok((packed, None));
+        }
+        if packed.len() % 16 != 0 {
+            return Err(Error::InvalidHeader(
+                "RAR 5 encrypted file payload is not block aligned",
+            ));
+        }
+
+        let keys = self
+            .crypto_with_password(password)?
+            .expect("encrypted file has keys");
+        Rar50Cipher::new(keys.key, self.encryption_iv()?).decrypt_in_place(&mut packed);
         Ok((packed, Some(keys)))
     }
 
@@ -390,7 +415,7 @@ fn validate_split_fragment(file: &FileHeader, password: Option<&[u8]>) -> Result
             "RAR 5 split directory entry is invalid",
         ));
     }
-    if file.encrypted && password.is_none() {
+    if file.encrypted && password.is_none() && file.crypto.is_none() {
         return Err(Error::NeedPassword);
     }
     Ok(())
@@ -541,7 +566,6 @@ impl PendingSplitRefs {
         if !self.encrypted {
             return Ok(None);
         }
-        let password = password.ok_or(Error::NeedPassword)?;
         let (volume_index, file_index) = self.fragments[0];
         let archive = volumes
             .get(volume_index)
@@ -550,24 +574,12 @@ impl PendingSplitRefs {
             .files()
             .nth(file_index)
             .ok_or(Error::InvalidHeader("RAR 5 split entry is missing"))?;
-        let encryption = file.encryption.as_ref().ok_or(Error::InvalidHeader(
-            "RAR 5 encrypted split entry is missing encryption record",
-        ))?;
-        if encryption.version != 0 {
-            return Err(Error::UnsupportedFeature {
-                version: crate::version::ArchiveVersion::Rar50,
-                feature: "RAR 5 unknown file encryption version",
-            });
-        }
-        let keys = Rar50Keys::derive(password, encryption.salt, encryption.kdf_count)
-            .map_err(map_rar50_crypto_error)?;
-        if let Some(check_value) = encryption.check_value {
-            keys.check_password(&check_value)
-                .map_err(map_rar50_crypto_error)?;
-        }
+        let keys = file
+            .crypto_with_password(password)?
+            .expect("encrypted split file has keys");
         Ok(Some(SplitDecryptor {
             keys,
-            iv: encryption.iv,
+            iv: file.encryption_iv()?,
         }))
     }
 
@@ -833,8 +845,10 @@ mod tests {
                     hash_type: 0,
                     data: blake2sp::hash(full).to_vec(),
                 }),
+                service_data: None,
                 encrypted: false,
                 encryption: None,
+                crypto: None,
             })],
             source: ArchiveSource::Memory(source),
         }

@@ -1,5 +1,5 @@
 use rars_codec::rar50::{decode_lz, parse_compressed_block, read_table_lengths, DecodeTables};
-use rars_format::rar50::{extract_volumes, Archive};
+use rars_format::rar50::{extract_volumes, Archive, Rev5Volume};
 use rars_format::{detect_archive_family, ArchiveFamily, Error};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -25,6 +25,24 @@ fn detects_rar50_signature_family() {
     assert_eq!(sig.family, ArchiveFamily::Rar50Plus);
     assert_eq!(sig.offset, 0);
     assert_eq!(sig.length, 8);
+}
+
+#[test]
+fn parses_rar7_archive_metadata_main_extra_record() {
+    let archive = Archive::parse_path(fixture("ams_archive_name_rar721.rar")).unwrap();
+
+    let metadata = archive.main.archive_metadata().unwrap();
+    assert_eq!(metadata.flags, 0x0003);
+    assert_eq!(
+        metadata.name.as_deref(),
+        Some(b"ams_archive_name_rar721.rar".as_slice())
+    );
+    assert_eq!(metadata.creation_time, Some(0x01dcd60e_662d7a32));
+
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].name, b"hello7.txt");
+    assert_eq!(extracted[0].data, b"Hello, RAR 7.21 fixture world.\n");
 }
 
 #[test]
@@ -78,19 +96,23 @@ fn decrypts_rar50_crc32_mac_file_with_password() {
     let extracted = archive.extract_with_password(Some(b"password")).unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].data, b"Hello, RAR 5.0 fixture world.\n");
+
+    let archive = Archive::parse_with_password(&bytes, Some(b"password")).unwrap();
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].data, b"Hello, RAR 5.0 fixture world.\n");
 }
 
 #[test]
 fn decrypts_rar50_blake2_mac_file_with_password() {
     let bytes = std::fs::read(fixture("password_aes.rar")).unwrap();
-    let archive = Archive::parse(&bytes).unwrap();
+    let archive = Archive::parse_with_password(&bytes, Some(b"password")).unwrap();
 
     let files: Vec<_> = archive.files().collect();
     assert_eq!(files.len(), 1);
     assert_eq!(files[0].name, b"hello.txt");
     assert!(files[0].encrypted);
 
-    let extracted = archive.extract_with_password(Some(b"password")).unwrap();
+    let extracted = archive.extract().unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].data, b"Hello, RAR 5.0 fixture world.\n");
 }
@@ -131,7 +153,7 @@ fn parses_and_extracts_rar50_header_encrypted_archive_with_password() {
     assert_eq!(files[0].name, b"hello.txt");
     assert!(files[0].encrypted);
 
-    let extracted = archive.extract_with_password(Some(b"password")).unwrap();
+    let extracted = archive.extract().unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].data, b"Hello, RAR 5.0 fixture world.\n");
 }
@@ -324,11 +346,66 @@ fn extracts_rar50_compressed_multivolume_archive() {
 }
 
 #[test]
+fn extracts_rar50_stored_multivolume_archive() {
+    let volumes = [
+        Archive::parse_path(fixture("stored_multivol.part1.rar")).unwrap(),
+        Archive::parse_path(fixture("stored_multivol.part2.rar")).unwrap(),
+        Archive::parse_path(fixture("stored_multivol.part3.rar")).unwrap(),
+    ];
+
+    let extracted = extract_volumes(&volumes).unwrap();
+
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].name, b"random_4k.bin");
+    assert_eq!(extracted[0].data.len(), 4096);
+    assert_eq!(
+        rars_format::rar15_40::crc32(&extracted[0].data),
+        0xb9c5_4415
+    );
+}
+
+#[test]
+fn extracts_rar50_solid_multivolume_archive() {
+    let volumes = [
+        Archive::parse_path(fixture("solid_multivol.part01.rar")).unwrap(),
+        Archive::parse_path(fixture("solid_multivol.part02.rar")).unwrap(),
+        Archive::parse_path(fixture("solid_multivol.part03.rar")).unwrap(),
+        Archive::parse_path(fixture("solid_multivol.part04.rar")).unwrap(),
+        Archive::parse_path(fixture("solid_multivol.part05.rar")).unwrap(),
+        Archive::parse_path(fixture("solid_multivol.part06.rar")).unwrap(),
+    ];
+
+    let extracted = extract_volumes(&volumes).unwrap();
+
+    assert_eq!(extracted.len(), 2);
+    assert_eq!(extracted[0].name, b"tiny.txt");
+    assert_eq!(extracted[0].data, b"AAAAAAAA\n");
+    assert_eq!(extracted[1].name, b"bigtext_64k.bin");
+    assert_eq!(extracted[1].data.len(), 65_536);
+    assert_eq!(
+        rars_format::rar15_40::crc32(&extracted[1].data),
+        0xddc9_5682
+    );
+}
+
+#[test]
 fn extracts_rar50_encrypted_compressed_multivolume_archive() {
     let volumes = [
-        Archive::parse_path(fixture("encrypted_multivol.part1.rar")).unwrap(),
-        Archive::parse_path(fixture("encrypted_multivol.part2.rar")).unwrap(),
-        Archive::parse_path(fixture("encrypted_multivol.part3.rar")).unwrap(),
+        Archive::parse_path_with_password(
+            fixture("encrypted_multivol.part1.rar"),
+            Some(b"password"),
+        )
+        .unwrap(),
+        Archive::parse_path_with_password(
+            fixture("encrypted_multivol.part2.rar"),
+            Some(b"password"),
+        )
+        .unwrap(),
+        Archive::parse_path_with_password(
+            fixture("encrypted_multivol.part3.rar"),
+            Some(b"password"),
+        )
+        .unwrap(),
     ];
 
     assert!(volumes.iter().all(|archive| archive.main.is_volume()));
@@ -336,8 +413,7 @@ fn extracts_rar50_encrypted_compressed_multivolume_archive() {
         .iter()
         .all(|archive| { archive.files().next().is_some_and(|file| file.encrypted) }));
 
-    let extracted =
-        rars_format::rar50::extract_volumes_with_password(&volumes, Some(b"password")).unwrap();
+    let extracted = extract_volumes(&volumes).unwrap();
 
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"random_4k.bin");
@@ -410,6 +486,9 @@ fn parses_rar50_recovery_service_archive() {
     let recovery = archive.services().next().unwrap();
     assert_eq!(recovery.packed_size(), 210);
     assert_eq!(recovery.unpacked_size, 210);
+    let recovery = recovery.recovery_record().unwrap().unwrap();
+    assert_eq!(recovery.percent, 10);
+    assert_eq!(recovery.payload_size, 210);
 }
 
 #[test]
@@ -423,11 +502,58 @@ fn parses_rar50_mixed_service_archive() {
     assert_eq!(services[0].packed_size(), 30);
     assert_eq!(services[1].packed_size(), 162);
     assert_eq!(services[2].packed_size(), 526);
+    let recovery = services[2].recovery_record().unwrap().unwrap();
+    assert_eq!(recovery.percent, 5);
+    assert_eq!(recovery.payload_size, 526);
 
     let extracted = archive.extract().unwrap();
     assert_eq!(extracted.len(), 2);
     assert_eq!(extracted[0].data, b"Hello, RAR 5.0 fixture world.\n");
     assert_eq!(extracted[1].data, b"AAAAAAAA\n");
+}
+
+#[test]
+fn parses_rar50_rev5_recovery_volume_metadata() {
+    let bytes = std::fs::read(fixture("multivol_rev.part1.rev")).unwrap();
+    let rev = Rev5Volume::parse(&bytes).unwrap();
+
+    assert_eq!(rev.version, 1);
+    assert_eq!(rev.data_count, 5);
+    assert_eq!(rev.recovery_count, 2);
+    assert_eq!(rev.recovery_number, 5);
+    assert_eq!(rev.payload_size, 4096);
+    assert_eq!(rev.payload_crc32, 0xfd0b_7e3f);
+    assert_eq!(rev.data_volumes.len(), 5);
+    assert_eq!(rev.data_volumes[0].file_size, 4096);
+    assert_eq!(rev.data_volumes[4].file_size, 1032);
+}
+
+#[test]
+fn rejects_corrupt_rar50_rev5_recovery_volume_checksum() {
+    let mut bytes = std::fs::read(fixture("multivol_rev.part1.rev")).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0x01;
+
+    assert!(matches!(
+        Rev5Volume::parse(&bytes),
+        Err(Error::Crc32Mismatch { .. })
+    ));
+}
+
+#[test]
+fn rejects_rar50_rev5_volume_number_outside_recovery_range() {
+    let mut bytes = std::fs::read(fixture("multivol_rev.part1.rev")).unwrap();
+    bytes[21] = 0;
+    bytes[22] = 0;
+    let header_size = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+    let header_end = 16 + header_size;
+    let header_crc = rars_format::rar15_40::crc32(&bytes[12..header_end]);
+    bytes[8..12].copy_from_slice(&header_crc.to_le_bytes());
+
+    assert!(matches!(
+        Rev5Volume::parse(&bytes),
+        Err(Error::InvalidHeader("RAR 5 REV volume number is invalid"))
+    ));
 }
 
 #[test]

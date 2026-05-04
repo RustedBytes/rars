@@ -96,8 +96,10 @@ Keep this section short. Detailed behavioural claims belong in tests.
   verification, per-file AES-256-CBC encrypted stream extraction with
   password-check records and CRC32/BLAKE2sp HashMAC verification,
   archive-wide `HEAD_CRYPT` encrypted-header parsing, and encrypted compressed
-  multivolume extraction. RAR 7.x remains format-detected but
-  codec-unsupported beyond the shared RAR 5 signature family.
+  multivolume extraction. RAR 7.x shared-format archives are handled through
+  the RAR 5 reader, and the WinRAR 7 `-ams` archive metadata main-extra record
+  is parsed. True Unpack70 remains fixture-blocked because it requires a
+  >4 GiB dictionary input.
 
 ## Priority Backlog
 
@@ -167,7 +169,10 @@ Keep this section short. Detailed behavioural claims belong in tests.
   - Single-archive solid RAR5 extraction is implemented and fixture-tested;
     decoder tables, repeat distances, last length, and output history carry
     across files in the same archive.
-  - RAR 7 distance/table-size changes.
+  - RAR 7 Unpack70 distance/table-size changes remain synthetic-only until a
+    practical >4 GiB fixture is worth committing. Small WinRAR 7 archives still
+    use Unpack50-compatible streams; the current promoted RAR 7 fixture covers
+    the `-ams` archive metadata main-extra record instead.
 - Add RAR 5 encryption:
   - Encrypted service-data extraction when a fixture requires it.
 - Extend RAR 5 multivolume extraction:
@@ -178,10 +183,11 @@ Keep this section short. Detailed behavioural claims belong in tests.
     instead of concatenating the packed stream first. Stored split entries
     stream fragments directly to the caller's writer while checking size,
     CRC32, and BLAKE2sp hash records.
-  - Add explicit stored-split and solid-across-volume fixtures.
-- Add RAR 5 recovery parsing after normal decode is stable:
-  - inline RR service blocks.
-  - `.rev` volume handling.
+  - Explicit WinRAR-authored stored-split and solid-across-volume fixtures are
+    promoted into crate tests.
+- RAR 5 recovery metadata parsing is implemented for inline `RR` service
+  headers and RAR 5 `.rev` recovery volumes. Repair/reconstruction remains
+  deferred.
 
 ### 3. Writer Work
 
@@ -204,11 +210,11 @@ Keep this section short. Detailed behavioural claims belong in tests.
 
 ### 4. API And Error Quality
 
-- Extend the facade-level `ArchiveReadOptions` context into lower-level
-  format parsing and extraction once RAR 5 encryption lands, so derived
-  decryptors can be owned instead of threading raw passwords through every
-  call. Existing no-password and `_with_password` helpers remain compatibility
-  shims for now.
+- Keep pushing `ArchiveReadOptions` into lower-level parsing as formats need
+  it. RAR 5 `parse_with_password` / `parse_path_with_password` now attach
+  derived per-file decryptor state to parsed entries, so encrypted files and
+  split payloads can extract without re-threading raw passwords. Existing
+  no-password and `_with_password` helpers remain compatibility shims for now.
 - Continue enriching library errors with block type and broader operation
   context before treating the public API as stable. RAR 5 block parse errors
   already carry archive-relative offsets, and RAR 5 extraction errors carry
@@ -230,8 +236,6 @@ Keep this section short. Detailed behavioural claims belong in tests.
   For historical-reader coverage, run the optional verifier path with both
   the WinRAR/UnRAR 3.00 and 4.20 Wine prefixes.
 - Add failing tests before changing format or codec behaviour.
-- Add coverage for:
-  - RAR 5 encrypted, multivolume, and recovery cases.
 - Use `./scripts/coverage.sh` periodically; it writes HTML coverage to
   `target/coverage/html/index.html`.
 
