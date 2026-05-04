@@ -2,14 +2,16 @@ use crate::detect::{find_archive_start, RAR50_SIGNATURE};
 use crate::error::{Error, Result};
 use crate::rar15_40::crc32;
 use crate::version::ArchiveFamily;
-use rars_codec::rar50::{DecodeMode, Unpack50Decoder};
 use std::fs::File;
-use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 mod blake2sp;
+mod extract;
+
+pub use extract::{extract_volumes, extract_volumes_to};
 
 const HEAD_MAIN: u64 = 1;
 const HEAD_FILE: u64 = 2;
@@ -40,6 +42,7 @@ const FHEXTRA_CRYPT: u64 = 0x01;
 const FHEXTRA_HASH: u64 = 0x02;
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Archive {
     pub sfx_offset: usize,
     pub main: MainHeader,
@@ -54,6 +57,7 @@ enum ArchiveSource {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MainHeader {
     pub block: BlockHeader,
     pub archive_flags: u64,
@@ -79,20 +83,20 @@ impl MainHeader {
     }
 
     pub fn locator(&self) -> Option<&LocatorRecord> {
-        self.extras.iter().find_map(|record| match record {
-            MainExtraRecord::Locator(locator) => Some(locator),
-            MainExtraRecord::Unknown(_) => None,
+        self.extras.first().map(|record| match record {
+            MainExtraRecord::Locator(locator) => locator,
         })
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MainExtraRecord {
     Locator(LocatorRecord),
-    Unknown(ExtraRecord),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LocatorRecord {
     pub flags: u64,
     pub quick_open_offset: Option<u64>,
@@ -100,12 +104,7 @@ pub struct LocatorRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExtraRecord {
-    pub record_type: u64,
-    pub data: Vec<u8>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Block {
     File(FileHeader),
     Service(FileHeader),
@@ -114,6 +113,7 @@ pub enum Block {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BlockHeader {
     pub header_crc: u32,
     pub header_size: u64,
@@ -129,6 +129,7 @@ pub struct BlockHeader {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FileHeader {
     pub block: BlockHeader,
     pub file_flags: u64,
@@ -144,12 +145,14 @@ pub struct FileHeader {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FileHash {
     pub hash_type: u64,
     pub data: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CompressionInfo {
     pub algorithm_version: u8,
     pub solid: bool,
@@ -251,86 +254,6 @@ impl FileHeader {
         self.verify_crc32(data)?;
         self.verify_hash(data)
     }
-
-    pub fn metadata(&self) -> ExtractedEntryMeta {
-        ExtractedEntryMeta {
-            name: self.name.clone(),
-            file_time: self.mtime.unwrap_or(0),
-            attr: self.attributes,
-            host_os: self.host_os,
-            is_directory: self.is_directory(),
-        }
-    }
-
-    pub fn extract(&self, archive: &Archive) -> Result<ExtractedEntry> {
-        let mut decoder = Unpack50Decoder::new();
-        self.extract_with_decoder(archive, &mut decoder)
-    }
-
-    fn extract_with_decoder(
-        &self,
-        archive: &Archive,
-        decoder: &mut Unpack50Decoder,
-    ) -> Result<ExtractedEntry> {
-        if self.is_directory() {
-            return Ok(ExtractedEntry {
-                name: self.name.clone(),
-                data: Vec::new(),
-                file_time: self.mtime.unwrap_or(0),
-                attr: self.attributes,
-                host_os: self.host_os,
-                is_directory: true,
-            });
-        }
-        let data = self.decoded_data_with_decoder(archive, decoder)?;
-        self.verify_integrity(&data)?;
-        Ok(ExtractedEntry {
-            name: self.name.clone(),
-            data,
-            file_time: self.mtime.unwrap_or(0),
-            attr: self.attributes,
-            host_os: self.host_os,
-            is_directory: false,
-        })
-    }
-
-    fn decoded_data_with_decoder(
-        &self,
-        archive: &Archive,
-        decoder: &mut Unpack50Decoder,
-    ) -> Result<Vec<u8>> {
-        if self.encrypted {
-            return Err(Error::NeedPassword);
-        }
-        let packed = self.packed_data(archive)?;
-        self.decode_packed_with_decoder(&packed, decoder)
-    }
-
-    fn decode_packed_with_decoder(
-        &self,
-        packed: &[u8],
-        decoder: &mut Unpack50Decoder,
-    ) -> Result<Vec<u8>> {
-        if self.is_stored() {
-            if packed.len() as u64 != self.unpacked_size {
-                return Err(Error::InvalidHeader(
-                    "RAR 5 stored file has mismatched packed and unpacked sizes",
-                ));
-            }
-            return Ok(packed.to_vec());
-        }
-
-        let info = self.decoded_compression_info()?;
-        decoder
-            .decode_member(
-                packed,
-                info.algorithm_version,
-                self.unpacked_size as usize,
-                info.solid,
-                DecodeMode::Lz,
-            )
-            .map_err(Error::from)
-    }
 }
 
 impl Archive {
@@ -379,41 +302,10 @@ impl Archive {
             return Err(Error::UnsupportedSignature);
         }
 
-        let mut pos = RAR50_SIGNATURE.len();
-        let first = parse_block_header(&input, pos, sfx_offset)?;
-        if first.header_type == HEAD_CRYPT {
-            return Err(Error::UnsupportedFeature {
-                version: crate::version::ArchiveVersion::Rar50,
-                feature: "RAR 5 encrypted headers",
-            });
-        }
-        if first.header_type != HEAD_MAIN {
-            return Err(Error::InvalidHeader("RAR 5 main header is missing"));
-        }
-        let main = parse_main_header(&input, first)?;
-        pos = main.block.data_range.end - sfx_offset;
-
-        let mut blocks = Vec::new();
-        while pos < input.len() {
-            let block = parse_block_header(&input, pos, sfx_offset)?;
-            let next = block.data_range.end - sfx_offset;
-            match block.header_type {
-                HEAD_FILE => blocks.push(Block::File(parse_file_header(&input, block)?)),
-                HEAD_SERVICE => blocks.push(Block::Service(parse_file_header(&input, block)?)),
-                HEAD_CRYPT => {
-                    return Err(Error::UnsupportedFeature {
-                        version: crate::version::ArchiveVersion::Rar50,
-                        feature: "RAR 5 encrypted headers",
-                    });
-                }
-                HEAD_END => {
-                    blocks.push(Block::End(block));
-                    break;
-                }
-                _ => blocks.push(Block::Unknown(block)),
-            }
-            pos = next;
-        }
+        let archive_len = input.len();
+        let (main, blocks) = parse_archive_blocks(archive_len, |offset| {
+            parse_block_header_bytes(&input, offset, archive_len, sfx_offset)
+        })?;
 
         Ok(Self {
             sfx_offset,
@@ -434,41 +326,9 @@ impl Archive {
             return Err(Error::UnsupportedSignature);
         }
 
-        let mut pos = RAR50_SIGNATURE.len();
-        let first = read_block_header_at(file, pos, archive_len, sfx_offset)?;
-        if first.block.header_type == HEAD_CRYPT {
-            return Err(Error::UnsupportedFeature {
-                version: crate::version::ArchiveVersion::Rar50,
-                feature: "RAR 5 encrypted headers",
-            });
-        }
-        if first.block.header_type != HEAD_MAIN {
-            return Err(Error::InvalidHeader("RAR 5 main header is missing"));
-        }
-        let main = parse_main_header_bytes(&first)?;
-        pos = first.next_offset;
-
-        let mut blocks = Vec::new();
-        while pos < archive_len {
-            let parsed = read_block_header_at(file, pos, archive_len, sfx_offset)?;
-            let next = parsed.next_offset;
-            match parsed.block.header_type {
-                HEAD_FILE => blocks.push(Block::File(parse_file_header_bytes(&parsed)?)),
-                HEAD_SERVICE => blocks.push(Block::Service(parse_file_header_bytes(&parsed)?)),
-                HEAD_CRYPT => {
-                    return Err(Error::UnsupportedFeature {
-                        version: crate::version::ArchiveVersion::Rar50,
-                        feature: "RAR 5 encrypted headers",
-                    });
-                }
-                HEAD_END => {
-                    blocks.push(Block::End(parsed.block));
-                    break;
-                }
-                _ => blocks.push(Block::Unknown(parsed.block)),
-            }
-            pos = next;
-        }
+        let (main, blocks) = parse_archive_blocks(archive_len, |offset| {
+            read_block_header_at(file, offset, archive_len, sfx_offset)
+        })?;
 
         Ok(Self {
             sfx_offset,
@@ -518,288 +378,6 @@ impl Archive {
             _ => None,
         })
     }
-
-    pub fn extract(&self) -> Result<Vec<ExtractedEntry>> {
-        let mut out = Vec::new();
-        let mut decoder = Unpack50Decoder::new();
-        for file in self.files() {
-            if file.is_split_before() || file.is_split_after() {
-                return Err(Error::InvalidHeader(
-                    "RAR 5 split entry requires multivolume extraction",
-                ));
-            }
-            out.push(file.extract_with_decoder(self, &mut decoder)?);
-        }
-        Ok(out)
-    }
-
-    pub fn extract_to<F>(&self, mut open: F) -> Result<()>
-    where
-        F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
-    {
-        let mut decoder = Unpack50Decoder::new();
-        for file in self.files() {
-            if file.is_split_before() || file.is_split_after() {
-                return Err(Error::InvalidHeader(
-                    "RAR 5 split entry requires multivolume extraction",
-                ));
-            }
-            let meta = file.metadata();
-            let mut writer = open(&meta)?;
-            if !meta.is_directory {
-                let data = file.decoded_data_with_decoder(self, &mut decoder)?;
-                file.verify_integrity(&data)?;
-                writer.write_all(&data)?;
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Convenience multivolume extraction API that buffers each extracted entry in
-/// memory. Prefer [`extract_volumes_to`] for large archives.
-pub fn extract_volumes(volumes: &[Archive]) -> Result<Vec<ExtractedEntry>> {
-    use std::cell::RefCell;
-    use std::rc::Rc;
-
-    struct SharedWriter(Rc<RefCell<Vec<u8>>>);
-
-    impl Write for SharedWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.borrow_mut().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    let mut captured: Vec<(ExtractedEntryMeta, Rc<RefCell<Vec<u8>>>)> = Vec::new();
-    extract_volumes_to(volumes, |meta| {
-        let data = Rc::new(RefCell::new(Vec::new()));
-        captured.push((meta.clone(), data.clone()));
-        Ok(Box::new(SharedWriter(data)))
-    })?;
-
-    Ok(captured
-        .into_iter()
-        .map(|(meta, data)| ExtractedEntry {
-            name: meta.name,
-            data: data.borrow().clone(),
-            file_time: meta.file_time,
-            attr: meta.attr,
-            host_os: meta.host_os,
-            is_directory: meta.is_directory,
-        })
-        .collect())
-}
-
-/// Streams a RAR 5 multivolume archive set to caller-provided writers.
-///
-/// The public shape is streaming, but compressed split members still pass a
-/// reassembled packed byte slice to the current Unpack50 codec implementation.
-pub fn extract_volumes_to<F>(volumes: &[Archive], mut open: F) -> Result<()>
-where
-    F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
-{
-    if volumes.is_empty() {
-        return Err(Error::InvalidHeader("RAR 5 volume set is empty"));
-    }
-
-    let mut pending: Option<PendingSplitRefs> = None;
-    let mut decoder = Unpack50Decoder::new();
-
-    for (volume_index, archive) in volumes.iter().enumerate() {
-        for (file_index, file) in archive.files().enumerate() {
-            match (
-                pending.is_some(),
-                file.is_split_before(),
-                file.is_split_after(),
-            ) {
-                (false, false, false) => {
-                    let meta = file.metadata();
-                    let mut writer = open(&meta)?;
-                    if !meta.is_directory {
-                        let data = file.decoded_data_with_decoder(archive, &mut decoder)?;
-                        file.verify_integrity(&data)?;
-                        writer.write_all(&data)?;
-                    }
-                }
-                (false, false, true) => {
-                    validate_split_fragment(file)?;
-                    pending = Some(PendingSplitRefs::new(file, volume_index, file_index));
-                }
-                (true, true, true) => {
-                    let current = pending.as_mut().expect("pending split");
-                    validate_split_continuation_refs(current, file)?;
-                    current.append(volume_index, file_index);
-                }
-                (true, true, false) => {
-                    let mut completed = pending.take().expect("pending split");
-                    validate_split_continuation_refs(&completed, file)?;
-                    completed.append(volume_index, file_index);
-                    completed.write_to(volumes, file, &mut decoder, &mut open)?;
-                }
-                (false, true, _) => {
-                    return Err(Error::InvalidHeader(
-                        "RAR 5 split entry is missing its first part",
-                    ));
-                }
-                (true, false, _) => {
-                    return Err(Error::InvalidHeader(
-                        "RAR 5 split entry is interrupted by a regular entry",
-                    ));
-                }
-            }
-        }
-    }
-
-    if pending.is_some() {
-        return Err(Error::InvalidHeader("RAR 5 split entry is incomplete"));
-    }
-
-    Ok(())
-}
-
-fn validate_split_fragment(file: &FileHeader) -> Result<()> {
-    if file.is_directory() {
-        return Err(Error::InvalidHeader(
-            "RAR 5 split directory entry is invalid",
-        ));
-    }
-    if file.encrypted {
-        return Err(Error::NeedPassword);
-    }
-    Ok(())
-}
-
-fn validate_split_continuation_refs(pending: &PendingSplitRefs, file: &FileHeader) -> Result<()> {
-    validate_split_fragment(file)?;
-    if file.name != pending.name {
-        return Err(Error::InvalidHeader("RAR 5 split entry name changed"));
-    }
-    if file.compression_info != pending.compression_info {
-        return Err(Error::InvalidHeader(
-            "RAR 5 split entry compression info changed",
-        ));
-    }
-    if file.encrypted != pending.encrypted {
-        return Err(Error::InvalidHeader(
-            "RAR 5 split entry encryption flag changed",
-        ));
-    }
-    Ok(())
-}
-
-struct PendingSplitRefs {
-    name: Vec<u8>,
-    fragments: Vec<(usize, usize)>,
-    file_time: u32,
-    attr: u64,
-    host_os: u64,
-    compression_info: u64,
-    encrypted: bool,
-}
-
-impl PendingSplitRefs {
-    fn new(file: &FileHeader, volume_index: usize, file_index: usize) -> Self {
-        Self {
-            name: file.name.clone(),
-            fragments: vec![(volume_index, file_index)],
-            file_time: file.mtime.unwrap_or(0),
-            attr: file.attributes,
-            host_os: file.host_os,
-            compression_info: file.compression_info,
-            encrypted: file.encrypted,
-        }
-    }
-
-    fn append(&mut self, volume_index: usize, file_index: usize) {
-        self.fragments.push((volume_index, file_index));
-    }
-
-    fn write_to<F>(
-        self,
-        volumes: &[Archive],
-        final_file: &FileHeader,
-        decoder: &mut Unpack50Decoder,
-        open: &mut F,
-    ) -> Result<()>
-    where
-        F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
-    {
-        let meta = ExtractedEntryMeta {
-            name: self.name.clone(),
-            file_time: self.file_time,
-            attr: self.attr,
-            host_os: self.host_os,
-            is_directory: false,
-        };
-        let mut writer = open(&meta)?;
-        let packed = self.packed_data(volumes)?;
-        let data = final_file.decode_packed_with_decoder(&packed, decoder)?;
-        final_file.verify_integrity(&data)?;
-        writer.write_all(&data)?;
-        Ok(())
-    }
-
-    fn packed_data(&self, volumes: &[Archive]) -> Result<Vec<u8>> {
-        let mut out = Vec::new();
-        let mut reader = self.fragment_reader(volumes)?;
-        reader.read_to_end(&mut out)?;
-        Ok(out)
-    }
-
-    fn fragment_reader<'a>(&self, volumes: &'a [Archive]) -> Result<ChainedReader<'a>> {
-        let mut readers = Vec::with_capacity(self.fragments.len());
-        for &(volume_index, file_index) in &self.fragments {
-            let archive = volumes
-                .get(volume_index)
-                .ok_or(Error::InvalidHeader("RAR 5 split volume is missing"))?;
-            let file = archive
-                .files()
-                .nth(file_index)
-                .ok_or(Error::InvalidHeader("RAR 5 split entry is missing"))?;
-            readers.push(archive.range_reader(file.block.data_range.clone())?);
-        }
-        Ok(ChainedReader { readers, index: 0 })
-    }
-}
-
-struct ChainedReader<'a> {
-    readers: Vec<Box<dyn Read + 'a>>,
-    index: usize,
-}
-
-impl Read for ChainedReader<'_> {
-    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
-        while let Some(reader) = self.readers.get_mut(self.index) {
-            let read = reader.read(out)?;
-            if read != 0 {
-                return Ok(read);
-            }
-            self.index += 1;
-        }
-        Ok(0)
-    }
-}
-
-fn parse_main_header(input: &[u8], block: BlockHeader) -> Result<MainHeader> {
-    let mut reader = HeaderReader::new(input, block.header_range.clone())?;
-    let archive_flags = reader.read_vint()?;
-    let volume_number = if archive_flags & MHFL_VOLUME_NUMBER != 0 {
-        Some(reader.read_vint()?)
-    } else {
-        None
-    };
-    let extras = parse_main_extra(input, &block)?;
-    Ok(MainHeader {
-        block,
-        archive_flags,
-        volume_number,
-        extras,
-    })
 }
 
 fn parse_main_header_bytes(parsed: &ParsedBlockHeader) -> Result<MainHeader> {
@@ -817,25 +395,6 @@ fn parse_main_header_bytes(parsed: &ParsedBlockHeader) -> Result<MainHeader> {
         volume_number,
         extras,
     })
-}
-
-fn parse_main_extra(input: &[u8], block: &BlockHeader) -> Result<Vec<MainExtraRecord>> {
-    let Some(extra_size) = block.extra_area_size else {
-        return Ok(Vec::new());
-    };
-    let extra_start = block.header_range.end;
-    let extra_end = extra_start
-        .checked_add(usize_from_u64(
-            extra_size,
-            "RAR 5 extra area size overflows usize",
-        )?)
-        .ok_or(Error::InvalidHeader(
-            "RAR 5 extra area size overflows usize",
-        ))?;
-    if extra_end > input.len() {
-        return Err(Error::TooShort);
-    }
-    parse_main_extra_area(input, extra_start..extra_end)
 }
 
 fn parse_main_extra_area(input: &[u8], range: Range<usize>) -> Result<Vec<MainExtraRecord>> {
@@ -861,54 +420,9 @@ fn parse_main_extra_area(input: &[u8], range: Range<usize>) -> Result<Vec<MainEx
             }));
             Ok(())
         }
-        _ => {
-            records.push(MainExtraRecord::Unknown(ExtraRecord {
-                record_type,
-                data: input[data].to_vec(),
-            }));
-            Ok(())
-        }
+        _ => Ok(()),
     })?;
     Ok(records)
-}
-
-fn parse_file_header(input: &[u8], block: BlockHeader) -> Result<FileHeader> {
-    let mut reader = HeaderReader::new(input, block.header_range.clone())?;
-    let file_flags = reader.read_vint()?;
-    let unpacked_size = reader.read_vint()?;
-    let attributes = reader.read_vint()?;
-    let mtime = if file_flags & FHFL_MTIME != 0 {
-        Some(reader.read_u32()?)
-    } else {
-        None
-    };
-    let data_crc32 = if file_flags & FHFL_CRC32 != 0 {
-        Some(reader.read_u32()?)
-    } else {
-        None
-    };
-    let compression_info = reader.read_vint()?;
-    let host_os = reader.read_vint()?;
-    let name_len = usize_from_u64(
-        reader.read_vint()?,
-        "RAR 5 file name length overflows usize",
-    )?;
-    let name = reader.read_bytes(name_len)?.to_vec();
-    let mut file = FileHeader {
-        block,
-        file_flags,
-        unpacked_size,
-        attributes,
-        mtime,
-        data_crc32,
-        compression_info,
-        host_os,
-        name,
-        hash: None,
-        encrypted: false,
-    };
-    parse_file_extra(input, &mut file)?;
-    Ok(file)
 }
 
 fn parse_file_header_bytes(parsed: &ParsedBlockHeader) -> Result<FileHeader> {
@@ -950,25 +464,6 @@ fn parse_file_header_bytes(parsed: &ParsedBlockHeader) -> Result<FileHeader> {
     Ok(file)
 }
 
-fn parse_file_extra(input: &[u8], file: &mut FileHeader) -> Result<()> {
-    let Some(extra_size) = file.block.extra_area_size else {
-        return Ok(());
-    };
-    let extra_start = file.block.header_range.end;
-    let extra_end = extra_start
-        .checked_add(usize_from_u64(
-            extra_size,
-            "RAR 5 extra area size overflows usize",
-        )?)
-        .ok_or(Error::InvalidHeader(
-            "RAR 5 extra area size overflows usize",
-        ))?;
-    if extra_end > input.len() {
-        return Err(Error::TooShort);
-    }
-    parse_file_extra_area(input, extra_start..extra_end, file)
-}
-
 fn parse_file_extra_area(input: &[u8], range: Range<usize>, file: &mut FileHeader) -> Result<()> {
     if file.block.extra_area_size.is_none() {
         return Ok(());
@@ -987,6 +482,56 @@ fn parse_file_extra_area(input: &[u8], range: Range<usize>, file: &mut FileHeade
         }
         Ok(())
     })
+}
+
+fn parse_archive_blocks<F>(
+    archive_len: usize,
+    mut read_block: F,
+) -> Result<(MainHeader, Vec<Block>)>
+where
+    F: FnMut(usize) -> Result<ParsedBlockHeader>,
+{
+    let mut pos = RAR50_SIGNATURE.len();
+    let first = read_block(pos).map_err(|error| error.at_archive_offset(pos))?;
+    if first.block.header_type == HEAD_CRYPT {
+        return Err(Error::UnsupportedFeature {
+            version: crate::version::ArchiveVersion::Rar50,
+            feature: "RAR 5 encrypted headers",
+        });
+    }
+    if first.block.header_type != HEAD_MAIN {
+        return Err(Error::InvalidHeader("RAR 5 main header is missing"));
+    }
+    let main = parse_main_header_bytes(&first).map_err(|error| error.at_archive_offset(pos))?;
+    pos = first.next_offset;
+
+    let mut blocks = Vec::new();
+    while pos < archive_len {
+        let parsed = read_block(pos).map_err(|error| error.at_archive_offset(pos))?;
+        let next = parsed.next_offset;
+        match parsed.block.header_type {
+            HEAD_FILE => blocks.push(Block::File(
+                parse_file_header_bytes(&parsed).map_err(|error| error.at_archive_offset(pos))?,
+            )),
+            HEAD_SERVICE => blocks.push(Block::Service(
+                parse_file_header_bytes(&parsed).map_err(|error| error.at_archive_offset(pos))?,
+            )),
+            HEAD_CRYPT => {
+                return Err(Error::UnsupportedFeature {
+                    version: crate::version::ArchiveVersion::Rar50,
+                    feature: "RAR 5 encrypted headers",
+                });
+            }
+            HEAD_END => {
+                blocks.push(Block::End(parsed.block));
+                break;
+            }
+            _ => blocks.push(Block::Unknown(parsed.block)),
+        }
+        pos = next;
+    }
+
+    Ok((main, blocks))
 }
 
 fn parse_extra_records<F>(input: &[u8], range: Range<usize>, mut handle: F) -> Result<()>
@@ -1027,6 +572,46 @@ struct ParsedBlockHeader {
     next_offset: usize,
 }
 
+fn parse_block_header_bytes(
+    input: &[u8],
+    offset: usize,
+    archive_len: usize,
+    sfx_offset: usize,
+) -> Result<ParsedBlockHeader> {
+    let remaining = archive_len.checked_sub(offset).ok_or(Error::TooShort)?;
+    if remaining < 5 {
+        return Err(Error::TooShort);
+    }
+    let header_crc = read_u32(input, offset)?;
+    let after_crc = offset
+        .checked_add(4)
+        .ok_or(Error::InvalidHeader("RAR 5 header offset overflows usize"))?;
+    let (header_size, header_size_len) = read_vint_at(input, after_crc, archive_len)?;
+    let header_body_len = usize_from_u64(header_size, "RAR 5 header size overflows usize")?;
+    let header_total = 4usize
+        .checked_add(header_size_len)
+        .and_then(|size| size.checked_add(header_body_len))
+        .ok_or(Error::InvalidHeader("RAR 5 header size overflows usize"))?;
+    if header_total > remaining {
+        return Err(Error::TooShort);
+    }
+    let header_end = offset
+        .checked_add(header_total)
+        .ok_or(Error::InvalidHeader("RAR 5 header size overflows usize"))?;
+    let header = input
+        .get(offset..header_end)
+        .ok_or(Error::TooShort)?
+        .to_vec();
+    parse_block_header_image(
+        header,
+        offset,
+        archive_len,
+        sfx_offset,
+        header_crc,
+        header_size,
+    )
+}
+
 fn read_block_header_at(
     file: &mut File,
     offset: usize,
@@ -1059,6 +644,37 @@ fn read_block_header_at(
         });
     }
 
+    parse_block_header_image(
+        header,
+        offset,
+        archive_len,
+        sfx_offset,
+        header_crc,
+        header_size,
+    )
+}
+
+fn parse_block_header_image(
+    header: Vec<u8>,
+    offset: usize,
+    archive_len: usize,
+    sfx_offset: usize,
+    header_crc: u32,
+    header_size: u64,
+) -> Result<ParsedBlockHeader> {
+    let actual = crc32(&header[4..]);
+    if actual != header_crc {
+        return Err(Error::Crc32Mismatch {
+            expected: header_crc,
+            actual,
+        });
+    }
+
+    let header_total = header.len();
+    let (decoded_header_size, header_size_len) = read_vint_at(&header, 4, header_total)?;
+    if decoded_header_size != header_size {
+        return Err(Error::InvalidHeader("RAR 5 header size decode mismatch"));
+    }
     let type_start = 4 + header_size_len;
     let mut reader = SliceReader::new(&header, type_start, header_total);
     let header_type = reader.read_vint()?;
@@ -1117,74 +733,6 @@ fn read_block_header_at(
         type_specific_range: type_specific_start..type_specific_end,
         extra_range: type_specific_end..header_total,
         next_offset,
-    })
-}
-
-fn parse_block_header(input: &[u8], offset: usize, sfx_offset: usize) -> Result<BlockHeader> {
-    let header_crc = read_u32(input, offset)?;
-    let after_crc = offset + 4;
-    let (header_size, header_size_len) = read_vint_at(input, after_crc, input.len())?;
-    let type_start = after_crc + header_size_len;
-    let header_body_len = usize_from_u64(header_size, "RAR 5 header size overflows usize")?;
-    let header_end = type_start
-        .checked_add(header_body_len)
-        .ok_or(Error::InvalidHeader("RAR 5 header size overflows usize"))?;
-    if header_end > input.len() {
-        return Err(Error::TooShort);
-    }
-    let actual = crc32(&input[after_crc..header_end]);
-    if actual != header_crc {
-        return Err(Error::Crc32Mismatch {
-            expected: header_crc,
-            actual,
-        });
-    }
-
-    let mut reader = SliceReader::new(input, type_start, header_end);
-    let header_type = reader.read_vint()?;
-    let flags = reader.read_vint()?;
-    let extra_area_size = if flags & HFL_EXTRA != 0 {
-        Some(reader.read_vint()?)
-    } else {
-        None
-    };
-    let data_size = if flags & HFL_DATA != 0 {
-        Some(reader.read_vint()?)
-    } else {
-        None
-    };
-    let extra_len = extra_area_size
-        .map(|size| usize_from_u64(size, "RAR 5 extra area size overflows usize"))
-        .transpose()?
-        .unwrap_or(0);
-    if extra_len > header_end.saturating_sub(reader.pos) {
-        return Err(Error::TooShort);
-    }
-    let type_specific_end = header_end - extra_len;
-    let data_start = sfx_offset
-        .checked_add(header_end)
-        .ok_or(Error::InvalidHeader("RAR 5 data offset overflows usize"))?;
-    let data_len = data_size
-        .map(|size| usize_from_u64(size, "RAR 5 data size overflows usize"))
-        .transpose()?
-        .unwrap_or(0);
-    let data_end = data_start
-        .checked_add(data_len)
-        .ok_or(Error::InvalidHeader("RAR 5 data size overflows usize"))?;
-    if header_end + data_len > input.len() {
-        return Err(Error::TooShort);
-    }
-
-    Ok(BlockHeader {
-        header_crc,
-        header_size,
-        header_type,
-        flags,
-        extra_area_size,
-        data_size,
-        offset: sfx_offset + offset,
-        header_range: reader.pos..type_specific_end,
-        data_range: data_start..data_end,
     })
 }
 

@@ -29,6 +29,7 @@ const METHOD_STORE: u8 = 0;
 const DEFAULT_UNP_VER: u8 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MainHeader {
     pub flags: u8,
     pub head_size: u16,
@@ -36,6 +37,7 @@ pub struct MainHeader {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FileHeader {
     pub flags: u8,
     pub pack_size: u32,
@@ -49,6 +51,7 @@ pub struct FileHeader {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Entry {
     pub header: FileHeader,
     pub name: Vec<u8>,
@@ -57,6 +60,7 @@ pub struct Entry {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Archive {
     pub sfx_offset: usize,
     pub main: MainHeader,
@@ -71,6 +75,7 @@ enum ArchiveSource {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct AuthenticityVerification {
     pub size: u16,
     pub prefix: [u8; 6],
@@ -78,6 +83,7 @@ pub struct AuthenticityVerification {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AuthenticityVerificationStatus {
     Absent,
     StructurallyValid,
@@ -478,15 +484,19 @@ impl Archive {
             }
             let mut writer = open(&meta)?;
             if entry.is_stored() && !entry.is_encrypted() {
-                entry.write_stored_to(self, password, &mut writer)?;
+                entry
+                    .write_stored_to(self, password, &mut writer)
+                    .map_err(|error| entry.entry_error("extracting", error))?;
             } else {
-                entry.write_compressed_to(
-                    self,
-                    password,
-                    &mut unpack15,
-                    self.main.is_solid() && extracted_count != 0,
-                    &mut writer,
-                )?;
+                entry
+                    .write_compressed_to(
+                        self,
+                        password,
+                        &mut unpack15,
+                        self.main.is_solid() && extracted_count != 0,
+                        &mut writer,
+                    )
+                    .map_err(|error| entry.entry_error("extracting", error))?;
             }
             extracted_count += 1;
         }
@@ -827,6 +837,16 @@ impl Entry {
             is_directory: false,
         })
     }
+
+    fn entry_error(&self, operation: &'static str, error: Error) -> Error {
+        if matches!(
+            error,
+            Error::NeedPassword | Error::WrongPasswordOrCorruptData
+        ) {
+            return error;
+        }
+        error.at_entry(self.name.clone(), operation)
+    }
 }
 
 /// Convenience multivolume extraction API that buffers each extracted entry in
@@ -919,13 +939,15 @@ where
                     continue;
                 }
                 let mut writer = open(&meta)?;
-                entry.write_compressed_to(
-                    archive,
-                    password,
-                    &mut unpack15,
-                    archive.main.is_solid() && extracted_count != 0,
-                    &mut writer,
-                )?;
+                entry
+                    .write_compressed_to(
+                        archive,
+                        password,
+                        &mut unpack15,
+                        archive.main.is_solid() && extracted_count != 0,
+                        &mut writer,
+                    )
+                    .map_err(|error| entry.entry_error("extracting", error))?;
                 extracted_count += 1;
                 continue;
             }
@@ -945,14 +967,9 @@ where
                     current.append(entry, volume_index, entry_index)?;
                     let completed = pending.take().expect("pending split");
                     let solid = archive.main.is_solid() && extracted_count != 0;
-                    completed.write_to(
-                        volumes,
-                        entry,
-                        password,
-                        &mut unpack15,
-                        solid,
-                        &mut open,
-                    )?;
+                    completed
+                        .write_to(volumes, entry, password, &mut unpack15, solid, &mut open)
+                        .map_err(|error| entry.entry_error("extracting", error))?;
                     extracted_count += 1;
                 }
                 _ => {

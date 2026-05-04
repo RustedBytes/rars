@@ -36,6 +36,13 @@ Encoder policy should remain pluggable. The baseline policy can be simple and
 legal; WinRAR-like match finding, filter choice, and block-splitting heuristics
 belong behind policy interfaces rather than inside format serialization.
 
+Keep `rars-format` as the crate boundary for now, but split large family
+modules internally before adding more RAR5 encryption or RAR7 work. The target
+shape is wire parsing and typed block models in the family root module, with
+extraction/session/multivolume orchestration in sibling modules such as
+`rar15_40/extract.rs` and `rar50/extract.rs`; writers should get the same
+treatment when they become the review bottleneck.
+
 ## Current Baseline
 
 Keep this section short. Detailed behavioural claims belong in tests.
@@ -73,8 +80,10 @@ Keep this section short. Detailed behavioural claims belong in tests.
   including encrypted split volumes, are exposed through the public facade and
   CLI, with reader round-trip tests for small generated archives.
 - Extraction is reader-backed for normal archive paths and avoids cloning packed
-  payloads into parsed entries. Stored, compressed, and AES-encrypted RAR 3.x
-  volume sets stream through `extract_volumes_to`.
+  payloads into parsed entries. Stored, compressed, and encrypted RAR 1.5-4.x
+  volume sets stream through `extract_volumes_to`; encrypted split sets use a
+  decrypting reader that carries RAR15 byte-stream state and RAR20/RAR30
+  16-byte block state across fragment boundaries.
 - RAR 5.0 has an initial read/extract vertical slice: marker and block walking,
   main/file/service/end header parsing, vint bounds, header CRC32 validation,
   main-header Locator extra parsing, file compression-info bitfield decoding,
@@ -162,9 +171,10 @@ Keep this section short. Detailed behavioural claims belong in tests.
   - Compressed split extraction is implemented for the promoted
     `multivol.part*.rar` fixture and preserves the Unpack50 decoder across the
     archive set.
-  - Replace the current compressed-split packed-byte reassembly with a
-    reader-based Unpack50 input path before treating large RAR5 volumes as
-    memory-safe.
+  - Compressed split extraction feeds a chained fragment reader into Unpack50
+    instead of concatenating the packed stream first. Stored split entries
+    stream fragments directly to the caller's writer while checking size,
+    CRC32, and BLAKE2sp hash records.
   - Add explicit stored-split and solid-across-volume fixtures.
 - Add RAR 5 recovery parsing after normal decode is stable:
   - inline RR service blocks.
@@ -191,9 +201,18 @@ Keep this section short. Detailed behavioural claims belong in tests.
 
 ### 4. API And Error Quality
 
-- Enrich library errors with archive offsets, block type, entry name, and
-  operation context before treating the public API as stable.
-- Review which low-level format structs should remain public.
+- Extend the facade-level `ArchiveReadOptions` context into lower-level
+  format parsing and extraction once RAR 5 encryption lands, so derived
+  decryptors can be owned instead of threading raw passwords through every
+  call. Existing no-password and `_with_password` helpers remain compatibility
+  shims for now.
+- Continue enriching library errors with block type and broader operation
+  context before treating the public API as stable. RAR 5 block parse errors
+  already carry archive-relative offsets, and RAR 5 extraction errors carry
+  entry name plus decode/verify context.
+- Keep low-level parsed format structs public for inspection, but mark them
+  non-exhaustive so future encryption, recovery, and timestamp fields can be
+  added without freezing the parser object model.
 - Consider deprecating Vec-returning extraction APIs once integration tests and
   examples primarily use streaming APIs.
 - Keep archive equality undefined unless a clear value semantics is needed.

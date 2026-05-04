@@ -153,33 +153,61 @@ impl From<rar50::ExtractedEntry> for ExtractedEntry {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ArchiveReader;
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ArchiveReadOptions<'a> {
+    pub password: Option<&'a [u8]>,
+}
+
+impl<'a> ArchiveReadOptions<'a> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_password(password: &'a [u8]) -> Self {
+        Self {
+            password: Some(password),
+        }
+    }
+}
+
 impl ArchiveReader {
     pub fn detect(input: &[u8]) -> Result<ArchiveSignature> {
         detect_archive_family(input).ok_or(Error::UnsupportedSignature)
     }
 
     pub fn read(input: &[u8]) -> Result<Archive> {
-        Self::read_with_password(input, None)
+        Self::read_with_options(input, ArchiveReadOptions::default())
     }
 
     pub fn read_with_password(input: &[u8], password: Option<&[u8]>) -> Result<Archive> {
+        Self::read_with_options(input, ArchiveReadOptions { password })
+    }
+
+    pub fn read_with_options(input: &[u8], options: ArchiveReadOptions<'_>) -> Result<Archive> {
         let signature = find_archive_start(input, 128 * 1024).ok_or(Error::UnsupportedSignature)?;
         match signature.family {
             ArchiveFamily::Rar13 => Ok(Archive::Rar13(rar13::Archive::parse(input)?)),
             ArchiveFamily::Rar15To40 => Ok(Archive::Rar15To40(
-                rar15_40::Archive::parse_with_password(input, password)?,
+                rar15_40::Archive::parse_with_password(input, options.password)?,
             )),
             ArchiveFamily::Rar50Plus => Ok(Archive::Rar50Plus(rar50::Archive::parse(input)?)),
         }
     }
 
     pub fn read_path(path: impl AsRef<Path>) -> Result<Archive> {
-        Self::read_path_with_password(path, None)
+        Self::read_path_with_options(path, ArchiveReadOptions::default())
     }
 
     pub fn read_path_with_password(
         path: impl AsRef<Path>,
         password: Option<&[u8]>,
+    ) -> Result<Archive> {
+        Self::read_path_with_options(path, ArchiveReadOptions { password })
+    }
+
+    pub fn read_path_with_options(
+        path: impl AsRef<Path>,
+        options: ArchiveReadOptions<'_>,
     ) -> Result<Archive> {
         let path = path.as_ref();
         let mut file = std::fs::File::open(path)?;
@@ -190,7 +218,7 @@ impl ArchiveReader {
         match signature.family {
             ArchiveFamily::Rar13 => Ok(Archive::Rar13(rar13::Archive::parse_path(path)?)),
             ArchiveFamily::Rar15To40 => Ok(Archive::Rar15To40(
-                rar15_40::Archive::parse_path_with_password(path, password)?,
+                rar15_40::Archive::parse_path_with_password(path, options.password)?,
             )),
             ArchiveFamily::Rar50Plus => Ok(Archive::Rar50Plus(rar50::Archive::parse_path(path)?)),
         }

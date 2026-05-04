@@ -1,4 +1,5 @@
 use crate::{Error, Result};
+use std::io::Read;
 use std::ops::Range;
 
 pub const LEVEL_TABLE_SIZE: usize = 20;
@@ -7,6 +8,8 @@ pub const DISTANCE_TABLE_SIZE_50: usize = 64;
 pub const DISTANCE_TABLE_SIZE_70: usize = 80;
 pub const ALIGN_TABLE_SIZE: usize = 16;
 pub const LENGTH_TABLE_SIZE: usize = 44;
+const DEFAULT_DICTIONARY_SIZE: usize = 4 * 1024 * 1024;
+const MAX_INITIAL_OUTPUT_CAPACITY: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompressedBlock {
@@ -23,6 +26,11 @@ pub struct CompressedBlockHeader {
     pub final_byte_bits: u8,
     pub payload_size: usize,
     pub payload_bits: usize,
+}
+
+struct OwnedCompressedBlock {
+    header: CompressedBlockHeader,
+    payload: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -277,17 +285,76 @@ impl Unpack50Decoder {
         solid: bool,
         mode: DecodeMode,
     ) -> Result<Vec<u8>> {
+        self.decode_member_with_dictionary(
+            input,
+            algorithm_version,
+            output_size,
+            DEFAULT_DICTIONARY_SIZE,
+            solid,
+            mode,
+        )
+    }
+
+    pub fn decode_member_with_dictionary(
+        &mut self,
+        input: &[u8],
+        algorithm_version: u8,
+        output_size: usize,
+        dictionary_size: usize,
+        solid: bool,
+        mode: DecodeMode,
+    ) -> Result<Vec<u8>> {
+        let mut input = std::io::Cursor::new(input);
+        self.decode_member_from_reader_with_dictionary(
+            &mut input,
+            algorithm_version,
+            output_size,
+            dictionary_size,
+            solid,
+            mode,
+        )
+    }
+
+    pub fn decode_member_from_reader(
+        &mut self,
+        input: &mut impl Read,
+        algorithm_version: u8,
+        output_size: usize,
+        solid: bool,
+        mode: DecodeMode,
+    ) -> Result<Vec<u8>> {
+        self.decode_member_from_reader_with_dictionary(
+            input,
+            algorithm_version,
+            output_size,
+            DEFAULT_DICTIONARY_SIZE,
+            solid,
+            mode,
+        )
+    }
+
+    pub fn decode_member_from_reader_with_dictionary(
+        &mut self,
+        input: &mut impl Read,
+        algorithm_version: u8,
+        output_size: usize,
+        dictionary_size: usize,
+        solid: bool,
+        mode: DecodeMode,
+    ) -> Result<Vec<u8>> {
+        if dictionary_size == 0 {
+            return Err(Error::InvalidData("RAR 5 dictionary size is zero"));
+        }
         if !solid {
             self.reset();
         }
 
-        let mut input_pos = 0;
-        let mut output = Vec::with_capacity(output_size);
+        let mut output = Vec::with_capacity(output_size.min(MAX_INITIAL_OUTPUT_CAPACITY));
         let mut filters = Vec::new();
 
         loop {
-            let block = parse_compressed_block(&input[input_pos..])?;
-            let payload = &input[input_pos + block.payload.start..input_pos + block.payload.end];
+            let block = read_compressed_block(input)?;
+            let payload = block.payload.as_slice();
             let mut payload_bit_pos = 0;
             if block.header.has_tables {
                 let (lengths, table_bits) = read_table_lengths(payload, algorithm_version)?;
@@ -296,9 +363,8 @@ impl Unpack50Decoder {
             }
             let tables = self
                 .tables
-                .as_ref()
-                .ok_or(Error::InvalidData("RAR 5 block reuses missing tables"))?
-                .clone();
+                .take()
+                .ok_or(Error::InvalidData("RAR 5 block reuses missing tables"))?;
             let mut bits = BitReader::new(payload);
             bits.bit_pos = payload_bit_pos;
 
@@ -316,6 +382,7 @@ impl Unpack50Decoder {
                                 self.reps[0],
                                 self.last_length,
                                 output_size,
+                                dictionary_size,
                             )?;
                         }
                     }
@@ -333,7 +400,13 @@ impl Unpack50Decoder {
                         self.reps[..=rep_index].rotate_right(1);
                         self.reps[0] = distance;
                         self.last_length = length;
-                        self.copy_match(&mut output, distance, length, output_size)?;
+                        self.copy_match(
+                            &mut output,
+                            distance,
+                            length,
+                            output_size,
+                            dictionary_size,
+                        )?;
                     }
                     262.. if mode == DecodeMode::Lz => {
                         let length_slot = symbol - 262;
@@ -353,7 +426,13 @@ impl Unpack50Decoder {
                         self.reps.rotate_right(1);
                         self.reps[0] = distance;
                         self.last_length = length;
-                        self.copy_match(&mut output, distance, length, output_size)?;
+                        self.copy_match(
+                            &mut output,
+                            distance,
+                            length,
+                            output_size,
+                            dictionary_size,
+                        )?;
                     }
                     _ if mode == DecodeMode::LiteralOnly => {
                         return Err(Error::InvalidData(
@@ -368,7 +447,7 @@ impl Unpack50Decoder {
                 }
             }
 
-            input_pos += block.payload.end;
+            self.tables = Some(tables);
             if block.header.is_last || output.len() >= output_size {
                 break;
             }
@@ -377,6 +456,10 @@ impl Unpack50Decoder {
         if output.len() == output_size {
             apply_filters(&mut output, &filters)?;
             self.history.extend_from_slice(&output);
+            if self.history.len() > dictionary_size {
+                let discard = self.history.len() - dictionary_size;
+                self.history.drain(..discard);
+            }
             Ok(output)
         } else {
             Err(Error::NeedMoreInput)
@@ -396,7 +479,13 @@ impl Unpack50Decoder {
         distance: usize,
         length: usize,
         output_limit: usize,
+        dictionary_size: usize,
     ) -> Result<()> {
+        if distance > dictionary_size {
+            return Err(Error::InvalidData(
+                "RAR 5 match distance exceeds dictionary",
+            ));
+        }
         if distance == 0 || distance > self.history.len() + output.len() {
             return Err(Error::InvalidData("RAR 5 match distance exceeds window"));
         }
@@ -419,6 +508,61 @@ impl Unpack50Decoder {
         }
         Ok(())
     }
+}
+
+fn read_compressed_block(input: &mut impl Read) -> Result<OwnedCompressedBlock> {
+    let mut fixed = [0u8; 2];
+    input
+        .read_exact(&mut fixed)
+        .map_err(|_| Error::NeedMoreInput)?;
+    let flags = fixed[0];
+    let checksum = fixed[1];
+    let size_bytes_len = match (flags >> 3) & 0x03 {
+        0 => 1,
+        1 => 2,
+        2 => 3,
+        _ => return Err(Error::InvalidData("RAR 5 block size length is invalid")),
+    };
+    let mut size_bytes = [0u8; 3];
+    input
+        .read_exact(&mut size_bytes[..size_bytes_len])
+        .map_err(|_| Error::NeedMoreInput)?;
+
+    let actual = size_bytes[..size_bytes_len]
+        .iter()
+        .fold(checksum ^ flags, |acc, &byte| acc ^ byte);
+    if actual != 0x5a {
+        return Err(Error::InvalidData("RAR 5 block header checksum mismatch"));
+    }
+
+    let payload_size = size_bytes[..size_bytes_len]
+        .iter()
+        .enumerate()
+        .fold(0usize, |acc, (index, &byte)| {
+            acc | (usize::from(byte) << (index * 8))
+        });
+    let mut payload = vec![0; payload_size];
+    input
+        .read_exact(&mut payload)
+        .map_err(|_| Error::NeedMoreInput)?;
+    let final_byte_bits = ((flags & 0x07) + 1).min(8);
+    let payload_bits = if payload_size == 0 {
+        0
+    } else {
+        (payload_size - 1) * 8 + usize::from(final_byte_bits)
+    };
+
+    Ok(OwnedCompressedBlock {
+        header: CompressedBlockHeader {
+            flags,
+            is_last: flags & 0x40 != 0,
+            has_tables: flags & 0x80 != 0,
+            final_byte_bits,
+            payload_size,
+            payload_bits,
+        },
+        payload,
+    })
 }
 
 impl Default for Unpack50Decoder {
@@ -642,6 +786,9 @@ pub fn slot_to_distance(slot: usize, extra_bits: u32) -> Result<usize> {
 #[derive(Debug, Clone)]
 pub struct HuffmanTable {
     symbols: Vec<HuffmanSymbol>,
+    first_code: [u16; 16],
+    first_index: [usize; 16],
+    counts: [u16; 16],
 }
 
 #[derive(Debug, Clone)]
@@ -663,11 +810,20 @@ impl HuffmanTable {
             }
         }
 
+        let mut first_code = [0u16; 16];
         let mut next_code = [0u16; 16];
         let mut code = 0u16;
         for length in 1..=15 {
             code = (code + count[length - 1]) << 1;
+            first_code[length] = code;
             next_code[length] = code;
+        }
+
+        let mut first_index = [0usize; 16];
+        let mut index = 0usize;
+        for length in 1..=15 {
+            first_index[length] = index;
+            index += usize::from(count[length]);
         }
 
         let mut symbols = Vec::new();
@@ -684,7 +840,12 @@ impl HuffmanTable {
             });
         }
         symbols.sort_by_key(|item| (item.len, item.code, item.symbol));
-        Ok(Self { symbols })
+        Ok(Self {
+            symbols,
+            first_code,
+            first_index,
+            counts: count,
+        })
     }
 
     pub fn is_empty(&self) -> bool {
@@ -698,12 +859,14 @@ impl HuffmanTable {
         let mut code = 0u16;
         for len in 1..=15 {
             code = (code << 1) | bits.read_bits(1)? as u16;
-            if let Some(symbol) = self
-                .symbols
-                .iter()
-                .find(|symbol| symbol.len == len && symbol.code == code)
-            {
-                return Ok(symbol.symbol);
+            let count = self.counts[len];
+            if count != 0 {
+                let first = self.first_code[len];
+                let offset = code.wrapping_sub(first);
+                if offset < count {
+                    let index = self.first_index[len] + usize::from(offset);
+                    return Ok(self.symbols[index].symbol);
+                }
             }
         }
         Err(Error::InvalidData("RAR 5 invalid Huffman code"))
@@ -724,16 +887,29 @@ impl<'a> BitReader<'a> {
         if count > 32 {
             return Err(Error::InvalidData("RAR 5 bit read is too wide"));
         }
-        let mut value = 0;
-        for _ in 0..count {
-            let byte = *self
-                .input
-                .get(self.bit_pos / 8)
-                .ok_or(Error::NeedMoreInput)?;
-            let bit = (byte >> (7 - (self.bit_pos % 8))) & 1;
-            value = (value << 1) | u32::from(bit);
-            self.bit_pos += 1;
+        let end = self
+            .bit_pos
+            .checked_add(usize::from(count))
+            .ok_or(Error::NeedMoreInput)?;
+        if end > self.input.len() * 8 {
+            return Err(Error::NeedMoreInput);
         }
+
+        let mut value = 0u32;
+        let mut remaining = usize::from(count);
+        while remaining != 0 {
+            let byte = self.input[self.bit_pos / 8];
+            let bit_offset = self.bit_pos % 8;
+            let available = 8 - bit_offset;
+            let take = available.min(remaining);
+            let shift = available - take;
+            let mask = ((1u16 << take) - 1) as u8;
+            let chunk = (byte >> shift) & mask;
+            value = (value << take) | u32::from(chunk);
+            self.bit_pos += take;
+            remaining -= take;
+        }
+
         Ok(value)
     }
 }
@@ -941,6 +1117,39 @@ mod tests {
     }
 
     #[test]
+    fn decode_member_from_reader_accepts_incremental_input() {
+        struct OneByteReader<'a> {
+            data: &'a [u8],
+            pos: usize,
+        }
+
+        impl Read for OneByteReader<'_> {
+            fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+                if self.pos >= self.data.len() {
+                    return Ok(0);
+                }
+                out[0] = self.data[self.pos];
+                self.pos += 1;
+                Ok(1)
+            }
+        }
+
+        let payload = literal_only_payload(b"ABBA");
+        let input = compressed_block(0xc7, &payload);
+        let mut reader = OneByteReader {
+            data: &input,
+            pos: 0,
+        };
+        let mut decoder = Unpack50Decoder::new();
+
+        let output = decoder
+            .decode_member_from_reader(&mut reader, 0, 4, false, DecodeMode::LiteralOnly)
+            .unwrap();
+
+        assert_eq!(output, b"ABBA");
+    }
+
+    #[test]
     fn decodes_synthetic_new_match_block() {
         let payload = new_match_payload();
         let input = compressed_block(0xc7, &payload);
@@ -1018,7 +1227,9 @@ mod tests {
         let decoder = Unpack50Decoder::new();
         let mut output = b"AB".to_vec();
 
-        decoder.copy_match(&mut output, 2, 6, 8).unwrap();
+        decoder
+            .copy_match(&mut output, 2, 6, 8, DEFAULT_DICTIONARY_SIZE)
+            .unwrap();
 
         assert_eq!(output, b"ABABABAB");
     }
@@ -1029,13 +1240,49 @@ mod tests {
         let mut output = b"AB".to_vec();
 
         assert_eq!(
-            decoder.copy_match(&mut output, 3, 1, 3),
+            decoder.copy_match(&mut output, 3, 1, 3, DEFAULT_DICTIONARY_SIZE),
             Err(Error::InvalidData("RAR 5 match distance exceeds window"))
         );
         assert_eq!(
-            decoder.copy_match(&mut output, 1, 2, 3),
+            decoder.copy_match(&mut output, 1, 2, 3, DEFAULT_DICTIONARY_SIZE),
             Err(Error::InvalidData("RAR 5 match exceeds output limit"))
         );
+    }
+
+    #[test]
+    fn rejects_match_distance_beyond_dictionary() {
+        let decoder = Unpack50Decoder::new();
+        let mut output = b"ABCD".to_vec();
+
+        assert_eq!(
+            decoder.copy_match(&mut output, 4, 1, 5, 3),
+            Err(Error::InvalidData(
+                "RAR 5 match distance exceeds dictionary"
+            ))
+        );
+    }
+
+    #[test]
+    fn solid_history_is_capped_to_dictionary_size() {
+        let mut decoder = Unpack50Decoder::new();
+        let first = compressed_block(0xc7, &literal_only_payload(b"ABBA"));
+        let second = compressed_block(0xc7, &literal_only_payload(b"BAAB"));
+
+        assert_eq!(
+            decoder
+                .decode_member_with_dictionary(&first, 0, 4, 6, false, DecodeMode::LiteralOnly)
+                .unwrap(),
+            b"ABBA"
+        );
+        assert_eq!(decoder.history, b"ABBA");
+
+        assert_eq!(
+            decoder
+                .decode_member_with_dictionary(&second, 0, 4, 6, true, DecodeMode::LiteralOnly)
+                .unwrap(),
+            b"BAAB"
+        );
+        assert_eq!(decoder.history, b"BABAAB");
     }
 
     struct BitWriter {

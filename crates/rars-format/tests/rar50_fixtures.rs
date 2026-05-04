@@ -1,6 +1,7 @@
 use rars_codec::rar50::{decode_lz, parse_compressed_block, read_table_lengths, DecodeTables};
 use rars_format::rar50::{extract_volumes, Archive};
 use rars_format::{detect_archive_family, ArchiveFamily, Error};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 fn fixture(name: &str) -> PathBuf {
@@ -53,6 +54,33 @@ fn parses_and_extracts_rar50_stored_file() {
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"hello.txt");
     assert_eq!(extracted[0].data, b"Hello, RAR 5.0 fixture world.\n");
+}
+
+#[test]
+fn extract_to_reports_rar50_entry_context_on_write_failure() {
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("sink failed"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let bytes = std::fs::read(fixture("stored.rar")).unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+
+    assert!(matches!(
+        archive.extract_to(|_| Ok(Box::new(FailingWriter))),
+        Err(Error::AtEntry {
+            name,
+            operation: "writing",
+            source
+        }) if name == b"hello.txt" && matches!(*source, Error::Io(_))
+    ));
 }
 
 #[test]
@@ -132,7 +160,11 @@ fn rejects_corrupt_rar50_stored_payload_hash_when_blake2_is_present() {
 
     assert!(matches!(
         archive.extract(),
-        Err(Error::HashMismatch { hash_type: 0 })
+        Err(Error::AtEntry {
+            name,
+            operation: "verifying",
+            source
+        }) if name == b"hello.txt" && matches!(*source, Error::HashMismatch { hash_type: 0 })
     ));
 }
 
@@ -387,7 +419,10 @@ fn rejects_corrupt_rar50_header_checksum() {
 
     assert!(matches!(
         Archive::parse(&bytes),
-        Err(Error::Crc32Mismatch { .. })
+        Err(Error::AtArchiveOffset {
+            offset: 8,
+            source
+        }) if matches!(*source, Error::Crc32Mismatch { .. })
     ));
 }
 
@@ -398,7 +433,10 @@ fn rejects_overlong_rar50_header_size_vint() {
 
     assert!(matches!(
         Archive::parse(&bytes),
-        Err(Error::InvalidHeader("RAR 5 vint is too long"))
+        Err(Error::AtArchiveOffset {
+            offset: 8,
+            source
+        }) if matches!(*source, Error::InvalidHeader("RAR 5 vint is too long"))
     ));
 }
 
@@ -415,6 +453,10 @@ fn rejects_corrupt_rar50_stored_payload_checksum_when_crc32_is_present() {
 
     assert!(matches!(
         archive.extract(),
-        Err(Error::Crc32Mismatch { .. })
+        Err(Error::AtEntry {
+            name,
+            operation: "verifying",
+            source
+        }) if name == b"hello.txt" && matches!(*source, Error::Crc32Mismatch { .. })
     ));
 }

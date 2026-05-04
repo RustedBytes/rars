@@ -1,5 +1,6 @@
 use rars_format::rar13::{extract_volumes, file_checksum, Archive};
 use rars_format::{detect_archive_family, find_archive_start, ArchiveFamily, Error};
+use std::io::Write;
 
 const EMPTY: &[u8] = include_bytes!("fixtures/rar13/EMPTY.RAR");
 const BIG80K: &[u8] = include_bytes!("fixtures/rar13/BIG80K.RAR");
@@ -37,6 +38,39 @@ fn detects_real_rar1402_archive() {
     assert_eq!(sig.family, ArchiveFamily::Rar13);
     assert_eq!(sig.offset, 0);
     assert_eq!(sig.length, 4);
+}
+
+#[test]
+fn extract_to_reports_rar13_entry_context_on_write_failure() {
+    struct FailWriter;
+
+    impl Write for FailWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("sink failed"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let archive = Archive::parse(README_STORE).unwrap();
+    let error = archive
+        .extract_to(None, |_meta| Ok(Box::new(FailWriter)))
+        .unwrap_err();
+
+    match error {
+        Error::AtEntry {
+            name,
+            operation,
+            source,
+        } => {
+            assert_eq!(name, b"README");
+            assert_eq!(operation, "extracting");
+            assert!(matches!(*source, Error::Io(_)));
+        }
+        other => panic!("expected entry context, got {other:?}"),
+    }
 }
 
 #[test]

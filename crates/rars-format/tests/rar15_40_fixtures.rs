@@ -4,6 +4,7 @@ use rars_format::rar15_40::{
     FileEntry, NewSubKind, StoredEntry, WriterOptions,
 };
 use rars_format::{detect_archive_family, ArchiveFamily, ArchiveVersion, Error, FeatureSet};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 fn fixture(name: &str) -> PathBuf {
@@ -37,6 +38,40 @@ fn detects_rar15_40_signature_family() {
     assert_eq!(sig.family, ArchiveFamily::Rar15To40);
     assert_eq!(sig.offset, 0);
     assert_eq!(sig.length, 7);
+}
+
+#[test]
+fn extract_to_reports_rar15_entry_context_on_write_failure() {
+    struct FailWriter;
+
+    impl Write for FailWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("sink failed"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let bytes = std::fs::read(fixture("rars_generated/stored.rar")).unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let error = archive
+        .extract_to_with_password(None, |_meta| Ok(Box::new(FailWriter)))
+        .unwrap_err();
+
+    match error {
+        Error::AtEntry {
+            name,
+            operation,
+            source,
+        } => {
+            assert_eq!(name, b"payload.txt");
+            assert_eq!(operation, "extracting");
+            assert!(matches!(*source, Error::Io(_)));
+        }
+        other => panic!("expected entry context, got {other:?}"),
+    }
 }
 
 #[test]

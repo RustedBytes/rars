@@ -132,38 +132,89 @@ impl Blake2s {
     }
 }
 
-pub(crate) fn hash(input: &[u8]) -> [u8; OUT_BYTES] {
-    let mut root = Blake2s::new(0, 1, true);
-    let mut leaves = [
-        Blake2s::new(0, 0, false),
-        Blake2s::new(1, 0, false),
-        Blake2s::new(2, 0, false),
-        Blake2s::new(3, 0, false),
-        Blake2s::new(4, 0, false),
-        Blake2s::new(5, 0, false),
-        Blake2s::new(6, 0, false),
-        Blake2s::new(7, 0, true),
-    ];
+pub(crate) struct Hasher {
+    leaves: [Blake2s; PARALLELISM],
+    buffer: [u8; BUFFER_BYTES],
+    buffer_len: usize,
+}
 
-    let mut chunks = input.chunks_exact(BUFFER_BYTES);
-    for group in &mut chunks {
-        for (leaf, block) in leaves.iter_mut().zip(group.chunks_exact(BLOCK_BYTES)) {
+impl Hasher {
+    pub(crate) fn new() -> Self {
+        Self {
+            leaves: [
+                Blake2s::new(0, 0, false),
+                Blake2s::new(1, 0, false),
+                Blake2s::new(2, 0, false),
+                Blake2s::new(3, 0, false),
+                Blake2s::new(4, 0, false),
+                Blake2s::new(5, 0, false),
+                Blake2s::new(6, 0, false),
+                Blake2s::new(7, 0, true),
+            ],
+            buffer: [0; BUFFER_BYTES],
+            buffer_len: 0,
+        }
+    }
+
+    pub(crate) fn update(&mut self, mut input: &[u8]) {
+        if input.is_empty() {
+            return;
+        }
+
+        if self.buffer_len > 0 {
+            let fill = BUFFER_BYTES - self.buffer_len;
+            if input.len() >= fill {
+                self.buffer[self.buffer_len..].copy_from_slice(&input[..fill]);
+                let group = self.buffer;
+                self.update_group(&group);
+                self.buffer_len = 0;
+                input = &input[fill..];
+            } else {
+                self.buffer[self.buffer_len..self.buffer_len + input.len()].copy_from_slice(input);
+                self.buffer_len += input.len();
+                return;
+            }
+        }
+
+        let mut chunks = input.chunks_exact(BUFFER_BYTES);
+        for group in &mut chunks {
+            self.update_group(group);
+        }
+        let tail = chunks.remainder();
+        self.buffer[..tail.len()].copy_from_slice(tail);
+        self.buffer_len = tail.len();
+    }
+
+    pub(crate) fn finalize(mut self) -> [u8; OUT_BYTES] {
+        if self.buffer_len > 0 {
+            let tail = &self.buffer[..self.buffer_len];
+            for (leaf_index, leaf) in self.leaves.iter_mut().enumerate() {
+                let start = leaf_index * BLOCK_BYTES;
+                if tail.len() > start {
+                    let end = (start + BLOCK_BYTES).min(tail.len());
+                    leaf.update(&tail[start..end]);
+                }
+            }
+        }
+
+        let mut root = Blake2s::new(0, 1, true);
+        for leaf in self.leaves {
+            root.update(&leaf.finalize());
+        }
+        root.finalize()
+    }
+
+    fn update_group(&mut self, group: &[u8]) {
+        for (leaf, block) in self.leaves.iter_mut().zip(group.chunks_exact(BLOCK_BYTES)) {
             leaf.update(block);
         }
     }
-    let tail = chunks.remainder();
-    for (leaf_index, leaf) in leaves.iter_mut().enumerate() {
-        let start = leaf_index * BLOCK_BYTES;
-        if tail.len() > start {
-            let end = (start + BLOCK_BYTES).min(tail.len());
-            leaf.update(&tail[start..end]);
-        }
-    }
+}
 
-    for leaf in leaves {
-        root.update(&leaf.finalize());
-    }
-    root.finalize()
+pub(crate) fn hash(input: &[u8]) -> [u8; OUT_BYTES] {
+    let mut hasher = Hasher::new();
+    hasher.update(input);
+    hasher.finalize()
 }
 
 fn g(v: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize, x: u32, y: u32) {
@@ -179,7 +230,7 @@ fn g(v: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize, x: u32, y: u32) 
 
 #[cfg(test)]
 mod tests {
-    use super::hash;
+    use super::{hash, Hasher};
 
     #[test]
     fn matches_public_blake2sp_vectors() {
@@ -191,6 +242,16 @@ mod tests {
             hex(&hash(b"abc")),
             "70f75b58f1fecab821db43c88ad84edde5a52600616cd22517b7bb14d440a7d5"
         );
+    }
+
+    #[test]
+    fn streaming_hasher_matches_one_shot_hash() {
+        let input: Vec<u8> = (0..4097).map(|i| (i % 251) as u8).collect();
+        let mut hasher = Hasher::new();
+        for chunk in input.chunks(37) {
+            hasher.update(chunk);
+        }
+        assert_eq!(hasher.finalize(), hash(&input));
     }
 
     fn hex(bytes: &[u8]) -> String {

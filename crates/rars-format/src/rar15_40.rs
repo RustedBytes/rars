@@ -15,6 +15,13 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+mod extract;
+use extract::DecoderSession;
+pub use extract::{
+    extract_volumes, extract_volumes_to, extract_volumes_to_with_password,
+    extract_volumes_with_password,
+};
+
 const MARK_HEAD: u8 = 0x72;
 const MAIN_HEAD: u8 = 0x73;
 const FILE_HEAD: u8 = 0x74;
@@ -44,6 +51,7 @@ const FHD_EXTTIME: u16 = 0x1000;
 const FHD_DIRECTORY_MASK: u16 = 0x00e0;
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Archive {
     pub sfx_offset: usize,
     pub main: MainHeader,
@@ -58,6 +66,7 @@ enum ArchiveSource {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MainHeader {
     pub head_crc: u16,
     pub flags: u16,
@@ -98,6 +107,7 @@ impl MainHeader {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Block {
     File(FileHeader),
     Comment(CommentHeader),
@@ -107,6 +117,7 @@ pub enum Block {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BlockHeader {
     pub head_crc: u16,
     pub head_type: u8,
@@ -117,6 +128,7 @@ pub struct BlockHeader {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FileHeader {
     pub block: BlockHeader,
     pub pack_size: u64,
@@ -135,12 +147,14 @@ pub struct FileHeader {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct NewSubHeader {
     pub file: FileHeader,
     pub kind: NewSubKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CommentHeader {
     pub block: BlockHeader,
     pub unp_size: u16,
@@ -151,6 +165,7 @@ pub struct CommentHeader {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum NewSubKind {
     ArchiveComment,
     RecoveryRecord,
@@ -569,13 +584,25 @@ impl FileHeader {
             | Error::UnsupportedVersion(_)
             | Error::UnsupportedFeature { .. }
             | Error::TooShort
-            | Error::Io(_) => error,
+            | Error::Io(_)
+            | Error::AtArchiveOffset { .. }
+            | Error::AtEntry { .. } => error,
             Error::InvalidHeader(_)
             | Error::CrcMismatch { .. }
             | Error::Crc32Mismatch { .. }
             | Error::HashMismatch { .. }
             | Error::WrongPasswordOrCorruptData => Error::WrongPasswordOrCorruptData,
         }
+    }
+
+    fn entry_error(&self, operation: &'static str, error: Error) -> Error {
+        if matches!(
+            error,
+            Error::NeedPassword | Error::WrongPasswordOrCorruptData
+        ) {
+            return error;
+        }
+        error.at_entry(self.name.clone(), operation)
     }
 
     fn crc_result(&self, actual: u32, password: Option<&[u8]>) -> Result<()> {
@@ -1105,9 +1132,12 @@ impl Archive {
             }
             let mut writer = open(&meta)?;
             if file.is_stored() {
-                file.write_stored_to(self, password, &mut writer)?;
+                file.write_stored_to(self, password, &mut writer)
+                    .map_err(|error| file.entry_error("extracting", error))?;
             } else {
-                session.write_file_to(self, file, &mut writer)?;
+                session
+                    .write_file_to(self, file, &mut writer)
+                    .map_err(|error| file.entry_error("extracting", error))?;
             }
         }
         Ok(())
@@ -1131,288 +1161,6 @@ impl Archive {
         comment.file.verify_crc32(&data)?;
         Ok(Some(data))
     }
-}
-
-enum CodecState {
-    Unpack15(Box<Unpack15>),
-    Unpack20(Box<Unpack20>),
-    Unpack29(Box<Unpack29>),
-}
-
-impl CodecState {
-    fn new_for(file: &FileHeader) -> Result<Self> {
-        if file.unp_ver >= 29 {
-            return Ok(Self::Unpack29(Box::default()));
-        }
-        if file.unp_ver == 20 || file.unp_ver == 26 {
-            return Ok(Self::Unpack20(Box::default()));
-        }
-        if file.unp_ver == 15 {
-            return Ok(Self::Unpack15(Box::default()));
-        }
-        Err(Error::InvalidHeader(
-            "RAR 1.5 compressed file extraction is not implemented",
-        ))
-    }
-
-    fn supports(&self, file: &FileHeader) -> bool {
-        match self {
-            Self::Unpack15(_) => file.unp_ver == 15,
-            Self::Unpack20(_) => file.unp_ver == 20 || file.unp_ver == 26,
-            Self::Unpack29(_) => file.unp_ver >= 29,
-        }
-    }
-
-    fn decode_file_data(
-        &mut self,
-        archive: &Archive,
-        file: &FileHeader,
-        solid: bool,
-        password: Option<&[u8]>,
-    ) -> Result<Vec<u8>> {
-        match self {
-            Self::Unpack15(decoder) => {
-                if file.is_encrypted() {
-                    decoder
-                        .decode_member(
-                            &file.packed_data_for_decode(archive, password)?,
-                            usize::try_from(file.unp_size).map_err(|_| {
-                                Error::InvalidHeader("RAR 1.5 unpacked size overflows usize")
-                            })?,
-                            solid,
-                        )
-                        .map_err(Into::into)
-                } else {
-                    file.unpacked_data_with_unpack15(archive, decoder, solid)
-                }
-            }
-            Self::Unpack20(decoder) => file.unpacked_data_with_unpack20(archive, decoder, password),
-            Self::Unpack29(decoder) => {
-                if file.is_encrypted() {
-                    decoder
-                        .decode_member(
-                            &file.packed_data_for_decode(archive, password)?,
-                            usize::try_from(file.unp_size).map_err(|_| {
-                                Error::InvalidHeader("RAR 2.9 unpacked size overflows usize")
-                            })?,
-                        )
-                        .map_err(Into::into)
-                } else {
-                    file.unpacked_data_with_rar29(archive, decoder)
-                }
-            }
-        }
-    }
-
-    fn write_file_to(
-        &mut self,
-        archive: &Archive,
-        file: &FileHeader,
-        solid: bool,
-        password: Option<&[u8]>,
-        out: &mut impl Write,
-    ) -> Result<()> {
-        match self {
-            Self::Unpack15(decoder) => {
-                file.write_unpack15_to(archive, decoder, solid, password, out)
-            }
-            Self::Unpack20(decoder) => file.write_unpack20_to(archive, decoder, password, out),
-            Self::Unpack29(decoder) => {
-                if file.is_encrypted() {
-                    let mut crc = Crc32::new();
-                    let mut crc_writer = CrcWriter {
-                        inner: out,
-                        crc: &mut crc,
-                    };
-                    let data = decoder
-                        .decode_member(
-                            &file.packed_data_for_decode(archive, password)?,
-                            usize::try_from(file.unp_size).map_err(|_| {
-                                Error::InvalidHeader("RAR 1.5 unpacked size overflows usize")
-                            })?,
-                        )
-                        .map_err(Error::from)
-                        .map_err(|error| file.map_encrypted_payload_error(password, error))?;
-                    crc_writer.write_all(&data)?;
-                    let actual = crc.finish();
-                    file.crc_result(actual, password)
-                } else {
-                    file.write_rar29_to(archive, decoder, out)
-                }
-            }
-        }
-    }
-
-    fn write_split_to(
-        &mut self,
-        input: &mut impl Read,
-        file: &FileHeader,
-        solid: bool,
-        password: Option<&[u8]>,
-        out: &mut impl Write,
-    ) -> Result<()> {
-        let mut crc = Crc32::new();
-        let mut crc_writer = CrcWriter {
-            inner: out,
-            crc: &mut crc,
-        };
-        let target = usize::try_from(file.unp_size)
-            .map_err(|_| Error::InvalidHeader("RAR 1.5 split unpacked size overflows usize"))?;
-        match self {
-            Self::Unpack15(decoder) => decoder
-                .decode_member_from_reader(input, target, solid, &mut crc_writer)
-                .map_err(Error::from)
-                .map_err(|error| file.map_encrypted_payload_error(password, error))?,
-            Self::Unpack20(decoder) => decoder
-                .decode_member_from_reader(input, target, &mut crc_writer)
-                .map_err(Error::from)
-                .map_err(|error| file.map_encrypted_payload_error(password, error))?,
-            Self::Unpack29(decoder) => decoder
-                .decode_member_from_reader(input, target, &mut crc_writer)
-                .map_err(Error::from)
-                .map_err(|error| file.map_encrypted_payload_error(password, error))?,
-        }
-        let actual = crc.finish();
-        file.crc_result(actual, password)
-    }
-}
-
-struct DecoderSession<'a> {
-    codec: Option<CodecState>,
-    solid: bool,
-    decoded_files: usize,
-    password: Option<&'a [u8]>,
-}
-
-impl<'a> DecoderSession<'a> {
-    fn new(solid: bool) -> Self {
-        Self::new_with_password(solid, None)
-    }
-
-    fn new_with_password(solid: bool, password: Option<&'a [u8]>) -> Self {
-        Self {
-            codec: None,
-            solid,
-            decoded_files: 0,
-            password,
-        }
-    }
-
-    fn extract_file(&mut self, archive: &Archive, file: &FileHeader) -> Result<ExtractedEntry> {
-        if file.is_directory() || file.is_stored() {
-            return file.extract_with_password(archive, self.password);
-        }
-        let data = self
-            .decode_file_data(archive, file)
-            .map_err(|error| file.map_encrypted_payload_error(self.password, error))?;
-        file.verify_crc32(&data)
-            .map_err(|error| file.map_encrypted_payload_error(self.password, error))?;
-        self.decoded_files += 1;
-        Ok(ExtractedEntry {
-            name: file.name.clone(),
-            data,
-            file_time: file.file_time,
-            attr: file.attr,
-            host_os: file.host_os,
-            is_directory: false,
-        })
-    }
-
-    fn write_file_to(
-        &mut self,
-        archive: &Archive,
-        file: &FileHeader,
-        out: &mut impl Write,
-    ) -> Result<()> {
-        let solid = self.solid && self.decoded_files != 0;
-        let password = self.password;
-        self.codec_for(file)?
-            .write_file_to(archive, file, solid, password, out)?;
-        self.decoded_files += 1;
-        Ok(())
-    }
-
-    fn write_split_to(
-        &mut self,
-        input: &mut impl Read,
-        final_file: &FileHeader,
-        out: &mut impl Write,
-    ) -> Result<()> {
-        let solid = self.solid && self.decoded_files != 0;
-        let password = self.password;
-        self.codec_for(final_file)?
-            .write_split_to(input, final_file, solid, password, out)?;
-        self.decoded_files += 1;
-        Ok(())
-    }
-
-    fn decode_file_data(&mut self, archive: &Archive, file: &FileHeader) -> Result<Vec<u8>> {
-        let solid = self.solid && self.decoded_files != 0;
-        let password = self.password;
-        self.codec_for(file)?
-            .decode_file_data(archive, file, solid, password)
-    }
-
-    fn codec_for(&mut self, file: &FileHeader) -> Result<&mut CodecState> {
-        let reset = !self.solid
-            || self
-                .codec
-                .as_ref()
-                .is_none_or(|codec| !codec.supports(file));
-        if reset {
-            self.codec = Some(CodecState::new_for(file)?);
-        }
-        self.codec
-            .as_mut()
-            .ok_or(Error::InvalidHeader("RAR 1.5 codec state is missing"))
-    }
-}
-
-/// Convenience multivolume extraction API that buffers each extracted entry in
-/// memory. Prefer [`extract_volumes_to`] for large archives.
-pub fn extract_volumes(volumes: &[Archive]) -> Result<Vec<ExtractedEntry>> {
-    extract_volumes_with_password(volumes, None)
-}
-
-pub fn extract_volumes_with_password(
-    volumes: &[Archive],
-    password: Option<&[u8]>,
-) -> Result<Vec<ExtractedEntry>> {
-    use std::cell::RefCell;
-    use std::rc::Rc;
-
-    struct SharedWriter(Rc<RefCell<Vec<u8>>>);
-
-    impl Write for SharedWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.borrow_mut().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    let mut captured: Vec<(ExtractedEntryMeta, Rc<RefCell<Vec<u8>>>)> = Vec::new();
-    extract_volumes_to_with_password(volumes, password, |meta| {
-        let data = Rc::new(RefCell::new(Vec::new()));
-        captured.push((meta.clone(), data.clone()));
-        Ok(Box::new(SharedWriter(data)))
-    })?;
-
-    let out = captured
-        .into_iter()
-        .map(|(meta, data)| ExtractedEntry {
-            name: meta.name,
-            data: data.borrow().clone(),
-            file_time: meta.file_time,
-            attr: meta.attr,
-            host_os: meta.host_os,
-            is_directory: meta.is_directory,
-        })
-        .collect();
-    Ok(out)
 }
 
 pub fn write_stored_archive(
@@ -1648,29 +1396,6 @@ fn encrypt_split_packed_data(
         }
         _ => Err(Error::UnsupportedVersion(target)),
     }
-}
-
-fn decrypt_split_packed_data(
-    data: &mut [u8],
-    unp_ver: u8,
-    password: &[u8],
-    salt: Option<[u8; 8]>,
-) -> Result<()> {
-    if unp_ver == 15 {
-        Rar15Cipher::new(password).crypt_in_place(data);
-        return Ok(());
-    }
-    if unp_ver == 20 || unp_ver == 26 {
-        Rar20Cipher::new(password).decrypt_in_place(data);
-        return Ok(());
-    }
-    if unp_ver >= 29 {
-        Rar30Cipher::new(password, salt).decrypt_in_place(data);
-        return Ok(());
-    }
-    Err(Error::InvalidHeader(
-        "RAR 1.5-4.x encrypted split extraction is not implemented",
-    ))
 }
 
 fn write_main_header(out: &mut Vec<u8>, flags: u16) {
@@ -1954,287 +1679,6 @@ fn write_comment_header_crc(out: &mut [u8], start: usize) {
     let end = start + 13;
     let crc = (crc32(&out[start + 2..end]) & 0xffff) as u16;
     out[start..start + 2].copy_from_slice(&crc.to_le_bytes());
-}
-
-/// Streams a multivolume archive set to caller-provided writers.
-pub fn extract_volumes_to<F>(volumes: &[Archive], open: F) -> Result<()>
-where
-    F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
-{
-    extract_volumes_to_with_password(volumes, None, open)
-}
-
-pub fn extract_volumes_to_with_password<F>(
-    volumes: &[Archive],
-    password: Option<&[u8]>,
-    mut open: F,
-) -> Result<()>
-where
-    F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
-{
-    if volumes.is_empty() {
-        return Err(Error::InvalidHeader("RAR 1.5 volume set is empty"));
-    }
-
-    let mut pending: Option<PendingSplitRefs> = None;
-    let mut session = DecoderSession::new_with_password(
-        volumes
-            .first()
-            .is_some_and(|archive| archive.main.is_solid()),
-        password,
-    );
-    for (volume_index, archive) in volumes.iter().enumerate() {
-        for (file_index, file) in archive.files().enumerate() {
-            match (
-                pending.is_some(),
-                file.is_split_before(),
-                file.is_split_after(),
-            ) {
-                (false, false, false) => {
-                    let meta = file.metadata();
-                    if meta.is_directory {
-                        let _ = open(&meta)?;
-                    } else {
-                        let mut writer = open(&meta)?;
-                        if file.is_stored() {
-                            file.write_stored_to(archive, password, &mut writer)?;
-                        } else {
-                            session.write_file_to(archive, file, &mut writer)?;
-                        }
-                    }
-                }
-                (false, false, true) => {
-                    validate_split_fragment(file, password)?;
-                    pending = Some(PendingSplitRefs::new(file, volume_index, file_index));
-                }
-                (true, true, true) => {
-                    let current = pending.as_mut().expect("pending split");
-                    validate_split_continuation_refs(current, file, password)?;
-                    current.append(file, volume_index, file_index);
-                }
-                (true, true, false) => {
-                    let mut completed = pending.take().expect("pending split");
-                    validate_split_continuation_refs(&completed, file, password)?;
-                    completed.append(file, volume_index, file_index);
-                    completed.write_to(volumes, file, password, &mut session, &mut open)?;
-                }
-                (false, true, _) => {
-                    return Err(Error::InvalidHeader(
-                        "RAR 1.5 split entry is missing its first part",
-                    ));
-                }
-                (true, false, _) => {
-                    return Err(Error::InvalidHeader(
-                        "RAR 1.5 split entry is interrupted by a regular entry",
-                    ));
-                }
-            }
-        }
-    }
-
-    if pending.is_some() {
-        return Err(Error::InvalidHeader("RAR 1.5 split entry is incomplete"));
-    }
-
-    Ok(())
-}
-
-fn validate_split_fragment(file: &FileHeader, password: Option<&[u8]>) -> Result<()> {
-    if file.is_directory() {
-        return Err(Error::InvalidHeader(
-            "RAR 1.5 split directory entry is invalid",
-        ));
-    }
-    if file.is_encrypted() && password.is_none() {
-        return Err(Error::NeedPassword);
-    }
-    Ok(())
-}
-
-fn validate_split_continuation_refs(
-    pending: &PendingSplitRefs,
-    file: &FileHeader,
-    password: Option<&[u8]>,
-) -> Result<()> {
-    validate_split_fragment(file, password)?;
-    if file.name != pending.name {
-        return Err(Error::InvalidHeader("RAR 1.5 split entry name changed"));
-    }
-    if file.method != pending.method {
-        return Err(Error::InvalidHeader(
-            "RAR 1.5 split entry compression method changed",
-        ));
-    }
-    if file.unp_ver != pending.unp_ver {
-        return Err(Error::InvalidHeader(
-            "RAR 1.5 split entry unpack version changed",
-        ));
-    }
-    if file.is_encrypted() != pending.encrypted {
-        return Err(Error::InvalidHeader(
-            "RAR 1.5 split entry encryption flag changed",
-        ));
-    }
-    if pending.encrypted && pending.unp_ver >= 29 && file.salt != pending.salt {
-        return Err(Error::InvalidHeader("RAR 3.x split entry salt changed"));
-    }
-    Ok(())
-}
-
-struct PendingSplitRefs {
-    name: Vec<u8>,
-    fragments: Vec<(usize, usize)>,
-    file_time: u32,
-    attr: u32,
-    host_os: u8,
-    method: u8,
-    unp_ver: u8,
-    encrypted: bool,
-    salt: Option<[u8; 8]>,
-}
-
-impl PendingSplitRefs {
-    fn new(file: &FileHeader, volume_index: usize, file_index: usize) -> Self {
-        Self {
-            name: file.name.clone(),
-            fragments: vec![(volume_index, file_index)],
-            file_time: file.file_time,
-            attr: file.attr,
-            host_os: file.host_os,
-            method: file.method,
-            unp_ver: file.unp_ver,
-            encrypted: file.is_encrypted(),
-            salt: file.salt,
-        }
-    }
-
-    fn append(&mut self, _file: &FileHeader, volume_index: usize, file_index: usize) {
-        self.fragments.push((volume_index, file_index));
-    }
-
-    fn write_to<F>(
-        self,
-        volumes: &[Archive],
-        final_file: &FileHeader,
-        password: Option<&[u8]>,
-        session: &mut DecoderSession,
-        open: &mut F,
-    ) -> Result<()>
-    where
-        F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
-    {
-        let meta = ExtractedEntryMeta {
-            name: self.name.clone(),
-            file_time: self.file_time,
-            attr: self.attr,
-            host_os: self.host_os,
-            is_directory: false,
-        };
-        let mut writer = open(&meta)?;
-        let mut reader = self.fragment_reader(volumes, password)?;
-
-        if final_file.is_stored() {
-            let expected_len = usize::try_from(final_file.unp_size)
-                .map_err(|_| Error::InvalidHeader("RAR 1.5 split unpacked size overflows usize"))?;
-            let actual_len = self.packed_size(volumes)?;
-            if actual_len != expected_len {
-                return Err(Error::InvalidHeader(
-                    "RAR 1.5 split stored file has wrong reassembled size",
-                ));
-            }
-
-            let mut crc = Crc32::new();
-            let mut crc_writer = CrcWriter {
-                inner: &mut writer,
-                crc: &mut crc,
-            };
-            std::io::copy(&mut reader, &mut crc_writer)?;
-            let actual = crc.finish();
-            final_file.crc_result(actual, password)
-        } else {
-            session.write_split_to(&mut reader, final_file, &mut writer)
-        }
-    }
-
-    fn packed_size(&self, volumes: &[Archive]) -> Result<usize> {
-        self.fragments
-            .iter()
-            .try_fold(0usize, |total, &(volume_index, file_index)| {
-                let archive = volumes
-                    .get(volume_index)
-                    .ok_or(Error::InvalidHeader("RAR 1.5 split volume is missing"))?;
-                let file = archive
-                    .files()
-                    .nth(file_index)
-                    .ok_or(Error::InvalidHeader("RAR 1.5 split entry is missing"))?;
-                total
-                    .checked_add(usize::try_from(file.pack_size).map_err(|_| {
-                        Error::InvalidHeader("RAR 1.5 split packed size overflows usize")
-                    })?)
-                    .ok_or(Error::InvalidHeader(
-                        "RAR 1.5 split packed size overflows usize",
-                    ))
-            })
-    }
-
-    fn fragment_reader<'a>(
-        &self,
-        volumes: &'a [Archive],
-        password: Option<&[u8]>,
-    ) -> Result<ChainedReader<'a>> {
-        if self.encrypted {
-            let Some(password) = password else {
-                return Err(Error::NeedPassword);
-            };
-            let mut data = Vec::new();
-            for &(volume_index, file_index) in &self.fragments {
-                let archive = volumes
-                    .get(volume_index)
-                    .ok_or(Error::InvalidHeader("RAR 1.5 split volume is missing"))?;
-                let file = archive
-                    .files()
-                    .nth(file_index)
-                    .ok_or(Error::InvalidHeader("RAR 1.5 split entry is missing"))?;
-                data.extend_from_slice(&file.packed_data(archive)?);
-            }
-            decrypt_split_packed_data(&mut data, self.unp_ver, password, self.salt)?;
-            return Ok(ChainedReader {
-                readers: vec![Box::new(Cursor::new(data))],
-                index: 0,
-            });
-        }
-
-        let mut readers = Vec::with_capacity(self.fragments.len());
-        for &(volume_index, file_index) in &self.fragments {
-            let archive = volumes
-                .get(volume_index)
-                .ok_or(Error::InvalidHeader("RAR 1.5 split volume is missing"))?;
-            let file = archive
-                .files()
-                .nth(file_index)
-                .ok_or(Error::InvalidHeader("RAR 1.5 split entry is missing"))?;
-            readers.push(archive.range_reader(file.packed_range.clone())?);
-        }
-        Ok(ChainedReader { readers, index: 0 })
-    }
-}
-
-struct ChainedReader<'a> {
-    readers: Vec<Box<dyn Read + 'a>>,
-    index: usize,
-}
-
-impl Read for ChainedReader<'_> {
-    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
-        while let Some(reader) = self.readers.get_mut(self.index) {
-            let read = reader.read(out)?;
-            if read != 0 {
-                return Ok(read);
-            }
-            self.index += 1;
-        }
-        Ok(0)
-    }
 }
 
 fn classify_new_sub(name: &[u8]) -> NewSubKind {
