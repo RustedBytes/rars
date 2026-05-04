@@ -1,4 +1,4 @@
-use aes::cipher::{BlockDecrypt, KeyInit};
+use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
 use aes::Aes256;
 
 const SHA256_BLOCK_SIZE: usize = 64;
@@ -66,6 +66,13 @@ impl Rar50Keys {
         Ok(())
     }
 
+    pub fn password_check_record(&self) -> [u8; 12] {
+        let mut record = [0u8; 12];
+        record[..8].copy_from_slice(&self.password_check);
+        record[8..].copy_from_slice(&sha256(&self.password_check)[..4]);
+        record
+    }
+
     pub fn mac_crc32(&self, crc: u32) -> u32 {
         let digest = hmac_sha256(&self.hash_key, &crc.to_le_bytes());
         digest.chunks_exact(4).fold(0, |acc, chunk| {
@@ -95,6 +102,20 @@ impl Rar50Cipher {
         for block in data.chunks_exact_mut(16) {
             self.decrypt_block(block);
         }
+    }
+
+    pub fn encrypt_in_place(&mut self, data: &mut [u8]) {
+        for block in data.chunks_exact_mut(16) {
+            self.encrypt_block(block);
+        }
+    }
+
+    fn encrypt_block(&mut self, block: &mut [u8]) {
+        for (byte, iv_byte) in block.iter_mut().zip(self.iv) {
+            *byte ^= iv_byte;
+        }
+        self.cipher.encrypt_block(block.into());
+        self.iv.copy_from_slice(block);
     }
 
     fn decrypt_block(&mut self, block: &mut [u8]) {

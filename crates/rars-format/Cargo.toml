@@ -6,5 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+getrandom = "0.2"
 rars-codec = { path = "../rars-codec" }
 rars-crypto = { path = "../rars-crypto" }
+rars-recovery = { path = "../rars-recovery" }

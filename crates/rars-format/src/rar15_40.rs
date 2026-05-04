@@ -24,6 +24,16 @@ pub use extract::{
 };
 pub use write::{
     write_compressed_archive, write_compressed_archive_with_comment, write_compressed_volumes,
+    write_rar29_audio_filtered_compressed_archive,
+    write_rar29_audio_range_filtered_compressed_archive,
+    write_rar29_auto_filtered_compressed_archive, write_rar29_delta_filtered_compressed_archive,
+    write_rar29_delta_range_filtered_compressed_archive,
+    write_rar29_e8_filtered_compressed_archive, write_rar29_e8_range_filtered_compressed_archive,
+    write_rar29_e8e9_filtered_compressed_archive,
+    write_rar29_e8e9_range_filtered_compressed_archive,
+    write_rar29_itanium_filtered_compressed_archive,
+    write_rar29_itanium_range_filtered_compressed_archive,
+    write_rar29_rgb_filtered_compressed_archive, write_rar29_rgb_range_filtered_compressed_archive,
     write_stored_archive, write_stored_archive_with_comment, write_stored_volumes,
 };
 

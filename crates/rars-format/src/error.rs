@@ -126,6 +126,31 @@ impl From<rars_codec::Error> for Error {
     }
 }
 
+impl From<rars_recovery::rar5::Error> for Error {
+    fn from(error: rars_recovery::rar5::Error) -> Self {
+        match error {
+            rars_recovery::rar5::Error::OddShardSize => {
+                Self::InvalidHeader("RAR 5 recovery shard size is odd")
+            }
+            rars_recovery::rar5::Error::PlanOverflow => {
+                Self::InvalidHeader("RAR 5 recovery plan overflows")
+            }
+            rars_recovery::rar5::Error::PrefixExceedsPlan => {
+                Self::InvalidHeader("RAR 5 recovery prefix exceeds planned shard capacity")
+            }
+            rars_recovery::rar5::Error::ShardSizeMismatch => {
+                Self::InvalidHeader("RAR 5 recovery shard sizes differ")
+            }
+            rars_recovery::rar5::Error::TooManyShards => {
+                Self::InvalidHeader("RAR 5 recovery shard count is invalid")
+            }
+            rars_recovery::rar5::Error::SingularElement => {
+                Self::InvalidHeader("RAR 5 recovery matrix is singular")
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

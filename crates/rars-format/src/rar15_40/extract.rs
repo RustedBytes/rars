@@ -474,7 +474,15 @@ impl PendingSplitRefs {
             let expected_len = usize::try_from(final_file.unp_size)
                 .map_err(|_| Error::InvalidHeader("RAR 1.5 split unpacked size overflows usize"))?;
             let actual_len = self.packed_size(volumes)?;
-            if actual_len != expected_len {
+            let expected_packed_len =
+                if self.encrypted && self.unp_ver >= 20 {
+                    expected_len.checked_add(15).map(|len| len & !15).ok_or(
+                        Error::InvalidHeader("RAR 2.x encrypted split stored size overflows"),
+                    )?
+                } else {
+                    expected_len
+                };
+            if actual_len != expected_packed_len {
                 return Err(Error::InvalidHeader(
                     "RAR 1.5 split stored file has wrong reassembled size",
                 ));
@@ -485,7 +493,12 @@ impl PendingSplitRefs {
                 inner: &mut writer,
                 crc: &mut crc,
             };
-            std::io::copy(&mut reader, &mut crc_writer)?;
+            let copied = std::io::copy(&mut reader.take(expected_len as u64), &mut crc_writer)?;
+            if copied != expected_len as u64 {
+                return Err(Error::InvalidHeader(
+                    "RAR 1.5 split stored file ended before unpacked size",
+                ));
+            }
             let actual = crc.finish();
             final_file
                 .crc_result(actual, password)

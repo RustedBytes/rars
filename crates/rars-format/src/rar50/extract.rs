@@ -188,6 +188,17 @@ impl FileHeader {
         decoder: &mut Unpack50Decoder,
     ) -> Result<Vec<u8>> {
         if self.is_stored() {
+            if self.encrypted {
+                let unpacked_size = usize::try_from(self.unpacked_size).map_err(|_| {
+                    Error::InvalidHeader("RAR 5 unpacked size overflows host address size")
+                })?;
+                if packed.len() < unpacked_size {
+                    return Err(Error::InvalidHeader(
+                        "RAR 5 encrypted stored file is shorter than unpacked size",
+                    ));
+                }
+                return Ok(packed[..unpacked_size].to_vec());
+            }
             if packed.len() as u64 != self.unpacked_size {
                 return Err(Error::InvalidHeader(
                     "RAR 5 stored file has mismatched packed and unpacked sizes",
@@ -527,9 +538,14 @@ impl PendingSplitRefs {
             if count == 0 {
                 break;
             }
-            let chunk = &buf[..count];
+            let chunk = if final_file.encrypted {
+                let remaining = final_file.unpacked_size.saturating_sub(written) as usize;
+                &buf[..count.min(remaining)]
+            } else {
+                &buf[..count]
+            };
             written = written
-                .checked_add(count as u64)
+                .checked_add(chunk.len() as u64)
                 .ok_or(Error::InvalidHeader("RAR 5 stored split size overflows"))?;
             crc.update(chunk);
             if let Some((_, hasher)) = &mut hash {
@@ -544,13 +560,27 @@ impl PendingSplitRefs {
             ));
         }
         if let Some(expected) = final_file.data_crc32 {
-            let actual = crc.finish();
+            let actual = if final_file.encrypted {
+                let decryptor = decryptor.ok_or(Error::InvalidHeader(
+                    "RAR 5 encrypted split CRC needs encryption keys",
+                ))?;
+                decryptor.keys.mac_crc32(crc.finish())
+            } else {
+                crc.finish()
+            };
             if actual != expected {
                 return Err(Error::Crc32Mismatch { expected, actual });
             }
         }
         if let Some((expected, hasher)) = hash {
-            let actual = hasher.finalize();
+            let actual = if final_file.encrypted {
+                let decryptor = decryptor.ok_or(Error::InvalidHeader(
+                    "RAR 5 encrypted split hash needs encryption keys",
+                ))?;
+                decryptor.keys.mac_hash32(hasher.finalize())
+            } else {
+                hasher.finalize()
+            };
             if expected != actual {
                 return Err(Error::HashMismatch { hash_type: 0 });
             }

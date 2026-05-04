@@ -1,8 +1,34 @@
 use rars_codec::rar50::{decode_lz, parse_compressed_block, read_table_lengths, DecodeTables};
-use rars_format::rar50::{extract_volumes, write_stored_archive, Archive, Rev5Volume};
+use rars_format::rar50::{
+    extract_volumes, write_arm_filtered_compressed_archive, write_compressed_archive,
+    write_compressed_archive_with_comment_and_metadata,
+    write_compressed_archive_with_filter_policy, write_compressed_archive_with_metadata,
+    write_compressed_archive_with_recovery, write_compressed_volume_set,
+    write_compressed_volume_set_with_recovery, write_compressed_volumes,
+    write_delta_filtered_compressed_archive, write_e8_filtered_compressed_archive,
+    write_encrypted_compressed_archive,
+    write_encrypted_compressed_archive_with_comment_and_metadata,
+    write_encrypted_compressed_archive_with_metadata,
+    write_encrypted_compressed_archive_with_recovery, write_encrypted_compressed_volume_set,
+    write_encrypted_compressed_volume_set_with_recovery, write_encrypted_compressed_volumes,
+    write_encrypted_stored_archive, write_encrypted_stored_archive_with_comment,
+    write_encrypted_stored_archive_with_comment_and_metadata,
+    write_encrypted_stored_archive_with_file_services,
+    write_encrypted_stored_archive_with_recovery, write_encrypted_stored_volumes,
+    write_encrypted_stored_volumes_with_recovery, write_stored_archive,
+    write_stored_archive_with_comment, write_stored_archive_with_comment_and_metadata,
+    write_stored_archive_with_file_services, write_stored_archive_with_recovery,
+    write_stored_volumes, write_stored_volumes_with_recovery, Archive, ArchiveMetadataEntry,
+    EncryptedArchiveCommentEntry, EncryptedCompressedEntry, EncryptedStoredEntry,
+    EncryptedStoredEntryWithServices, EncryptedStoredServiceEntry, FilterPolicy, Rev5Volume,
+    StoredEntryWithServices, StoredServiceEntry,
+};
 use rars_format::{detect_archive_family, rar50, ArchiveFamily, ArchiveVersion, Error, FeatureSet};
+use rars_recovery::rar5::crc64_xz;
+use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -15,6 +41,94 @@ fn service_names(archive: &Archive) -> Vec<String> {
         .services()
         .map(|service| service.name_lossy())
         .collect()
+}
+
+fn assert_rar5_inline_recovery_chunks(data: &[u8]) {
+    let mut offset = 0;
+    let mut chunks = 0;
+    let mut expected_recovery_shards = None;
+    while offset < data.len() {
+        assert!(data[offset..].starts_with(b"{RB}"));
+        let total_size =
+            u32::from_le_bytes(data[offset + 0x0c..offset + 0x10].try_into().unwrap()) as usize;
+        let header_size =
+            u32::from_le_bytes(data[offset + 0x10..offset + 0x14].try_into().unwrap()) as usize;
+        assert!(total_size >= header_size);
+        assert!(header_size >= 0x48);
+        assert!(offset + total_size <= data.len());
+
+        let chunk = &data[offset..offset + total_size];
+        assert_eq!(
+            u64::from_le_bytes(chunk[0x04..0x0c].try_into().unwrap()),
+            crc64_xz(&chunk[0x0c..])
+        );
+        assert_eq!(chunk[0x14], 1);
+        assert_eq!(chunk[0x15], 1);
+
+        let data_shards = u16::from_le_bytes(chunk[0x3a..0x3c].try_into().unwrap()) as usize;
+        let recovery_shards = u16::from_le_bytes(chunk[0x3c..0x3e].try_into().unwrap()) as usize;
+        let shard_index = u16::from_le_bytes(chunk[0x3e..0x40].try_into().unwrap()) as usize;
+        assert_eq!(header_size, data_shards * 8 + 0x48);
+        assert_eq!(shard_index, chunks);
+        assert_eq!(
+            expected_recovery_shards.get_or_insert(recovery_shards),
+            &recovery_shards
+        );
+
+        chunks += 1;
+        offset += total_size;
+    }
+    assert_eq!(Some(chunks), expected_recovery_shards);
+}
+
+fn read_test_vint(input: &[u8], offset: &mut usize) -> u64 {
+    let mut value = 0;
+    for shift in (0..70).step_by(7) {
+        let byte = input[*offset];
+        *offset += 1;
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return value;
+        }
+    }
+    panic!("overlong test vint");
+}
+
+fn count_verified_quick_open_wrappers(data: &[u8]) -> usize {
+    let mut offset = 0;
+    let mut count = 0;
+    while offset < data.len() {
+        let expected = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+        offset += 4;
+        let body_size = read_test_vint(data, &mut offset) as usize;
+        let body = &data[offset..offset + body_size];
+        assert_eq!(rars_format::rar15_40::crc32(body), expected);
+        let mut body_offset = 0;
+        assert_eq!(read_test_vint(body, &mut body_offset), 0);
+        assert_ne!(read_test_vint(body, &mut body_offset), 0);
+        let header_size = read_test_vint(body, &mut body_offset) as usize;
+        assert_eq!(body.len() - body_offset, header_size);
+        offset += body_size;
+        count += 1;
+    }
+    count
+}
+
+fn header_encryption_salt_and_first_header_iv(data: &[u8]) -> ([u8; 16], [u8; 16]) {
+    let mut offset = b"Rar!\x1a\x07\x01\x00".len() + 4;
+    let header_size = read_test_vint(data, &mut offset) as usize;
+    let body_start = offset;
+    let body_end = body_start + header_size;
+
+    assert_eq!(read_test_vint(data, &mut offset), 4);
+    assert_eq!(read_test_vint(data, &mut offset), 0);
+    assert_eq!(read_test_vint(data, &mut offset), 0);
+    assert_eq!(read_test_vint(data, &mut offset), 0x0001);
+    offset += 1;
+
+    let salt = data[offset..offset + 16].try_into().unwrap();
+    let first_header_iv = data[body_end..body_end + 16].try_into().unwrap();
+    (salt, first_header_iv)
 }
 
 #[test]
@@ -107,6 +221,7 @@ fn writes_store_only_rar50_archive_that_reader_extracts() {
     let files: Vec<_> = archive.files().collect();
     assert_eq!(files.len(), 2);
     assert!(files.iter().all(|file| file.is_stored()));
+    assert!(files.iter().all(|file| file.hash.is_some()));
     assert_eq!(
         files[0].data_crc32,
         Some(rars_format::rar15_40::crc32(entries[0].data))
@@ -115,6 +230,9 @@ fn writes_store_only_rar50_archive_that_reader_extracts() {
         files[1].data_crc32,
         Some(rars_format::rar15_40::crc32(entries[1].data))
     );
+    assert_eq!(files[0].hash.as_ref().unwrap().hash_type, 0);
+    assert_eq!(files[0].hash.as_ref().unwrap().data.len(), 32);
+    files[0].verify_hash(entries[0].data).unwrap();
 
     let extracted = archive.extract().unwrap();
     assert_eq!(extracted[0].name, entries[0].name);
@@ -122,6 +240,2518 @@ fn writes_store_only_rar50_archive_that_reader_extracts() {
     assert_eq!(extracted[0].file_time, 0x5a21_0000);
     assert_eq!(extracted[1].name, entries[1].name);
     assert_eq!(extracted[1].data, entries[1].data);
+}
+
+#[test]
+fn writes_compressed_rar50_archive_that_reader_extracts() {
+    let entries = [
+        rar50::CompressedEntry {
+            name: b"compressed.txt",
+            data: b"hello from rars rar5 compressed writer\nhello again\n",
+            mtime: Some(0x5a21_0001),
+            attributes: 0x20,
+            host_os: 3,
+        },
+        rar50::CompressedEntry {
+            name: b"empty.bin",
+            data: b"",
+            mtime: None,
+            attributes: 0x20,
+            host_os: 3,
+        },
+    ];
+    let bytes = write_compressed_archive(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features: FeatureSet::store_only(),
+        },
+    )
+    .unwrap();
+
+    let archive = Archive::parse(&bytes).unwrap();
+    let files: Vec<_> = archive.files().collect();
+    assert_eq!(files.len(), 2);
+    assert!(files.iter().all(|file| !file.is_stored()));
+    assert!(files.iter().all(|file| file.hash.is_some()));
+    assert_eq!(files[0].decoded_compression_info().unwrap().method, 1);
+    assert_eq!(
+        files[0].data_crc32,
+        Some(rars_format::rar15_40::crc32(entries[0].data))
+    );
+
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].name, entries[0].name);
+    assert_eq!(extracted[0].data, entries[0].data);
+    assert_eq!(extracted[0].file_time, 0x5a21_0001);
+    assert_eq!(extracted[1].name, entries[1].name);
+    assert_eq!(extracted[1].data, entries[1].data);
+}
+
+#[test]
+fn writes_solid_compressed_rar50_archive_that_reader_extracts() {
+    let first = b"rar50 solid shared phrase alpha beta gamma\n".repeat(32);
+    let second = b"rar50 solid shared phrase alpha beta gamma\nsecond\n".repeat(8);
+    let entries = [
+        rar50::CompressedEntry {
+            name: b"solid-one.txt",
+            data: &first,
+            mtime: Some(0x5a21_0021),
+            attributes: 0x20,
+            host_os: 3,
+        },
+        rar50::CompressedEntry {
+            name: b"solid-two.txt",
+            data: &second,
+            mtime: Some(0x5a21_0022),
+            attributes: 0x20,
+            host_os: 3,
+        },
+    ];
+    let mut features = FeatureSet::store_only();
+    features.solid = true;
+    let solid = write_compressed_archive(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+    )
+    .unwrap();
+    let standalone_second = write_compressed_archive(
+        &[entries[1]],
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features: FeatureSet::store_only(),
+        },
+    )
+    .unwrap();
+
+    let archive = Archive::parse(&solid).unwrap();
+    let files: Vec<_> = archive.files().collect();
+    assert!(archive.main.is_solid());
+    assert!(!files[0].decoded_compression_info().unwrap().solid);
+    assert!(files[1].decoded_compression_info().unwrap().solid);
+    assert!(
+        files[1].packed_size()
+            < Archive::parse(&standalone_second)
+                .unwrap()
+                .files()
+                .next()
+                .unwrap()
+                .packed_size()
+    );
+
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].data, first);
+    assert_eq!(extracted[1].data, second);
+}
+
+#[test]
+fn writes_delta_filtered_compressed_rar50_archive_that_reader_extracts() {
+    let data: Vec<u8> = (0..180)
+        .map(|index| (index * 5 + index / 2) as u8)
+        .collect();
+    let entries = [rar50::CompressedEntry {
+        name: b"delta-filtered.bin",
+        data: &data,
+        mtime: Some(0x5a21_0023),
+        attributes: 0x20,
+        host_os: 3,
+    }];
+    let bytes = write_delta_filtered_compressed_archive(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features: FeatureSet::store_only(),
+        },
+        3,
+    )
+    .unwrap();
+
+    let archive = Archive::parse(&bytes).unwrap();
+    let file = archive.files().next().unwrap();
+    assert_eq!(file.decoded_compression_info().unwrap().method, 1);
+    let packed = file.packed_data(&archive).unwrap();
+    let block = parse_compressed_block(&packed).unwrap();
+    let (lengths, _) = read_table_lengths(&packed[block.payload], 0).unwrap();
+    assert_ne!(lengths.main[256], 0);
+
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].name, b"delta-filtered.bin");
+    assert_eq!(extracted[0].data, data);
+    assert_eq!(extracted[0].file_time, 0x5a21_0023);
+}
+
+#[test]
+fn writes_e8_filtered_compressed_rar50_archive_that_reader_extracts() {
+    let data = b"\xe8\0\0\0\0rar5 e8 filtered call payload".to_vec();
+    let entries = [rar50::CompressedEntry {
+        name: b"e8-filtered.bin",
+        data: &data,
+        mtime: Some(0x5a21_0024),
+        attributes: 0x20,
+        host_os: 3,
+    }];
+    let bytes = write_e8_filtered_compressed_archive(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features: FeatureSet::store_only(),
+        },
+        false,
+    )
+    .unwrap();
+
+    let archive = Archive::parse(&bytes).unwrap();
+    let file = archive.files().next().unwrap();
+    let packed = file.packed_data(&archive).unwrap();
+    let block = parse_compressed_block(&packed).unwrap();
+    let (lengths, _) = read_table_lengths(&packed[block.payload], 0).unwrap();
+    assert_ne!(lengths.main[256], 0);
+
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].name, b"e8-filtered.bin");
+    assert_eq!(extracted[0].data, data);
+    assert_eq!(extracted[0].file_time, 0x5a21_0024);
+}
+
+#[test]
+fn writes_e8e9_filtered_compressed_rar50_archive_that_reader_extracts() {
+    let data = b"\xe9\0\0\0\0rar5 e8e9 filtered jump payload".to_vec();
+    let entries = [rar50::CompressedEntry {
+        name: b"e8e9-filtered.bin",
+        data: &data,
+        mtime: Some(0x5a21_0025),
+        attributes: 0x20,
+        host_os: 3,
+    }];
+    let bytes = write_e8_filtered_compressed_archive(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features: FeatureSet::store_only(),
+        },
+        true,
+    )
+    .unwrap();
+
+    let archive = Archive::parse(&bytes).unwrap();
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].name, b"e8e9-filtered.bin");
+    assert_eq!(extracted[0].data, data);
+    assert_eq!(extracted[0].file_time, 0x5a21_0025);
+}
+
+#[test]
+fn writes_arm_filtered_compressed_rar50_archive_that_reader_extracts() {
+    let data = [0x04, 0x00, 0x00, 0xeb, b'A', b'R', b'M', b'!'];
+    let entries = [rar50::CompressedEntry {
+        name: b"arm-filtered.bin",
+        data: &data,
+        mtime: Some(0x5a21_0026),
+        attributes: 0x20,
+        host_os: 3,
+    }];
+    let bytes = write_arm_filtered_compressed_archive(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features: FeatureSet::store_only(),
+        },
+    )
+    .unwrap();
+
+    let archive = Archive::parse(&bytes).unwrap();
+    let file = archive.files().next().unwrap();
+    let packed = file.packed_data(&archive).unwrap();
+    let block = parse_compressed_block(&packed).unwrap();
+    let (lengths, _) = read_table_lengths(&packed[block.payload], 0).unwrap();
+    assert_ne!(lengths.main[256], 0);
+
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].name, b"arm-filtered.bin");
+    assert_eq!(extracted[0].data, data);
+    assert_eq!(extracted[0].file_time, 0x5a21_0026);
+}
+
+#[test]
+fn writes_auto_filtered_compressed_rar50_archive_that_reader_extracts() {
+    let mut data = Vec::new();
+    for _ in 0..48 {
+        data.extend_from_slice(b"\xe8\0\0\0\0rar5 auto filter policy payload\n");
+    }
+    let entries = [rar50::CompressedEntry {
+        name: b"auto-filtered.bin",
+        data: &data,
+        mtime: Some(0x5a21_0027),
+        attributes: 0x20,
+        host_os: 3,
+    }];
+    let options = rar50::WriterOptions {
+        target: ArchiveVersion::Rar50,
+        features: FeatureSet::store_only(),
+    };
+    let plain = write_compressed_archive(&entries, options).unwrap();
+    let auto =
+        write_compressed_archive_with_filter_policy(&entries, options, FilterPolicy::AutoSize)
+            .unwrap();
+
+    let plain_archive = Archive::parse(&plain).unwrap();
+    let auto_archive = Archive::parse(&auto).unwrap();
+    assert!(
+        auto_archive.files().next().unwrap().packed_size()
+            <= plain_archive.files().next().unwrap().packed_size()
+    );
+    let extracted = auto_archive.extract().unwrap();
+    assert_eq!(extracted[0].name, b"auto-filtered.bin");
+    assert_eq!(extracted[0].data, data);
+    assert_eq!(extracted[0].file_time, 0x5a21_0027);
+}
+
+#[test]
+fn writes_compressed_rar50_volume_set_that_reader_reassembles() {
+    let payload = b"rar5 compressed split payload from rars\n".repeat(24);
+    let entry = rar50::CompressedEntry {
+        name: b"compressed-split.txt",
+        data: &payload,
+        mtime: Some(0x5a21_0002),
+        attributes: 0x20,
+        host_os: 3,
+    };
+    let parts = write_compressed_volumes(
+        entry,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features: FeatureSet::store_only(),
+        },
+        32,
+    )
+    .unwrap();
+
+    assert!(parts.len() >= 2);
+    let archives: Vec<_> = parts
+        .iter()
+        .map(|part| Archive::parse(part).unwrap())
+        .collect();
+    assert!(archives.iter().all(|archive| archive.main.is_volume()));
+    let first = archives[0].files().next().unwrap();
+    let last = archives.last().unwrap().files().next().unwrap();
+    assert!(first.is_split_after());
+    assert!(last.is_split_before());
+    assert!(!last.is_split_after());
+    assert_eq!(last.decoded_compression_info().unwrap().method, 1);
+    assert!(last.hash.is_some());
+
+    let extracted =
+        rars_format::rar50::extract_volumes_with_password(&archives, Some(b"password")).unwrap();
+    assert_eq!(extracted[0].name, b"compressed-split.txt");
+    assert_eq!(extracted[0].data, payload);
+    assert_eq!(extracted[0].file_time, 0x5a21_0002);
+}
+
+#[test]
+fn writes_compressed_rar50_volume_set_with_recovery_records() {
+    let payload = b"rar5 compressed recovery split payload from rars\n".repeat(24);
+    let entry = rar50::CompressedEntry {
+        name: b"compressed-split-rr.txt",
+        data: &payload,
+        mtime: Some(0x5a21_0002),
+        attributes: 0x20,
+        host_os: 3,
+    };
+    let mut features = FeatureSet::store_only();
+    features.recovery_record = true;
+    let parts = write_compressed_volume_set_with_recovery(
+        &[entry],
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        32,
+        8,
+    )
+    .unwrap();
+
+    assert!(parts.len() >= 2);
+    let archives: Vec<_> = parts
+        .iter()
+        .map(|part| Archive::parse(part).unwrap())
+        .collect();
+    assert!(archives.iter().all(|archive| archive.main.is_volume()));
+    assert!(archives
+        .iter()
+        .all(|archive| archive.main.has_recovery_record()));
+    for archive in &archives {
+        let service = archive.services().next().unwrap();
+        assert_eq!(service.name_lossy(), "RR");
+        assert_eq!(service.recovery_record().unwrap().unwrap().percent, 8);
+        assert_rar5_inline_recovery_chunks(&service.packed_data(archive).unwrap());
+    }
+
+    let extracted = extract_volumes(&archives).unwrap();
+    assert_eq!(extracted[0].name, b"compressed-split-rr.txt");
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+fn writes_solid_compressed_rar50_volume_set_that_reader_reassembles() {
+    let payload = b"rar5 solid compressed split payload from rars\n".repeat(24);
+    let entry = rar50::CompressedEntry {
+        name: b"solid-compressed-split.txt",
+        data: &payload,
+        mtime: Some(0x5a21_0003),
+        attributes: 0x20,
+        host_os: 3,
+    };
+    let mut features = FeatureSet::store_only();
+    features.solid = true;
+    let parts = write_compressed_volumes(
+        entry,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        32,
+    )
+    .unwrap();
+
+    assert!(parts.len() >= 2);
+    let archives: Vec<_> = parts
+        .iter()
+        .map(|part| Archive::parse(part).unwrap())
+        .collect();
+    assert!(archives.iter().all(|archive| archive.main.is_volume()));
+    assert!(archives.iter().all(|archive| archive.main.is_solid()));
+    let first = archives[0].files().next().unwrap();
+    let last = archives.last().unwrap().files().next().unwrap();
+    assert!(first.is_split_after());
+    assert!(last.is_split_before());
+    assert!(!last.is_split_after());
+    assert!(!last.decoded_compression_info().unwrap().solid);
+
+    let extracted = rars_format::rar50::extract_volumes(&archives).unwrap();
+    assert_eq!(extracted[0].name, b"solid-compressed-split.txt");
+    assert_eq!(extracted[0].data, payload);
+    assert_eq!(extracted[0].file_time, 0x5a21_0003);
+}
+
+#[test]
+fn writes_multi_file_solid_compressed_rar50_volume_set_that_reader_reassembles() {
+    let first = b"rar5 multi-file solid split shared phrase alpha beta gamma\n".repeat(20);
+    let second = b"rar5 multi-file solid split shared phrase alpha beta gamma\nsecond\n".repeat(16);
+    let entries = [
+        rar50::CompressedEntry {
+            name: b"solid-split-one.txt",
+            data: &first,
+            mtime: Some(0x5a21_0011),
+            attributes: 0x20,
+            host_os: 3,
+        },
+        rar50::CompressedEntry {
+            name: b"solid-split-two.txt",
+            data: &second,
+            mtime: Some(0x5a21_0012),
+            attributes: 0x20,
+            host_os: 3,
+        },
+    ];
+    let mut features = FeatureSet::store_only();
+    features.solid = true;
+    let parts = write_compressed_volume_set(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        96,
+    )
+    .unwrap();
+
+    assert!(parts.len() >= 2);
+    let archives: Vec<_> = parts
+        .iter()
+        .map(|part| Archive::parse(part).unwrap())
+        .collect();
+    assert!(archives.iter().all(|archive| archive.main.is_volume()));
+    assert!(archives.iter().all(|archive| archive.main.is_solid()));
+    let files: Vec<_> = archives
+        .iter()
+        .flat_map(|archive| archive.files())
+        .collect();
+    assert!(files.iter().any(|file| file.name == b"solid-split-two.txt"
+        && file.decoded_compression_info().unwrap().solid));
+
+    let extracted = extract_volumes(&archives).unwrap();
+    assert_eq!(extracted[0].name, b"solid-split-one.txt");
+    assert_eq!(extracted[0].data, first);
+    assert_eq!(extracted[0].file_time, 0x5a21_0011);
+    assert_eq!(extracted[1].name, b"solid-split-two.txt");
+    assert_eq!(extracted[1].data, second);
+    assert_eq!(extracted[1].file_time, 0x5a21_0012);
+}
+
+#[test]
+fn writes_rar50_archive_comment_service_record() {
+    let entries = [rar50::StoredEntry {
+        name: b"payload.txt",
+        data: b"payload with comment service\n",
+        mtime: None,
+        attributes: 0x20,
+        host_os: 3,
+    }];
+    let mut features = FeatureSet::store_only();
+    features.archive_comment = true;
+    let bytes = write_stored_archive_with_comment(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        Some(b"RAR5 comment from rars\n"),
+    )
+    .unwrap();
+
+    let archive = Archive::parse(&bytes).unwrap();
+    let services: Vec<_> = archive.services().collect();
+    assert_eq!(services.len(), 1);
+    assert_eq!(services[0].name, b"CMT");
+    assert!(services[0].is_stored());
+    assert_eq!(services[0].service_data, Some(Vec::new()));
+    let comment = services[0].extract(&archive).unwrap();
+    assert_eq!(comment.name, b"CMT");
+    assert_eq!(comment.data, b"RAR5 comment from rars\n");
+
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].name, entries[0].name);
+    assert_eq!(extracted[0].data, entries[0].data);
+}
+
+#[test]
+fn writes_compressed_rar50_archive_comment_service_record() {
+    let payload = b"compressed payload with archive comment\n".repeat(8);
+    let entries = [rar50::CompressedEntry {
+        name: b"compressed-comment.txt",
+        data: &payload,
+        mtime: None,
+        attributes: 0x20,
+        host_os: 3,
+    }];
+    let mut features = FeatureSet::store_only();
+    features.archive_comment = true;
+    let bytes = write_compressed_archive_with_comment_and_metadata(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        Some(b"compressed RAR5 comment from rars\n"),
+        None,
+    )
+    .unwrap();
+
+    let archive = Archive::parse(&bytes).unwrap();
+    let services: Vec<_> = archive.services().collect();
+    assert_eq!(service_names(&archive), ["CMT"]);
+    assert_eq!(
+        services[0].extract(&archive).unwrap().data,
+        b"compressed RAR5 comment from rars\n"
+    );
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].name, b"compressed-comment.txt");
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+fn writes_rar50_quick_open_service_record() {
+    let entries = [
+        rar50::StoredEntry {
+            name: b"first.txt",
+            data: b"first quick-open payload\n",
+            mtime: None,
+            attributes: 0x20,
+            host_os: 3,
+        },
+        rar50::StoredEntry {
+            name: b"second.txt",
+            data: b"second quick-open payload\n",
+            mtime: None,
+            attributes: 0x20,
+            host_os: 3,
+        },
+    ];
+    let mut features = FeatureSet::store_only();
+    features.archive_comment = true;
+    features.quick_open = true;
+    let bytes = write_stored_archive_with_comment(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        Some(b"QO comment from rars\n"),
+    )
+    .unwrap();
+
+    let archive = Archive::parse(&bytes).unwrap();
+    let locator = archive.main.locator().unwrap();
+    assert!(locator.quick_open_offset.unwrap() > 0);
+    assert_eq!(service_names(&archive), ["CMT", "QO"]);
+    let quick_open = archive
+        .services()
+        .find(|service| service.name == b"QO")
+        .unwrap();
+    assert!(quick_open.is_stored());
+    let quick_open = quick_open.extract(&archive).unwrap();
+    assert_eq!(count_verified_quick_open_wrappers(&quick_open.data), 3);
+
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].data, entries[0].data);
+    assert_eq!(extracted[1].data, entries[1].data);
+}
+
+#[test]
+fn writes_rar50_acl_and_stream_file_service_records() {
+    let services = [
+        StoredServiceEntry {
+            name: b"ACL",
+            data: b"opaque acl descriptor",
+        },
+        StoredServiceEntry {
+            name: b"STM",
+            data: b"named stream bytes",
+        },
+    ];
+    let entries = [StoredEntryWithServices {
+        entry: rar50::StoredEntry {
+            name: b"serviced.txt",
+            data: b"payload with attached services\n",
+            mtime: None,
+            attributes: 0x20,
+            host_os: 3,
+        },
+        services: &services,
+    }];
+    let bytes = write_stored_archive_with_file_services(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features: FeatureSet::store_only(),
+        },
+    )
+    .unwrap();
+
+    let archive = Archive::parse(&bytes).unwrap();
+    let services: Vec<_> = archive.services().collect();
+    assert_eq!(service_names(&archive), ["ACL", "STM"]);
+    assert!(services.iter().all(|service| service.is_stored()));
+    assert_eq!(
+        services[0].extract(&archive).unwrap().data,
+        b"opaque acl descriptor"
+    );
+    assert_eq!(
+        services[1].extract(&archive).unwrap().data,
+        b"named stream bytes"
+    );
+
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].name, b"serviced.txt");
+    assert_eq!(extracted[0].data, b"payload with attached services\n");
+}
+
+#[test]
+fn writes_rar50_file_comment_service_record() {
+    let services = [StoredServiceEntry {
+        name: b"CMT",
+        data: b"RAR5 file comment from rars\n",
+    }];
+    let entries = [StoredEntryWithServices {
+        entry: rar50::StoredEntry {
+            name: b"file-commented.txt",
+            data: b"payload with attached file comment\n",
+            mtime: None,
+            attributes: 0x20,
+            host_os: 3,
+        },
+        services: &services,
+    }];
+    let bytes = write_stored_archive_with_file_services(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features: FeatureSet::store_only(),
+        },
+    )
+    .unwrap();
+
+    let archive = Archive::parse(&bytes).unwrap();
+    let services: Vec<_> = archive.services().collect();
+    assert_eq!(service_names(&archive), ["CMT"]);
+    assert!(services[0].is_stored());
+    assert_eq!(
+        services[0].extract(&archive).unwrap().data,
+        b"RAR5 file comment from rars\n"
+    );
+
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].name, b"file-commented.txt");
+    assert_eq!(extracted[0].data, b"payload with attached file comment\n");
+}
+
+#[test]
+fn writes_encrypted_rar50_file_comment_service_record() {
+    let services = [EncryptedStoredServiceEntry {
+        name: b"CMT",
+        data: b"encrypted RAR5 file comment from rars\n",
+        password: b"secret",
+    }];
+    let entries = [EncryptedStoredEntryWithServices {
+        entry: EncryptedStoredEntry {
+            name: b"encrypted-file-commented.txt",
+            data: b"encrypted payload with attached file comment\n",
+            mtime: None,
+            attributes: 0x20,
+            host_os: 3,
+            password: b"secret",
+        },
+        services: &services,
+    }];
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    features.file_comment = true;
+    let bytes = write_encrypted_stored_archive_with_file_services(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+    )
+    .unwrap();
+
+    let archive = Archive::parse(&bytes).unwrap();
+    let services: Vec<_> = archive.services().collect();
+    assert_eq!(service_names(&archive), ["CMT"]);
+    assert!(services[0].encrypted);
+    assert!(matches!(
+        services[0].extract(&archive),
+        Err(Error::AtEntry {
+            name,
+            operation: "decoding",
+            source
+        }) if name == b"CMT" && matches!(*source, Error::NeedPassword)
+    ));
+
+    let archive = Archive::parse_with_password(&bytes, Some(b"secret")).unwrap();
+    let service = archive
+        .services()
+        .next()
+        .unwrap()
+        .extract(&archive)
+        .unwrap();
+    assert_eq!(service.data, b"encrypted RAR5 file comment from rars\n");
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].name, b"encrypted-file-commented.txt");
+    assert_eq!(
+        extracted[0].data,
+        b"encrypted payload with attached file comment\n"
+    );
+}
+
+#[test]
+fn writes_header_encrypted_rar50_file_comment_service_record() {
+    let services = [EncryptedStoredServiceEntry {
+        name: b"CMT",
+        data: b"header encrypted RAR5 file comment from rars\n",
+        password: b"secret",
+    }];
+    let entries = [EncryptedStoredEntryWithServices {
+        entry: EncryptedStoredEntry {
+            name: b"header-encrypted-file-commented.txt",
+            data: b"header encrypted payload with attached file comment\n",
+            mtime: None,
+            attributes: 0x20,
+            host_os: 3,
+            password: b"secret",
+        },
+        services: &services,
+    }];
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    features.header_encryption = true;
+    features.file_comment = true;
+    let bytes = write_encrypted_stored_archive_with_file_services(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+    )
+    .unwrap();
+
+    assert!(matches!(Archive::parse(&bytes), Err(Error::NeedPassword)));
+    let archive = Archive::parse_with_password(&bytes, Some(b"secret")).unwrap();
+    let services: Vec<_> = archive.services().collect();
+    assert_eq!(service_names(&archive), ["CMT"]);
+    assert!(services[0].encrypted);
+    assert_eq!(
+        services[0].extract(&archive).unwrap().data,
+        b"header encrypted RAR5 file comment from rars\n"
+    );
+    let extracted = archive.extract().unwrap();
+    assert_eq!(
+        extracted[0].data,
+        b"header encrypted payload with attached file comment\n"
+    );
+}
+
+#[test]
+#[ignore = "requires local rar command; used by scripts/reference-rar5-writer.sh"]
+fn reference_rar_accepts_rar50_acl_and_stream_file_service_records() {
+    let services = [
+        StoredServiceEntry {
+            name: b"ACL",
+            data: b"opaque acl descriptor",
+        },
+        StoredServiceEntry {
+            name: b"STM",
+            data: b"named stream bytes",
+        },
+    ];
+    let entries = [StoredEntryWithServices {
+        entry: rar50::StoredEntry {
+            name: b"serviced.txt",
+            data: b"payload with attached services\n",
+            mtime: None,
+            attributes: 0x20,
+            host_os: 3,
+        },
+        services: &services,
+    }];
+    let bytes = write_stored_archive_with_file_services(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features: FeatureSet::store_only(),
+        },
+    )
+    .unwrap();
+
+    let path = std::env::temp_dir().join(format!(
+        "rars-rar50-file-services-{}.rar",
+        std::process::id()
+    ));
+    fs::write(&path, bytes).unwrap();
+    let output = match Command::new("rar").arg("t").arg(&path).output() {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => panic!("failed to run rar: {error}"),
+    };
+    if std::env::var_os("RARS_KEEP_REFERENCE_ARCHIVE").is_none() {
+        let _ = fs::remove_file(&path);
+    }
+
+    assert!(
+        output.status.success(),
+        "rar rejected RAR5 ACL/STM service output\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn writes_rar50_recovery_service_record() {
+    let entries = [rar50::StoredEntry {
+        name: b"recoverable.txt",
+        data: b"payload with structural recovery service\n",
+        mtime: Some(0x5a21_0000),
+        attributes: 0x20,
+        host_os: 3,
+    }];
+    let mut features = FeatureSet::store_only();
+    features.recovery_record = true;
+    let bytes = write_stored_archive_with_recovery(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        7,
+    )
+    .unwrap();
+
+    let archive = Archive::parse(&bytes).unwrap();
+    assert!(archive.main.has_recovery_record());
+    let locator = archive.main.locator().unwrap();
+    let recovery_offset = locator.recovery_record_offset.unwrap();
+    let services: Vec<_> = archive.services().collect();
+    assert_eq!(service_names(&archive), ["RR"]);
+    assert_eq!(
+        recovery_offset,
+        (services[0].block.offset - b"Rar!\x1a\x07\x01\x00".len()) as u64
+    );
+    let recovery = services[0].recovery_record().unwrap().unwrap();
+    assert_eq!(recovery.percent, 7);
+    assert_eq!(recovery.payload_size, services[0].packed_size());
+    let recovery_data = services[0].packed_data(&archive).unwrap();
+    assert!(recovery_data.starts_with(b"{RB}"));
+    assert_eq!(
+        u32::from_le_bytes(recovery_data[0x0c..0x10].try_into().unwrap()) as usize,
+        recovery_data.len()
+    );
+    assert_eq!(
+        u32::from_le_bytes(recovery_data[0x10..0x14].try_into().unwrap()) as usize,
+        0x48 + 8
+    );
+    assert_eq!(recovery_data[0x14], 1);
+    assert_eq!(recovery_data[0x15], 1);
+
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].name, b"recoverable.txt");
+    assert_eq!(extracted[0].data, entries[0].data);
+}
+
+#[test]
+fn writes_compressed_rar50_recovery_service_record() {
+    let payload = b"compressed recovery payload with repeated phrase. ".repeat(32);
+    let entries = [rar50::CompressedEntry {
+        name: b"compressed-recoverable.txt",
+        data: &payload,
+        mtime: Some(0x5a21_0000),
+        attributes: 0x20,
+        host_os: 3,
+    }];
+    let mut features = FeatureSet::store_only();
+    features.recovery_record = true;
+    let bytes = write_compressed_archive_with_recovery(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        7,
+    )
+    .unwrap();
+
+    let archive = Archive::parse(&bytes).unwrap();
+    assert!(archive.main.has_recovery_record());
+    let locator = archive.main.locator().unwrap();
+    let recovery_offset = locator.recovery_record_offset.unwrap();
+    let services: Vec<_> = archive.services().collect();
+    assert_eq!(service_names(&archive), ["RR"]);
+    assert_eq!(
+        recovery_offset,
+        (services[0].block.offset - b"Rar!\x1a\x07\x01\x00".len()) as u64
+    );
+    let recovery = services[0].recovery_record().unwrap().unwrap();
+    assert_eq!(recovery.percent, 7);
+    let recovery_data = services[0].packed_data(&archive).unwrap();
+    assert!(recovery_data.starts_with(b"{RB}"));
+    assert_eq!(
+        u32::from_le_bytes(recovery_data[0x0c..0x10].try_into().unwrap()) as usize,
+        recovery_data.len()
+    );
+
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].name, b"compressed-recoverable.txt");
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+fn rejects_rar50_recovery_feature_without_recovery_writer() {
+    let entries = [rar50::StoredEntry {
+        name: b"payload.txt",
+        data: b"payload without recovery writer\n",
+        mtime: None,
+        attributes: 0x20,
+        host_os: 3,
+    }];
+    let mut features = FeatureSet::store_only();
+    features.recovery_record = true;
+    let err = write_stored_archive(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        Error::UnsupportedFeature {
+            version: ArchiveVersion::Rar50,
+            feature: "RAR 5 writer feature"
+        }
+    ));
+}
+
+#[test]
+fn writes_stored_rar50_volume_set_that_reader_reassembles() {
+    let payload = b"RAR5 stored volume payload split across generated parts.\n".repeat(12);
+    let entry = rar50::StoredEntry {
+        name: b"split50.txt",
+        data: &payload,
+        mtime: Some(0x5a21_0000),
+        attributes: 0x20,
+        host_os: 3,
+    };
+    let parts = write_stored_volumes(
+        entry,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features: FeatureSet::store_only(),
+        },
+        97,
+    )
+    .unwrap();
+    assert!(parts.len() > 2);
+
+    let archives: Vec<_> = parts
+        .iter()
+        .map(|part| Archive::parse(part).unwrap())
+        .collect();
+    assert!(archives.iter().all(|archive| archive.main.is_volume()));
+    assert_eq!(archives[0].main.volume_number, Some(0));
+    assert_eq!(archives[1].main.volume_number, Some(1));
+    assert!(archives[0].files().next().unwrap().is_split_after());
+    assert_eq!(archives[0].files().next().unwrap().data_crc32, None);
+    assert!(archives[1].files().next().unwrap().is_split_before());
+    assert!(!archives
+        .last()
+        .unwrap()
+        .files()
+        .next()
+        .unwrap()
+        .is_split_after());
+
+    let extracted =
+        rars_format::rar50::extract_volumes_with_password(&archives, Some(b"password")).unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].name, b"split50.txt");
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+fn writes_stored_rar50_volume_set_with_recovery_records() {
+    let payload = b"RAR5 stored recovery volume payload split across generated parts.\n".repeat(12);
+    let entry = rar50::StoredEntry {
+        name: b"split50-rr.txt",
+        data: &payload,
+        mtime: Some(0x5a21_0000),
+        attributes: 0x20,
+        host_os: 3,
+    };
+    let mut features = FeatureSet::store_only();
+    features.recovery_record = true;
+    let parts = write_stored_volumes_with_recovery(
+        entry,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        97,
+        8,
+    )
+    .unwrap();
+    assert!(parts.len() > 2);
+
+    let archives: Vec<_> = parts
+        .iter()
+        .map(|part| Archive::parse(part).unwrap())
+        .collect();
+    assert!(archives.iter().all(|archive| archive.main.is_volume()));
+    for archive in &archives {
+        assert!(archive.main.has_recovery_record());
+        let service = archive.services().next().unwrap();
+        assert_eq!(service.name_lossy(), "RR");
+        assert_eq!(service.recovery_record().unwrap().unwrap().percent, 8);
+        let locator = archive.main.locator().unwrap();
+        assert_eq!(
+            locator.recovery_record_offset,
+            Some((service.block.offset - b"Rar!\x1a\x07\x01\x00".len()) as u64)
+        );
+        assert_rar5_inline_recovery_chunks(&service.packed_data(archive).unwrap());
+    }
+
+    let extracted =
+        rars_format::rar50::extract_volumes_with_password(&archives, Some(b"password")).unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].name, b"split50-rr.txt");
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+fn writes_rar50_archive_metadata_main_extra_record() {
+    let entries = [rar50::StoredEntry {
+        name: b"payload.txt",
+        data: b"payload with archive metadata\n",
+        mtime: None,
+        attributes: 0x20,
+        host_os: 3,
+    }];
+    let bytes = write_stored_archive_with_comment_and_metadata(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar70,
+            features: FeatureSet::store_only(),
+        },
+        None,
+        Some(ArchiveMetadataEntry {
+            name: Some(b"metadata-name.rar"),
+            creation_time: Some(0x01dcd60e_662d7a32),
+        }),
+    )
+    .unwrap();
+
+    let archive = Archive::parse(&bytes).unwrap();
+    let locator = archive.main.locator().unwrap();
+    assert_eq!(locator.flags, 0x0001);
+    assert_eq!(locator.quick_open_offset, Some(0));
+    let metadata = archive.main.archive_metadata().unwrap();
+    assert_eq!(metadata.flags, 0x0003);
+    assert_eq!(
+        metadata.name.as_deref(),
+        Some(b"metadata-name.rar".as_slice())
+    );
+    assert_eq!(metadata.creation_time, Some(0x01dcd60e_662d7a32));
+
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].data, entries[0].data);
+}
+
+#[test]
+fn writes_compressed_rar50_archive_metadata_main_extra_record() {
+    let payload = b"compressed payload with archive metadata\n".repeat(8);
+    let entries = [rar50::CompressedEntry {
+        name: b"compressed-metadata.txt",
+        data: &payload,
+        mtime: None,
+        attributes: 0x20,
+        host_os: 3,
+    }];
+    let bytes = write_compressed_archive_with_metadata(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar70,
+            features: FeatureSet::store_only(),
+        },
+        Some(ArchiveMetadataEntry {
+            name: Some(b"compressed-metadata.rar"),
+            creation_time: Some(0x01dcd60e_662d7a32),
+        }),
+    )
+    .unwrap();
+
+    let archive = Archive::parse(&bytes).unwrap();
+    let metadata = archive.main.archive_metadata().unwrap();
+    assert_eq!(
+        metadata.name.as_deref(),
+        Some(b"compressed-metadata.rar".as_slice())
+    );
+    assert_eq!(metadata.creation_time, Some(0x01dcd60e_662d7a32));
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+fn writes_encrypted_stored_rar50_archive_that_reader_extracts_with_password() {
+    let entries = [EncryptedStoredEntry {
+        name: b"secret.txt",
+        data: b"encrypted stored RAR5 payload from rars\n",
+        mtime: Some(0x5a21_0000),
+        attributes: 0x20,
+        host_os: 3,
+        password: b"password",
+    }];
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    let first = write_encrypted_stored_archive(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+    )
+    .unwrap();
+    let second = write_encrypted_stored_archive(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+    )
+    .unwrap();
+
+    assert_ne!(first, second);
+    let archive = Archive::parse(&first).unwrap();
+    let second_archive = Archive::parse(&second).unwrap();
+    let file = archive.files().next().unwrap();
+    let second_file = second_archive.files().next().unwrap();
+    assert!(file.encrypted);
+    let encryption = file.encryption.as_ref().unwrap();
+    let second_encryption = second_file.encryption.as_ref().unwrap();
+    assert!(encryption.check_value.is_some());
+    assert_ne!(encryption.salt, second_encryption.salt);
+    assert_ne!(encryption.iv, second_encryption.iv);
+    assert_eq!(file.packed_size() % 16, 0);
+    assert!(matches!(
+        archive.extract(),
+        Err(Error::AtEntry {
+            name,
+            operation: "decoding",
+            source
+        }) if name == b"secret.txt" && matches!(*source, Error::NeedPassword)
+    ));
+    assert!(matches!(
+        archive.extract_with_password(Some(b"wrong")),
+        Err(Error::AtEntry {
+            name,
+            operation: "decoding",
+            source
+        }) if name == b"secret.txt" && matches!(*source, Error::WrongPasswordOrCorruptData)
+    ));
+
+    let extracted = archive.extract_with_password(Some(b"password")).unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].name, b"secret.txt");
+    assert_eq!(extracted[0].data, entries[0].data);
+}
+
+#[test]
+fn writes_encrypted_stored_rar50_archive_metadata_record() {
+    let entries = [EncryptedStoredEntry {
+        name: b"metadata-secret.txt",
+        data: b"encrypted stored payload with archive metadata\n",
+        mtime: Some(0x5a21_0000),
+        attributes: 0x20,
+        host_os: 3,
+        password: b"password",
+    }];
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    let bytes = write_encrypted_stored_archive_with_comment_and_metadata(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar70,
+            features,
+        },
+        None,
+        Some(ArchiveMetadataEntry {
+            name: Some(b"encrypted-metadata.rar"),
+            creation_time: Some(0x01dcd60e_662d7a32),
+        }),
+    )
+    .unwrap();
+
+    let archive = Archive::parse(&bytes).unwrap();
+    let metadata = archive.main.archive_metadata().unwrap();
+    assert_eq!(
+        metadata.name.as_deref(),
+        Some(b"encrypted-metadata.rar".as_slice())
+    );
+    assert_eq!(metadata.creation_time, Some(0x01dcd60e_662d7a32));
+    let extracted = archive.extract_with_password(Some(b"password")).unwrap();
+    assert_eq!(extracted[0].data, entries[0].data);
+}
+
+#[test]
+fn writes_encrypted_compressed_rar50_archive_that_reader_extracts_with_password() {
+    let entries = [EncryptedCompressedEntry {
+        name: b"secret-compressed.txt",
+        data: b"encrypted compressed RAR5 payload from rars\nencrypted compressed RAR5 payload from rars\n",
+        mtime: Some(0x5a21_0055),
+        attributes: 0x20,
+        host_os: 3,
+        password: b"secret",
+    }];
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    let first = write_encrypted_compressed_archive(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+    )
+    .unwrap();
+    let second = write_encrypted_compressed_archive(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+    )
+    .unwrap();
+
+    let archive = Archive::parse(&first).unwrap();
+    let second_archive = Archive::parse(&second).unwrap();
+    let file = archive.files().next().unwrap();
+    let second_file = second_archive.files().next().unwrap();
+    assert!(file.encrypted);
+    assert_eq!(file.decoded_compression_info().unwrap().method, 1);
+    let encryption = file.encryption.as_ref().unwrap();
+    let second_encryption = second_file.encryption.as_ref().unwrap();
+    assert_ne!(encryption.salt, second_encryption.salt);
+    assert_ne!(encryption.iv, second_encryption.iv);
+    assert_eq!(file.packed_size() % 16, 0);
+
+    assert!(matches!(
+        archive.extract_with_password(Some(b"wrong")),
+        Err(Error::AtEntry {
+            name,
+            operation: "decoding",
+            source
+        }) if name == b"secret-compressed.txt"
+            && matches!(*source, Error::WrongPasswordOrCorruptData)
+    ));
+    let extracted = archive.extract_with_password(Some(b"secret")).unwrap();
+    assert_eq!(extracted[0].name, b"secret-compressed.txt");
+    assert_eq!(extracted[0].data, entries[0].data);
+    assert_eq!(extracted[0].file_time, 0x5a21_0055);
+}
+
+#[test]
+fn writes_encrypted_compressed_rar50_archive_metadata_record() {
+    let payload = b"encrypted compressed metadata payload repeated repeated\n".repeat(8);
+    let entries = [EncryptedCompressedEntry {
+        name: b"secret-compressed-metadata.txt",
+        data: &payload,
+        mtime: Some(0x5a21_0055),
+        attributes: 0x20,
+        host_os: 3,
+        password: b"secret",
+    }];
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    let bytes = write_encrypted_compressed_archive_with_metadata(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar70,
+            features,
+        },
+        Some(ArchiveMetadataEntry {
+            name: Some(b"encrypted-compressed-metadata.rar"),
+            creation_time: Some(0x01dcd60e_662d7a32),
+        }),
+    )
+    .unwrap();
+
+    let archive = Archive::parse(&bytes).unwrap();
+    let metadata = archive.main.archive_metadata().unwrap();
+    assert_eq!(
+        metadata.name.as_deref(),
+        Some(b"encrypted-compressed-metadata.rar".as_slice())
+    );
+    let extracted = archive.extract_with_password(Some(b"secret")).unwrap();
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+fn writes_encrypted_solid_compressed_rar50_archive_that_reader_extracts_with_password() {
+    let first = b"encrypted rar50 solid shared phrase alpha beta gamma\n".repeat(16);
+    let second = b"encrypted rar50 solid shared phrase alpha beta gamma\nsecond\n".repeat(8);
+    let entries = [
+        EncryptedCompressedEntry {
+            name: b"encrypted-solid-one.txt",
+            data: &first,
+            mtime: Some(0x5a21_0061),
+            attributes: 0x20,
+            host_os: 3,
+            password: b"secret",
+        },
+        EncryptedCompressedEntry {
+            name: b"encrypted-solid-two.txt",
+            data: &second,
+            mtime: Some(0x5a21_0062),
+            attributes: 0x20,
+            host_os: 3,
+            password: b"secret",
+        },
+    ];
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    features.solid = true;
+    let bytes = write_encrypted_compressed_archive(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+    )
+    .unwrap();
+
+    let archive = Archive::parse(&bytes).unwrap();
+    let files: Vec<_> = archive.files().collect();
+    assert!(archive.main.is_solid());
+    assert!(files.iter().all(|file| file.encrypted));
+    assert!(!files[0].decoded_compression_info().unwrap().solid);
+    assert!(files[1].decoded_compression_info().unwrap().solid);
+    let extracted = archive.extract_with_password(Some(b"secret")).unwrap();
+    assert_eq!(extracted[0].data, first);
+    assert_eq!(extracted[1].data, second);
+}
+
+#[test]
+fn writes_encrypted_rar50_archive_comment_service_that_reader_extracts_with_password() {
+    let entries = [EncryptedStoredEntry {
+        name: b"secret.txt",
+        data: b"encrypted stored payload with encrypted comment\n",
+        mtime: Some(0x5a21_0000),
+        attributes: 0x20,
+        host_os: 3,
+        password: b"password",
+    }];
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    features.archive_comment = true;
+    let bytes = write_encrypted_stored_archive_with_comment(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        Some(EncryptedArchiveCommentEntry {
+            data: b"encrypted CMT from rars\n",
+            password: b"password",
+        }),
+    )
+    .unwrap();
+    let second = write_encrypted_stored_archive_with_comment(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        Some(EncryptedArchiveCommentEntry {
+            data: b"encrypted CMT from rars\n",
+            password: b"password",
+        }),
+    )
+    .unwrap();
+
+    let archive = Archive::parse(&bytes).unwrap();
+    let second_archive = Archive::parse(&second).unwrap();
+    let services: Vec<_> = archive.services().collect();
+    let second_services: Vec<_> = second_archive.services().collect();
+    assert_eq!(services.len(), 1);
+    assert_eq!(services[0].name, b"CMT");
+    assert!(services[0].encrypted);
+    let service_encryption = services[0].encryption.as_ref().unwrap();
+    let second_service_encryption = second_services[0].encryption.as_ref().unwrap();
+    assert_ne!(service_encryption.salt, second_service_encryption.salt);
+    assert_ne!(service_encryption.iv, second_service_encryption.iv);
+    assert!(matches!(
+        services[0].extract(&archive),
+        Err(Error::AtEntry {
+            name,
+            operation: "decoding",
+            source
+        }) if name == b"CMT" && matches!(*source, Error::NeedPassword)
+    ));
+
+    let archive = Archive::parse_with_password(&bytes, Some(b"password")).unwrap();
+    let comment = archive
+        .services()
+        .next()
+        .unwrap()
+        .extract(&archive)
+        .unwrap();
+    assert_eq!(comment.data, b"encrypted CMT from rars\n");
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].data, entries[0].data);
+}
+
+#[test]
+fn writes_encrypted_compressed_rar50_archive_comment_service_with_password() {
+    let payload = b"encrypted compressed payload with encrypted comment\n".repeat(8);
+    let entries = [EncryptedCompressedEntry {
+        name: b"encrypted-compressed-comment.txt",
+        data: &payload,
+        mtime: None,
+        attributes: 0x20,
+        host_os: 3,
+        password: b"secret",
+    }];
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    features.archive_comment = true;
+    let bytes = write_encrypted_compressed_archive_with_comment_and_metadata(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        Some(EncryptedArchiveCommentEntry {
+            data: b"encrypted compressed CMT from rars\n",
+            password: b"secret",
+        }),
+        None,
+    )
+    .unwrap();
+
+    let archive = Archive::parse(&bytes).unwrap();
+    let services: Vec<_> = archive.services().collect();
+    assert_eq!(services.len(), 1);
+    assert_eq!(services[0].name, b"CMT");
+    assert!(services[0].encrypted);
+    assert!(matches!(
+        services[0].extract(&archive),
+        Err(Error::AtEntry {
+            name,
+            operation: "decoding",
+            source
+        }) if name == b"CMT" && matches!(*source, Error::NeedPassword)
+    ));
+
+    let archive = Archive::parse_with_password(&bytes, Some(b"secret")).unwrap();
+    let comment = archive
+        .services()
+        .next()
+        .unwrap()
+        .extract(&archive)
+        .unwrap();
+    assert_eq!(comment.data, b"encrypted compressed CMT from rars\n");
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+fn writes_encrypted_rar50_recovery_service_that_reader_extracts_with_password() {
+    let entries = [EncryptedStoredEntry {
+        name: b"secret-recovery.txt",
+        data: b"encrypted stored payload with encrypted recovery\n",
+        mtime: Some(0x5a21_0000),
+        attributes: 0x20,
+        host_os: 3,
+        password: b"password",
+    }];
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    features.recovery_record = true;
+    let bytes = write_encrypted_stored_archive_with_recovery(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        6,
+        b"password",
+    )
+    .unwrap();
+    let second = write_encrypted_stored_archive_with_recovery(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        6,
+        b"password",
+    )
+    .unwrap();
+
+    let archive = Archive::parse(&bytes).unwrap();
+    let second_archive = Archive::parse(&second).unwrap();
+    assert!(archive.main.has_recovery_record());
+    let file_encryption = archive.files().next().unwrap().encryption.as_ref().unwrap();
+    let second_file_encryption = second_archive
+        .files()
+        .next()
+        .unwrap()
+        .encryption
+        .as_ref()
+        .unwrap();
+    assert_ne!(file_encryption.salt, second_file_encryption.salt);
+    assert_ne!(file_encryption.iv, second_file_encryption.iv);
+    let service = archive.services().next().unwrap();
+    assert_eq!(service.name, b"RR");
+    assert!(!service.encrypted);
+    let recovery = service.recovery_record().unwrap().unwrap();
+    assert_eq!(recovery.percent, 6);
+
+    let recovery_data = service.extract(&archive).unwrap().data;
+    assert!(recovery_data.starts_with(b"{RB}"));
+    assert_eq!(
+        u32::from_le_bytes(recovery_data[0x0c..0x10].try_into().unwrap()) as usize,
+        recovery_data.len()
+    );
+    let archive = Archive::parse_with_password(&bytes, Some(b"password")).unwrap();
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].data, entries[0].data);
+}
+
+#[test]
+fn writes_encrypted_compressed_rar50_recovery_service_that_reader_extracts_with_password() {
+    let payload = b"encrypted compressed recovery payload repeated repeated. ".repeat(24);
+    let entries = [EncryptedCompressedEntry {
+        name: b"secret-compressed-recovery.txt",
+        data: &payload,
+        mtime: Some(0x5a21_0000),
+        attributes: 0x20,
+        host_os: 3,
+        password: b"password",
+    }];
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    features.recovery_record = true;
+    let bytes = write_encrypted_compressed_archive_with_recovery(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        6,
+    )
+    .unwrap();
+    let second = write_encrypted_compressed_archive_with_recovery(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        6,
+    )
+    .unwrap();
+
+    let archive = Archive::parse(&bytes).unwrap();
+    let second_archive = Archive::parse(&second).unwrap();
+    assert!(archive.main.has_recovery_record());
+    let file_encryption = archive.files().next().unwrap().encryption.as_ref().unwrap();
+    let second_file_encryption = second_archive
+        .files()
+        .next()
+        .unwrap()
+        .encryption
+        .as_ref()
+        .unwrap();
+    assert_ne!(file_encryption.salt, second_file_encryption.salt);
+    assert_ne!(file_encryption.iv, second_file_encryption.iv);
+    let service = archive.services().next().unwrap();
+    assert_eq!(service.name, b"RR");
+    assert!(!service.encrypted);
+    assert_eq!(service.recovery_record().unwrap().unwrap().percent, 6);
+    let recovery_data = service.extract(&archive).unwrap().data;
+    assert!(recovery_data.starts_with(b"{RB}"));
+
+    let archive = Archive::parse_with_password(&bytes, Some(b"password")).unwrap();
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+fn writes_header_encrypted_rar50_archive_that_reader_extracts_with_password() {
+    let entries = [EncryptedStoredEntry {
+        name: b"header-secret.txt",
+        data: b"RAR5 header encrypted stored payload from rars\n",
+        mtime: Some(0x5a21_0000),
+        attributes: 0x20,
+        host_os: 3,
+        password: b"password",
+    }];
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    features.header_encryption = true;
+    let bytes = write_encrypted_stored_archive(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+    )
+    .unwrap();
+    let second = write_encrypted_stored_archive(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+    )
+    .unwrap();
+    let (salt, first_header_iv) = header_encryption_salt_and_first_header_iv(&bytes);
+    let (second_salt, second_first_header_iv) = header_encryption_salt_and_first_header_iv(&second);
+    assert_ne!(salt, second_salt);
+    assert_ne!(first_header_iv, second_first_header_iv);
+
+    assert!(matches!(Archive::parse(&bytes), Err(Error::NeedPassword)));
+    assert!(matches!(
+        Archive::parse_with_password(&bytes, Some(b"wrong")),
+        Err(Error::WrongPasswordOrCorruptData)
+    ));
+    let archive = Archive::parse_with_password(&bytes, Some(b"password")).unwrap();
+    assert_eq!(archive.files().next().unwrap().name, b"header-secret.txt");
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].data, entries[0].data);
+}
+
+#[test]
+fn writes_header_encrypted_compressed_rar50_archive_that_reader_extracts_with_password() {
+    let entries = [EncryptedCompressedEntry {
+        name: b"header-compressed-secret.txt",
+        data: b"RAR5 header encrypted compressed payload from rars\nRAR5 header encrypted compressed payload from rars\n",
+        mtime: Some(0x5a21_0056),
+        attributes: 0x20,
+        host_os: 3,
+        password: b"password",
+    }];
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    features.header_encryption = true;
+    let bytes = write_encrypted_compressed_archive(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+    )
+    .unwrap();
+    let second = write_encrypted_compressed_archive(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+    )
+    .unwrap();
+    let (salt, first_header_iv) = header_encryption_salt_and_first_header_iv(&bytes);
+    let (second_salt, second_first_header_iv) = header_encryption_salt_and_first_header_iv(&second);
+    assert_ne!(salt, second_salt);
+    assert_ne!(first_header_iv, second_first_header_iv);
+
+    assert!(matches!(Archive::parse(&bytes), Err(Error::NeedPassword)));
+    assert!(matches!(
+        Archive::parse_with_password(&bytes, Some(b"wrong")),
+        Err(Error::WrongPasswordOrCorruptData)
+    ));
+    let archive = Archive::parse_with_password(&bytes, Some(b"password")).unwrap();
+    let file = archive.files().next().unwrap();
+    assert_eq!(file.name, b"header-compressed-secret.txt");
+    assert_eq!(file.decoded_compression_info().unwrap().method, 1);
+    assert!(file.encrypted);
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].data, entries[0].data);
+    assert_eq!(extracted[0].file_time, 0x5a21_0056);
+}
+
+#[test]
+fn writes_header_encrypted_solid_compressed_rar50_archive_that_reader_extracts_with_password() {
+    let first = b"header encrypted rar50 solid shared phrase alpha beta gamma\n".repeat(16);
+    let second = b"header encrypted rar50 solid shared phrase alpha beta gamma\nsecond\n".repeat(8);
+    let entries = [
+        EncryptedCompressedEntry {
+            name: b"header-solid-one.txt",
+            data: &first,
+            mtime: Some(0x5a21_0063),
+            attributes: 0x20,
+            host_os: 3,
+            password: b"password",
+        },
+        EncryptedCompressedEntry {
+            name: b"header-solid-two.txt",
+            data: &second,
+            mtime: Some(0x5a21_0064),
+            attributes: 0x20,
+            host_os: 3,
+            password: b"password",
+        },
+    ];
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    features.header_encryption = true;
+    features.solid = true;
+    let bytes = write_encrypted_compressed_archive(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+    )
+    .unwrap();
+
+    assert!(matches!(Archive::parse(&bytes), Err(Error::NeedPassword)));
+    let archive = Archive::parse_with_password(&bytes, Some(b"password")).unwrap();
+    let files: Vec<_> = archive.files().collect();
+    assert!(archive.main.is_solid());
+    assert!(files.iter().all(|file| file.encrypted));
+    assert!(!files[0].decoded_compression_info().unwrap().solid);
+    assert!(files[1].decoded_compression_info().unwrap().solid);
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].data, first);
+    assert_eq!(extracted[1].data, second);
+}
+
+#[test]
+fn writes_header_encrypted_rar50_archive_comment_service_that_reader_extracts_with_password() {
+    let entries = [EncryptedStoredEntry {
+        name: b"header-comment-secret.txt",
+        data: b"RAR5 header encrypted archive comment payload from rars\n",
+        mtime: Some(0x5a21_0000),
+        attributes: 0x20,
+        host_os: 3,
+        password: b"password",
+    }];
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    features.header_encryption = true;
+    features.archive_comment = true;
+    let bytes = write_encrypted_stored_archive_with_comment(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        Some(EncryptedArchiveCommentEntry {
+            data: b"header encrypted CMT from rars\n",
+            password: b"password",
+        }),
+    )
+    .unwrap();
+
+    assert!(matches!(Archive::parse(&bytes), Err(Error::NeedPassword)));
+    let archive = Archive::parse_with_password(&bytes, Some(b"password")).unwrap();
+    let services: Vec<_> = archive.services().collect();
+    assert_eq!(services.len(), 1);
+    assert_eq!(services[0].name, b"CMT");
+    assert!(services[0].encrypted);
+    let comment = services[0].extract(&archive).unwrap();
+    assert_eq!(comment.data, b"header encrypted CMT from rars\n");
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].data, entries[0].data);
+}
+
+#[test]
+fn writes_header_encrypted_compressed_rar50_archive_comment_service_with_password() {
+    let payload = b"header encrypted compressed payload with archive comment\n".repeat(8);
+    let entries = [EncryptedCompressedEntry {
+        name: b"header-compressed-comment-secret.txt",
+        data: &payload,
+        mtime: Some(0x5a21_0067),
+        attributes: 0x20,
+        host_os: 3,
+        password: b"password",
+    }];
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    features.header_encryption = true;
+    features.archive_comment = true;
+    let bytes = write_encrypted_compressed_archive_with_comment_and_metadata(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        Some(EncryptedArchiveCommentEntry {
+            data: b"header encrypted compressed CMT from rars\n",
+            password: b"password",
+        }),
+        None,
+    )
+    .unwrap();
+
+    assert!(matches!(Archive::parse(&bytes), Err(Error::NeedPassword)));
+    let archive = Archive::parse_with_password(&bytes, Some(b"password")).unwrap();
+    let services: Vec<_> = archive.services().collect();
+    assert_eq!(services.len(), 1);
+    assert_eq!(services[0].name, b"CMT");
+    assert!(services[0].encrypted);
+    let comment = services[0].extract(&archive).unwrap();
+    assert_eq!(comment.data, b"header encrypted compressed CMT from rars\n");
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+fn writes_header_encrypted_rar50_archive_metadata_record() {
+    let entries = [EncryptedStoredEntry {
+        name: b"header-metadata-secret.txt",
+        data: b"header encrypted stored payload with archive metadata\n",
+        mtime: Some(0x5a21_0000),
+        attributes: 0x20,
+        host_os: 3,
+        password: b"password",
+    }];
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    features.header_encryption = true;
+    let bytes = write_encrypted_stored_archive_with_comment_and_metadata(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar70,
+            features,
+        },
+        None,
+        Some(ArchiveMetadataEntry {
+            name: Some(b"header-encrypted-metadata.rar"),
+            creation_time: Some(0x01dcd60e_662d7a32),
+        }),
+    )
+    .unwrap();
+
+    assert!(matches!(Archive::parse(&bytes), Err(Error::NeedPassword)));
+    let archive = Archive::parse_with_password(&bytes, Some(b"password")).unwrap();
+    let metadata = archive.main.archive_metadata().unwrap();
+    assert_eq!(
+        metadata.name.as_deref(),
+        Some(b"header-encrypted-metadata.rar".as_slice())
+    );
+    assert_eq!(metadata.creation_time, Some(0x01dcd60e_662d7a32));
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].data, entries[0].data);
+}
+
+#[test]
+fn writes_header_encrypted_rar50_recovery_service_that_reader_extracts_with_password() {
+    let entries = [EncryptedStoredEntry {
+        name: b"header-recovery-secret.txt",
+        data: b"RAR5 header encrypted recovery payload from rars\n",
+        mtime: Some(0x5a21_0000),
+        attributes: 0x20,
+        host_os: 3,
+        password: b"password",
+    }];
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    features.header_encryption = true;
+    features.recovery_record = true;
+    let bytes = write_encrypted_stored_archive_with_recovery(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        4,
+        b"password",
+    )
+    .unwrap();
+
+    assert!(matches!(Archive::parse(&bytes), Err(Error::NeedPassword)));
+    let archive = Archive::parse_with_password(&bytes, Some(b"password")).unwrap();
+    assert!(archive.main.has_recovery_record());
+    let service = archive.services().next().unwrap();
+    assert_eq!(service.name, b"RR");
+    assert!(!service.encrypted);
+    let recovery = service.recovery_record().unwrap().unwrap();
+    assert_eq!(recovery.percent, 4);
+    let recovery_data = service.extract(&archive).unwrap().data;
+    assert!(recovery_data.starts_with(b"{RB}"));
+    assert_eq!(
+        u32::from_le_bytes(recovery_data[0x0c..0x10].try_into().unwrap()) as usize,
+        recovery_data.len()
+    );
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].data, entries[0].data);
+}
+
+#[test]
+fn writes_header_encrypted_compressed_rar50_recovery_service_that_reader_extracts_with_password() {
+    let payload = b"header encrypted compressed recovery payload repeated repeated. ".repeat(24);
+    let entries = [EncryptedCompressedEntry {
+        name: b"header-secret-compressed-recovery.txt",
+        data: &payload,
+        mtime: Some(0x5a21_0000),
+        attributes: 0x20,
+        host_os: 3,
+        password: b"password",
+    }];
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    features.header_encryption = true;
+    features.recovery_record = true;
+    let bytes = write_encrypted_compressed_archive_with_recovery(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        4,
+    )
+    .unwrap();
+
+    assert!(matches!(Archive::parse(&bytes), Err(Error::NeedPassword)));
+    let archive = Archive::parse_with_password(&bytes, Some(b"password")).unwrap();
+    assert!(archive.main.has_recovery_record());
+    let service = archive.services().next().unwrap();
+    assert_eq!(service.name, b"RR");
+    assert!(!service.encrypted);
+    assert_eq!(service.recovery_record().unwrap().unwrap().percent, 4);
+    let recovery_data = service.extract(&archive).unwrap().data;
+    assert!(recovery_data.starts_with(b"{RB}"));
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+fn writes_header_encrypted_compressed_rar50_archive_metadata_record() {
+    let payload = b"header encrypted compressed metadata payload repeated repeated\n".repeat(8);
+    let entries = [EncryptedCompressedEntry {
+        name: b"header-secret-compressed-metadata.txt",
+        data: &payload,
+        mtime: Some(0x5a21_0000),
+        attributes: 0x20,
+        host_os: 3,
+        password: b"password",
+    }];
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    features.header_encryption = true;
+    let bytes = write_encrypted_compressed_archive_with_metadata(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar70,
+            features,
+        },
+        Some(ArchiveMetadataEntry {
+            name: Some(b"header-encrypted-compressed-metadata.rar"),
+            creation_time: Some(0x01dcd60e_662d7a32),
+        }),
+    )
+    .unwrap();
+
+    assert!(matches!(Archive::parse(&bytes), Err(Error::NeedPassword)));
+    let archive = Archive::parse_with_password(&bytes, Some(b"password")).unwrap();
+    let metadata = archive.main.archive_metadata().unwrap();
+    assert_eq!(
+        metadata.name.as_deref(),
+        Some(b"header-encrypted-compressed-metadata.rar".as_slice())
+    );
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+fn writes_encrypted_stored_rar50_volume_set_that_reader_reassembles_with_password() {
+    let payload = b"RAR5 encrypted stored split payload from rars.\n".repeat(16);
+    let entry = EncryptedStoredEntry {
+        name: b"split-secret.txt",
+        data: &payload,
+        mtime: Some(0x5a21_0000),
+        attributes: 0x20,
+        host_os: 3,
+        password: b"password",
+    };
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    let parts = write_encrypted_stored_volumes(
+        entry,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        97,
+    )
+    .unwrap();
+    let second_parts = write_encrypted_stored_volumes(
+        entry,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        97,
+    )
+    .unwrap();
+    assert!(parts.len() > 2);
+    assert_eq!(parts.len(), second_parts.len());
+
+    let archives: Vec<_> = parts
+        .iter()
+        .map(|part| Archive::parse(part).unwrap())
+        .collect();
+    let second_archives: Vec<_> = second_parts
+        .iter()
+        .map(|part| Archive::parse(part).unwrap())
+        .collect();
+    assert!(archives.iter().all(|archive| archive.main.is_volume()));
+    assert!(archives
+        .iter()
+        .all(|archive| archive.files().next().is_some_and(|file| file.encrypted)));
+    let first_encryption = archives[0]
+        .files()
+        .next()
+        .unwrap()
+        .encryption
+        .as_ref()
+        .unwrap();
+    let second_encryption = second_archives[0]
+        .files()
+        .next()
+        .unwrap()
+        .encryption
+        .as_ref()
+        .unwrap();
+    assert_ne!(first_encryption.salt, second_encryption.salt);
+    assert_ne!(first_encryption.iv, second_encryption.iv);
+    assert!(matches!(
+        extract_volumes(&archives),
+        Err(Error::NeedPassword)
+    ));
+
+    let archives: Vec<_> = parts
+        .iter()
+        .map(|part| Archive::parse_with_password(part, Some(b"password")).unwrap())
+        .collect();
+    let extracted = rars_format::rar50::extract_volumes(&archives).unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].name, b"split-secret.txt");
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+fn writes_encrypted_stored_rar50_volume_set_with_recovery_records() {
+    let payload = b"RAR5 encrypted stored recovery split payload from rars.\n".repeat(16);
+    let entry = EncryptedStoredEntry {
+        name: b"split-secret-rr.txt",
+        data: &payload,
+        mtime: Some(0x5a21_0000),
+        attributes: 0x20,
+        host_os: 3,
+        password: b"password",
+    };
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    features.recovery_record = true;
+    let parts = write_encrypted_stored_volumes_with_recovery(
+        entry,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        97,
+        8,
+    )
+    .unwrap();
+
+    let archives: Vec<_> = parts
+        .iter()
+        .map(|part| Archive::parse_with_password(part, Some(b"password")).unwrap())
+        .collect();
+    assert!(archives.iter().all(|archive| archive.main.is_volume()));
+    assert!(archives
+        .iter()
+        .all(|archive| archive.main.has_recovery_record()));
+    for archive in &archives {
+        let service = archive.services().next().unwrap();
+        assert_eq!(service.name_lossy(), "RR");
+        assert!(!service.encrypted);
+        assert_eq!(service.recovery_record().unwrap().unwrap().percent, 8);
+        assert_rar5_inline_recovery_chunks(&service.extract(archive).unwrap().data);
+    }
+
+    let extracted = rars_format::rar50::extract_volumes(&archives).unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].name, b"split-secret-rr.txt");
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+fn writes_header_encrypted_stored_rar50_volume_set_that_reader_reassembles_with_password() {
+    let payload = b"RAR5 header encrypted stored split payload from rars.\n".repeat(16);
+    let entry = EncryptedStoredEntry {
+        name: b"split-header-secret.txt",
+        data: &payload,
+        mtime: Some(0x5a21_0000),
+        attributes: 0x20,
+        host_os: 3,
+        password: b"password",
+    };
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    features.header_encryption = true;
+    let parts = write_encrypted_stored_volumes(
+        entry,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        97,
+    )
+    .unwrap();
+    let second_parts = write_encrypted_stored_volumes(
+        entry,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        97,
+    )
+    .unwrap();
+    assert!(parts.len() > 2);
+    assert_eq!(parts.len(), second_parts.len());
+    let (salt, first_header_iv) = header_encryption_salt_and_first_header_iv(&parts[0]);
+    let (second_salt, second_first_header_iv) =
+        header_encryption_salt_and_first_header_iv(&second_parts[0]);
+    assert_ne!(salt, second_salt);
+    assert_ne!(first_header_iv, second_first_header_iv);
+    assert!(parts
+        .iter()
+        .all(|part| matches!(Archive::parse(part), Err(Error::NeedPassword))));
+    assert!(parts.iter().all(|part| matches!(
+        Archive::parse_with_password(part, Some(b"wrong")),
+        Err(Error::WrongPasswordOrCorruptData)
+    )));
+
+    let archives: Vec<_> = parts
+        .iter()
+        .map(|part| Archive::parse_with_password(part, Some(b"password")).unwrap())
+        .collect();
+    assert!(archives.iter().all(|archive| archive.main.is_volume()));
+    let extracted = rars_format::rar50::extract_volumes(&archives).unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].name, b"split-header-secret.txt");
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+fn writes_encrypted_compressed_rar50_volume_set_that_reader_reassembles_with_password() {
+    let payload = b"RAR5 encrypted compressed split payload from rars.\n".repeat(18);
+    let entry = EncryptedCompressedEntry {
+        name: b"split-secret-compressed50.txt",
+        data: &payload,
+        mtime: Some(0x5a21_0057),
+        attributes: 0x20,
+        host_os: 3,
+        password: b"password",
+    };
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    let parts = write_encrypted_compressed_volumes(
+        entry,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        32,
+    )
+    .unwrap();
+    let second_parts = write_encrypted_compressed_volumes(
+        entry,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        32,
+    )
+    .unwrap();
+
+    assert!(parts.len() >= 2);
+    let archives: Vec<_> = parts
+        .iter()
+        .map(|part| Archive::parse(part).unwrap())
+        .collect();
+    let second_archives: Vec<_> = second_parts
+        .iter()
+        .map(|part| Archive::parse(part).unwrap())
+        .collect();
+    let first = archives[0].files().next().unwrap();
+    let second_first = second_archives[0].files().next().unwrap();
+    assert!(first.encrypted);
+    assert_eq!(first.decoded_compression_info().unwrap().method, 1);
+    let encryption = first.encryption.as_ref().unwrap();
+    let second_encryption = second_first.encryption.as_ref().unwrap();
+    assert_ne!(encryption.salt, second_encryption.salt);
+    assert_ne!(encryption.iv, second_encryption.iv);
+
+    let extracted =
+        rars_format::rar50::extract_volumes_with_password(&archives, Some(b"password")).unwrap();
+    assert_eq!(extracted[0].name, b"split-secret-compressed50.txt");
+    assert_eq!(extracted[0].data, payload);
+    assert_eq!(extracted[0].file_time, 0x5a21_0057);
+}
+
+#[test]
+fn writes_encrypted_compressed_rar50_volume_set_with_recovery_records() {
+    let payload = b"RAR5 encrypted compressed recovery split payload from rars.\n".repeat(18);
+    let entry = EncryptedCompressedEntry {
+        name: b"split-secret-compressed-rr.txt",
+        data: &payload,
+        mtime: Some(0x5a21_0057),
+        attributes: 0x20,
+        host_os: 3,
+        password: b"password",
+    };
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    features.recovery_record = true;
+    let parts = write_encrypted_compressed_volume_set_with_recovery(
+        &[entry],
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        32,
+        8,
+    )
+    .unwrap();
+
+    let archives: Vec<_> = parts
+        .iter()
+        .map(|part| Archive::parse_with_password(part, Some(b"password")).unwrap())
+        .collect();
+    assert!(archives.iter().all(|archive| archive.main.is_volume()));
+    assert!(archives
+        .iter()
+        .all(|archive| archive.main.has_recovery_record()));
+    for archive in &archives {
+        let service = archive.services().next().unwrap();
+        assert_eq!(service.name_lossy(), "RR");
+        assert!(!service.encrypted);
+        assert_eq!(service.recovery_record().unwrap().unwrap().percent, 8);
+        assert_rar5_inline_recovery_chunks(&service.extract(archive).unwrap().data);
+    }
+
+    let extracted = rars_format::rar50::extract_volumes(&archives).unwrap();
+    assert_eq!(extracted[0].name, b"split-secret-compressed-rr.txt");
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+fn writes_encrypted_solid_compressed_rar50_volume_set_that_reader_reassembles_with_password() {
+    let payload = b"RAR5 encrypted solid compressed split payload from rars.\n".repeat(18);
+    let entry = EncryptedCompressedEntry {
+        name: b"split-solid-secret-compressed50.txt",
+        data: &payload,
+        mtime: Some(0x5a21_0058),
+        attributes: 0x20,
+        host_os: 3,
+        password: b"password",
+    };
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    features.solid = true;
+    let parts = write_encrypted_compressed_volumes(
+        entry,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        32,
+    )
+    .unwrap();
+
+    let archives: Vec<_> = parts
+        .iter()
+        .map(|part| Archive::parse(part).unwrap())
+        .collect();
+    assert!(archives.iter().all(|archive| archive.main.is_solid()));
+    let first = archives[0].files().next().unwrap();
+    assert!(first.encrypted);
+    assert!(!first.decoded_compression_info().unwrap().solid);
+
+    let extracted =
+        rars_format::rar50::extract_volumes_with_password(&archives, Some(b"password")).unwrap();
+    assert_eq!(extracted[0].name, b"split-solid-secret-compressed50.txt");
+    assert_eq!(extracted[0].data, payload);
+    assert_eq!(extracted[0].file_time, 0x5a21_0058);
+}
+
+#[test]
+fn writes_header_encrypted_compressed_rar50_volume_set_that_reader_reassembles_with_password() {
+    let payload = b"RAR5 header encrypted compressed split payload from rars.\n".repeat(18);
+    let entry = EncryptedCompressedEntry {
+        name: b"split-header-secret-compressed50.txt",
+        data: &payload,
+        mtime: None,
+        attributes: 0x20,
+        host_os: 3,
+        password: b"password",
+    };
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    features.header_encryption = true;
+    let parts = write_encrypted_compressed_volumes(
+        entry,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        32,
+    )
+    .unwrap();
+    let second_parts = write_encrypted_compressed_volumes(
+        entry,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        32,
+    )
+    .unwrap();
+    let (salt, first_header_iv) = header_encryption_salt_and_first_header_iv(&parts[0]);
+    let (second_salt, second_first_header_iv) =
+        header_encryption_salt_and_first_header_iv(&second_parts[0]);
+    assert_ne!(salt, second_salt);
+    assert_ne!(first_header_iv, second_first_header_iv);
+    assert!(matches!(
+        Archive::parse(&parts[0]),
+        Err(Error::NeedPassword)
+    ));
+
+    let archives: Vec<_> = parts
+        .iter()
+        .map(|part| Archive::parse_with_password(part, Some(b"password")).unwrap())
+        .collect();
+    let first = archives[0].files().next().unwrap();
+    assert!(first.encrypted);
+    assert_eq!(first.decoded_compression_info().unwrap().method, 1);
+
+    let extracted = extract_volumes(&archives).unwrap();
+    assert_eq!(extracted[0].name, b"split-header-secret-compressed50.txt");
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+fn writes_header_encrypted_solid_compressed_rar50_volume_set_that_reader_reassembles_with_password()
+{
+    let payload = b"RAR5 header encrypted solid compressed split payload from rars.\n".repeat(18);
+    let entry = EncryptedCompressedEntry {
+        name: b"split-header-solid-secret-compressed50.txt",
+        data: &payload,
+        mtime: None,
+        attributes: 0x20,
+        host_os: 3,
+        password: b"password",
+    };
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    features.header_encryption = true;
+    features.solid = true;
+    let parts = write_encrypted_compressed_volumes(
+        entry,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        32,
+    )
+    .unwrap();
+    assert!(matches!(
+        Archive::parse(&parts[0]),
+        Err(Error::NeedPassword)
+    ));
+
+    let archives: Vec<_> = parts
+        .iter()
+        .map(|part| Archive::parse_with_password(part, Some(b"password")).unwrap())
+        .collect();
+    assert!(archives.iter().all(|archive| archive.main.is_solid()));
+    let first = archives[0].files().next().unwrap();
+    assert!(first.encrypted);
+    assert!(!first.decoded_compression_info().unwrap().solid);
+
+    let extracted = extract_volumes(&archives).unwrap();
+    assert_eq!(
+        extracted[0].name,
+        b"split-header-solid-secret-compressed50.txt"
+    );
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+fn writes_encrypted_multi_file_solid_compressed_rar50_volume_set_that_reader_reassembles() {
+    let first = b"RAR5 encrypted multi-file solid split shared phrase.\n".repeat(14);
+    let second = b"RAR5 encrypted multi-file solid split shared phrase.\nsecond\n".repeat(12);
+    let entries = [
+        EncryptedCompressedEntry {
+            name: b"encrypted-solid-split-one.txt",
+            data: &first,
+            mtime: Some(0x5a21_0061),
+            attributes: 0x20,
+            host_os: 3,
+            password: b"password",
+        },
+        EncryptedCompressedEntry {
+            name: b"encrypted-solid-split-two.txt",
+            data: &second,
+            mtime: Some(0x5a21_0062),
+            attributes: 0x20,
+            host_os: 3,
+            password: b"password",
+        },
+    ];
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    features.solid = true;
+    let parts = write_encrypted_compressed_volume_set(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        96,
+    )
+    .unwrap();
+
+    let archives: Vec<_> = parts
+        .iter()
+        .map(|part| Archive::parse(part).unwrap())
+        .collect();
+    assert!(archives.iter().all(|archive| archive.main.is_solid()));
+    assert!(archives
+        .iter()
+        .flat_map(|archive| archive.files())
+        .any(|file| file.name == b"encrypted-solid-split-two.txt"
+            && file.decoded_compression_info().unwrap().solid));
+
+    let extracted =
+        rars_format::rar50::extract_volumes_with_password(&archives, Some(b"password")).unwrap();
+    assert_eq!(extracted[0].name, b"encrypted-solid-split-one.txt");
+    assert_eq!(extracted[0].data, first);
+    assert_eq!(extracted[1].name, b"encrypted-solid-split-two.txt");
+    assert_eq!(extracted[1].data, second);
+}
+
+#[test]
+fn writes_header_encrypted_multi_file_solid_compressed_rar50_volume_set_that_reader_reassembles() {
+    let first = b"RAR5 header encrypted multi-file solid split shared phrase.\n".repeat(14);
+    let second =
+        b"RAR5 header encrypted multi-file solid split shared phrase.\nsecond\n".repeat(12);
+    let entries = [
+        EncryptedCompressedEntry {
+            name: b"header-encrypted-solid-split-one.txt",
+            data: &first,
+            mtime: None,
+            attributes: 0x20,
+            host_os: 3,
+            password: b"password",
+        },
+        EncryptedCompressedEntry {
+            name: b"header-encrypted-solid-split-two.txt",
+            data: &second,
+            mtime: None,
+            attributes: 0x20,
+            host_os: 3,
+            password: b"password",
+        },
+    ];
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    features.header_encryption = true;
+    features.solid = true;
+    let parts = write_encrypted_compressed_volume_set(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        96,
+    )
+    .unwrap();
+    assert!(matches!(
+        Archive::parse(&parts[0]),
+        Err(Error::NeedPassword)
+    ));
+
+    let archives: Vec<_> = parts
+        .iter()
+        .map(|part| Archive::parse_with_password(part, Some(b"password")).unwrap())
+        .collect();
+    assert!(archives.iter().all(|archive| archive.main.is_solid()));
+    let extracted = extract_volumes(&archives).unwrap();
+    assert_eq!(extracted[0].name, b"header-encrypted-solid-split-one.txt");
+    assert_eq!(extracted[0].data, first);
+    assert_eq!(extracted[1].name, b"header-encrypted-solid-split-two.txt");
+    assert_eq!(extracted[1].data, second);
 }
 
 #[test]
@@ -565,6 +3195,7 @@ fn parses_rar50_recovery_service_archive() {
     let recovery = archive.services().next().unwrap();
     assert_eq!(recovery.packed_size(), 210);
     assert_eq!(recovery.unpacked_size, 210);
+    assert_rar5_inline_recovery_chunks(&recovery.packed_data(&archive).unwrap());
     let recovery = recovery.recovery_record().unwrap().unwrap();
     assert_eq!(recovery.percent, 10);
     assert_eq!(recovery.payload_size, 210);
@@ -584,6 +3215,7 @@ fn parses_rar50_mixed_service_archive() {
     let recovery = services[2].recovery_record().unwrap().unwrap();
     assert_eq!(recovery.percent, 5);
     assert_eq!(recovery.payload_size, 526);
+    assert_rar5_inline_recovery_chunks(&services[2].packed_data(&archive).unwrap());
 
     let extracted = archive.extract().unwrap();
     assert_eq!(extracted.len(), 2);

@@ -10,6 +10,10 @@ pub const ALIGN_TABLE_SIZE: usize = 16;
 pub const LENGTH_TABLE_SIZE: usize = 44;
 const DEFAULT_DICTIONARY_SIZE: usize = 4 * 1024 * 1024;
 const MAX_INITIAL_OUTPUT_CAPACITY: usize = 1024 * 1024;
+const MAX_ENCODER_MATCH_OFFSET: usize = DEFAULT_DICTIONARY_SIZE;
+const MAX_ENCODER_MATCH_LENGTH: usize = 4096;
+const MATCH_HASH_BUCKETS: usize = 4096;
+const MAX_MATCH_CANDIDATES: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompressedBlock {
@@ -239,6 +243,122 @@ pub fn read_table_lengths(input: &[u8], algorithm_version: u8) -> Result<(TableL
     ))
 }
 
+pub fn encode_table_lengths(lengths: &TableLengths, algorithm_version: u8) -> Result<Vec<u8>> {
+    encode_table_lengths_with_bit_count(lengths, algorithm_version).map(|(data, _)| data)
+}
+
+pub fn encode_table_lengths_with_bit_count(
+    lengths: &TableLengths,
+    algorithm_version: u8,
+) -> Result<(Vec<u8>, usize)> {
+    let distance_size = match algorithm_version {
+        0 => DISTANCE_TABLE_SIZE_50,
+        1 => DISTANCE_TABLE_SIZE_70,
+        _ => {
+            return Err(Error::InvalidData(
+                "RAR 5 unknown compression algorithm version",
+            ))
+        }
+    };
+    if lengths.main.len() != MAIN_TABLE_SIZE
+        || lengths.distance.len() != distance_size
+        || lengths.align.len() != ALIGN_TABLE_SIZE
+        || lengths.length.len() != LENGTH_TABLE_SIZE
+    {
+        return Err(Error::InvalidData("RAR 5 table length count mismatch"));
+    }
+
+    let mut writer = BitWriter::new();
+    for _ in 0..LEVEL_TABLE_SIZE {
+        writer.write_bits(5, 4);
+    }
+
+    let flattened = lengths
+        .main
+        .iter()
+        .chain(lengths.distance.iter())
+        .chain(lengths.align.iter())
+        .chain(lengths.length.iter());
+    let mut zero_run = 0usize;
+    for &length in flattened {
+        if length > 15 {
+            return Err(Error::InvalidData("RAR 5 Huffman length is too large"));
+        }
+        if length == 0 {
+            zero_run += 1;
+        } else {
+            write_zero_lengths(&mut writer, zero_run);
+            zero_run = 0;
+            writer.write_bits(usize::from(length), 5);
+        }
+    }
+    write_zero_lengths(&mut writer, zero_run);
+    let bit_count = writer.bit_pos;
+    Ok((writer.finish(), bit_count))
+}
+
+pub fn encode_compressed_block(
+    payload: &[u8],
+    payload_bits: usize,
+    has_tables: bool,
+    is_last: bool,
+) -> Result<Vec<u8>> {
+    if payload_bits > payload.len() * 8 {
+        return Err(Error::InvalidData("RAR 5 block bit count exceeds payload"));
+    }
+    if payload.is_empty() && payload_bits != 0 {
+        return Err(Error::InvalidData("RAR 5 empty block has payload bits"));
+    }
+    if !payload.is_empty() && payload_bits <= (payload.len() - 1) * 8 {
+        return Err(Error::InvalidData("RAR 5 block has unused payload bytes"));
+    }
+    if payload.len() > 0x00ff_ffff {
+        return Err(Error::InvalidData("RAR 5 block payload is too large"));
+    }
+
+    let size_len = if payload.len() <= 0xff {
+        1
+    } else if payload.len() <= 0xffff {
+        2
+    } else {
+        3
+    };
+    let final_byte_bits = if payload.is_empty() {
+        1
+    } else {
+        ((payload_bits - 1) % 8) + 1
+    };
+    let mut flags = (final_byte_bits as u8) - 1;
+    flags |= match size_len {
+        1 => 0,
+        2 => 1 << 3,
+        3 => 2 << 3,
+        _ => unreachable!("size_len is constrained above"),
+    };
+    if is_last {
+        flags |= 0x40;
+    }
+    if has_tables {
+        flags |= 0x80;
+    }
+
+    let mut size_bytes = [0u8; 3];
+    let mut size = payload.len();
+    for byte in &mut size_bytes[..size_len] {
+        *byte = size as u8;
+        size >>= 8;
+    }
+    let checksum = size_bytes[..size_len]
+        .iter()
+        .fold(0x5a ^ flags, |acc, &byte| acc ^ byte);
+    let mut out = Vec::with_capacity(2 + size_len + payload.len());
+    out.push(flags);
+    out.push(checksum);
+    out.extend_from_slice(&size_bytes[..size_len]);
+    out.extend_from_slice(payload);
+    Ok(out)
+}
+
 pub fn decode_literal_only(
     input: &[u8],
     algorithm_version: u8,
@@ -257,6 +377,549 @@ pub fn decode_literal_only(
 pub fn decode_lz(input: &[u8], algorithm_version: u8, output_size: usize) -> Result<Vec<u8>> {
     let mut decoder = Unpack50Decoder::new();
     decoder.decode_member(input, algorithm_version, output_size, false, DecodeMode::Lz)
+}
+
+pub fn encode_literal_only(data: &[u8], algorithm_version: u8) -> Result<Vec<u8>> {
+    let distance_size = match algorithm_version {
+        0 => DISTANCE_TABLE_SIZE_50,
+        1 => DISTANCE_TABLE_SIZE_70,
+        _ => {
+            return Err(Error::InvalidData(
+                "RAR 5 unknown compression algorithm version",
+            ))
+        }
+    };
+    let mut lengths = TableLengths {
+        main: vec![0; MAIN_TABLE_SIZE],
+        distance: vec![0; distance_size],
+        align: vec![0; ALIGN_TABLE_SIZE],
+        length: vec![0; LENGTH_TABLE_SIZE],
+    };
+    let present = literal_presence(data);
+    let literal_count = present.iter().filter(|&&used| used).count();
+    let literal_length = huffman_bits_for_symbol_count(literal_count);
+    for (symbol, used) in present.into_iter().enumerate() {
+        if used {
+            lengths.main[symbol] = literal_length;
+        }
+    }
+
+    let table = HuffmanTable::from_lengths(&lengths.main)?;
+    let (table_data, table_bits) =
+        encode_table_lengths_with_bit_count(&lengths, algorithm_version)?;
+    let mut writer = BitWriter {
+        bytes: table_data,
+        bit_pos: table_bits,
+    };
+    for &byte in data {
+        let (code, len) = table.code_for_symbol(byte as usize)?;
+        writer.write_bits(usize::from(code), usize::from(len));
+    }
+    let payload_bits = writer.bit_pos;
+    encode_compressed_block(&writer.finish(), payload_bits, true, true)
+}
+
+pub fn encode_lz_member(data: &[u8], algorithm_version: u8) -> Result<Vec<u8>> {
+    encode_lz_member_with_history(data, &[], algorithm_version)
+}
+
+pub fn encode_lz_member_with_delta_filter(
+    data: &[u8],
+    channels: usize,
+    algorithm_version: u8,
+) -> Result<Vec<u8>> {
+    let filtered = delta_encode(data, channels)?;
+    encode_lz_member_with_filter(
+        &filtered,
+        &[],
+        algorithm_version,
+        EncodeFilter {
+            length: data.len(),
+            filter_type: FilterType::Delta,
+            channels,
+        },
+    )
+}
+
+pub fn encode_lz_member_with_e8_filter(
+    data: &[u8],
+    include_e9: bool,
+    algorithm_version: u8,
+) -> Result<Vec<u8>> {
+    let mut filtered = data.to_vec();
+    e8e9_encode(&mut filtered, 0, include_e9);
+    encode_lz_member_with_filter(
+        &filtered,
+        &[],
+        algorithm_version,
+        EncodeFilter {
+            length: data.len(),
+            filter_type: if include_e9 {
+                FilterType::E8E9
+            } else {
+                FilterType::E8
+            },
+            channels: 0,
+        },
+    )
+}
+
+pub fn encode_lz_member_with_arm_filter(data: &[u8], algorithm_version: u8) -> Result<Vec<u8>> {
+    let mut filtered = data.to_vec();
+    arm_encode(&mut filtered, 0);
+    encode_lz_member_with_filter(
+        &filtered,
+        &[],
+        algorithm_version,
+        EncodeFilter {
+            length: data.len(),
+            filter_type: FilterType::Arm,
+            channels: 0,
+        },
+    )
+}
+
+pub fn encode_lz_member_with_history(
+    data: &[u8],
+    history: &[u8],
+    algorithm_version: u8,
+) -> Result<Vec<u8>> {
+    encode_lz_member_inner(data, history, algorithm_version, None)
+}
+
+fn encode_lz_member_with_filter(
+    data: &[u8],
+    history: &[u8],
+    algorithm_version: u8,
+    filter: EncodeFilter,
+) -> Result<Vec<u8>> {
+    encode_lz_member_inner(data, history, algorithm_version, Some(filter))
+}
+
+fn encode_lz_member_inner(
+    data: &[u8],
+    history: &[u8],
+    algorithm_version: u8,
+    initial_filter: Option<EncodeFilter>,
+) -> Result<Vec<u8>> {
+    let distance_size = match algorithm_version {
+        0 => DISTANCE_TABLE_SIZE_50,
+        1 => DISTANCE_TABLE_SIZE_70,
+        _ => {
+            return Err(Error::InvalidData(
+                "RAR 5 unknown compression algorithm version",
+            ))
+        }
+    };
+    let mut tokens = Vec::new();
+    if let Some(filter) = initial_filter {
+        tokens.push(EncodeToken::Filter(filter));
+    }
+    tokens.extend(encode_tokens(data, history));
+    let mut lengths = TableLengths {
+        main: vec![0; MAIN_TABLE_SIZE],
+        distance: vec![0; distance_size],
+        align: vec![0; ALIGN_TABLE_SIZE],
+        length: vec![0; LENGTH_TABLE_SIZE],
+    };
+
+    let mut used_main = vec![false; MAIN_TABLE_SIZE];
+    let mut used_distances = vec![false; distance_size];
+    let mut used_lengths = [false; LENGTH_TABLE_SIZE];
+    let mut uses_low_distance_table = false;
+    let mut state = EncoderMatchState::default();
+    for token in &tokens {
+        match *token {
+            EncodeToken::Filter(_) => used_main[256] = true,
+            EncodeToken::Literal(byte) => used_main[byte as usize] = true,
+            EncodeToken::Match { length, distance } => {
+                match state.encode_match(length, distance, distance_size)? {
+                    EncodedMatch::LastLengthRepeat => used_main[257] = true,
+                    EncodedMatch::RepeatDistance {
+                        index, length_slot, ..
+                    } => {
+                        used_main[258 + index] = true;
+                        used_lengths[length_slot] = true;
+                    }
+                    EncodedMatch::New {
+                        length_slot,
+                        distance_slot,
+                        distance_bit_count,
+                        ..
+                    } => {
+                        used_main[262 + length_slot] = true;
+                        used_distances[distance_slot] = true;
+                        uses_low_distance_table |= distance_bit_count >= 4;
+                    }
+                }
+                state.remember(length, distance);
+            }
+        }
+    }
+
+    let main_len = huffman_bits_for_symbol_count(used_main.iter().filter(|&&used| used).count());
+    for (symbol, used) in used_main.into_iter().enumerate() {
+        if used {
+            lengths.main[symbol] = main_len;
+        }
+    }
+    let distance_len =
+        huffman_bits_for_symbol_count(used_distances.iter().filter(|&&used| used).count());
+    for (symbol, used) in used_distances.into_iter().enumerate() {
+        if used {
+            lengths.distance[symbol] = distance_len;
+        }
+    }
+    let length_len =
+        huffman_bits_for_symbol_count(used_lengths.iter().filter(|&&used| used).count());
+    for (symbol, used) in used_lengths.into_iter().enumerate() {
+        if used {
+            lengths.length[symbol] = length_len;
+        }
+    }
+    if uses_low_distance_table {
+        lengths.align.fill(4);
+    }
+
+    let main_table = HuffmanTable::from_lengths(&lengths.main)?;
+    let distance_table = HuffmanTable::from_lengths(&lengths.distance)?;
+    let align_table = HuffmanTable::from_lengths(&lengths.align)?;
+    let length_table = HuffmanTable::from_lengths(&lengths.length)?;
+    let (table_data, table_bits) =
+        encode_table_lengths_with_bit_count(&lengths, algorithm_version)?;
+    let mut writer = BitWriter {
+        bytes: table_data,
+        bit_pos: table_bits,
+    };
+    let mut state = EncoderMatchState::default();
+    for token in tokens {
+        match token {
+            EncodeToken::Filter(filter) => {
+                let (code, len) = main_table.code_for_symbol(256)?;
+                writer.write_bits(usize::from(code), usize::from(len));
+                write_filter(&mut writer, filter)?;
+            }
+            EncodeToken::Literal(byte) => {
+                let (code, len) = main_table.code_for_symbol(byte as usize)?;
+                writer.write_bits(usize::from(code), usize::from(len));
+            }
+            EncodeToken::Match { length, distance } => {
+                match state.encode_match(length, distance, distance_size)? {
+                    EncodedMatch::LastLengthRepeat => {
+                        let (code, len) = main_table.code_for_symbol(257)?;
+                        writer.write_bits(usize::from(code), usize::from(len));
+                    }
+                    EncodedMatch::RepeatDistance {
+                        index,
+                        length_slot,
+                        length_extra,
+                    } => {
+                        let (code, len) = main_table.code_for_symbol(258 + index)?;
+                        writer.write_bits(usize::from(code), usize::from(len));
+                        let (code, len) = length_table.code_for_symbol(length_slot)?;
+                        writer.write_bits(usize::from(code), usize::from(len));
+                        let length_extra_bits = length_slot_extra_bits(length_slot)?;
+                        if length_extra_bits != 0 {
+                            writer.write_bits(length_extra, usize::from(length_extra_bits));
+                        }
+                    }
+                    EncodedMatch::New {
+                        length_slot,
+                        length_extra,
+                        distance_slot,
+                        distance_extra,
+                        distance_bit_count,
+                    } => {
+                        let (code, len) = main_table.code_for_symbol(262 + length_slot)?;
+                        writer.write_bits(usize::from(code), usize::from(len));
+                        let length_extra_bits = length_slot_extra_bits(length_slot)?;
+                        if length_extra_bits != 0 {
+                            writer.write_bits(length_extra, usize::from(length_extra_bits));
+                        }
+                        let (code, len) = distance_table.code_for_symbol(distance_slot)?;
+                        writer.write_bits(usize::from(code), usize::from(len));
+                        if distance_bit_count >= 4 {
+                            if distance_bit_count > 4 {
+                                writer.write_bits(distance_extra >> 4, distance_bit_count - 4);
+                            }
+                            let (code, len) = align_table.code_for_symbol(distance_extra & 0x0f)?;
+                            writer.write_bits(usize::from(code), usize::from(len));
+                        } else if distance_bit_count != 0 {
+                            writer.write_bits(distance_extra, distance_bit_count);
+                        }
+                    }
+                }
+                state.remember(length, distance);
+            }
+        }
+    }
+
+    let payload_bits = writer.bit_pos;
+    encode_compressed_block(&writer.finish(), payload_bits, true, true)
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Unpack50Encoder {
+    history: Vec<u8>,
+}
+
+impl Unpack50Encoder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn encode_member(&mut self, input: &[u8], algorithm_version: u8) -> Result<Vec<u8>> {
+        let packed = encode_lz_member_with_history(input, &self.history, algorithm_version)?;
+        self.remember(input);
+        Ok(packed)
+    }
+
+    fn remember(&mut self, input: &[u8]) {
+        self.history.extend_from_slice(input);
+        let keep_from = self.history.len().saturating_sub(DEFAULT_DICTIONARY_SIZE);
+        if keep_from != 0 {
+            self.history.drain(..keep_from);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum EncodeToken {
+    Filter(EncodeFilter),
+    Literal(u8),
+    Match { length: usize, distance: usize },
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EncodeFilter {
+    length: usize,
+    filter_type: FilterType,
+    channels: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct EncoderMatchState {
+    reps: [usize; 4],
+    last_length: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EncodedMatch {
+    LastLengthRepeat,
+    RepeatDistance {
+        index: usize,
+        length_slot: usize,
+        length_extra: usize,
+    },
+    New {
+        length_slot: usize,
+        length_extra: usize,
+        distance_slot: usize,
+        distance_extra: usize,
+        distance_bit_count: usize,
+    },
+}
+
+impl EncoderMatchState {
+    fn encode_match(
+        &self,
+        length: usize,
+        distance: usize,
+        distance_size: usize,
+    ) -> Result<EncodedMatch> {
+        if distance == self.reps[0] && length == self.last_length && self.last_length != 0 {
+            return Ok(EncodedMatch::LastLengthRepeat);
+        }
+        if let Some(index) = self
+            .reps
+            .iter()
+            .position(|&repeat_distance| repeat_distance == distance && repeat_distance != 0)
+        {
+            let (length_slot, length_extra) = length_slot_for_match(length)?;
+            return Ok(EncodedMatch::RepeatDistance {
+                index,
+                length_slot,
+                length_extra,
+            });
+        }
+
+        let (distance_slot, distance_extra) = distance_slot_for_match(distance, distance_size)?;
+        let encoded_length = length
+            .checked_sub(length_bonus(distance))
+            .ok_or(Error::InvalidData("RAR 5 adjusted match length underflows"))?;
+        let distance_bit_count = distance_slot_bit_count(distance_slot)?;
+        let (length_slot, length_extra) = length_slot_for_match(encoded_length)?;
+        Ok(EncodedMatch::New {
+            length_slot,
+            length_extra,
+            distance_slot,
+            distance_extra,
+            distance_bit_count,
+        })
+    }
+
+    fn remember(&mut self, length: usize, distance: usize) {
+        if distance == self.reps[0] && length == self.last_length {
+            return;
+        }
+        if let Some(index) = self
+            .reps
+            .iter()
+            .position(|&repeat_distance| repeat_distance == distance)
+        {
+            self.reps[..=index].rotate_right(1);
+        } else {
+            self.reps.rotate_right(1);
+        }
+        self.reps[0] = distance;
+        self.last_length = length;
+    }
+}
+
+fn encode_tokens(input: &[u8], history: &[u8]) -> Vec<EncodeToken> {
+    let mut tokens = Vec::new();
+    let mut buckets = vec![Vec::new(); MATCH_HASH_BUCKETS];
+    let history = &history[history.len().saturating_sub(DEFAULT_DICTIONARY_SIZE)..];
+    let mut combined = Vec::with_capacity(history.len() + input.len());
+    combined.extend_from_slice(history);
+    combined.extend_from_slice(input);
+    for history_pos in 0..history.len().saturating_sub(2) {
+        insert_match_position(&combined, history_pos, &mut buckets);
+    }
+
+    let mut pos = history.len();
+    let end = combined.len();
+    while pos < end {
+        if let Some((length, distance)) = best_match(&combined, pos, end, &buckets) {
+            tokens.push(EncodeToken::Match { length, distance });
+            for history_pos in pos..pos + length {
+                insert_match_position(&combined, history_pos, &mut buckets);
+            }
+            pos += length;
+        } else {
+            tokens.push(EncodeToken::Literal(combined[pos]));
+            insert_match_position(&combined, pos, &mut buckets);
+            pos += 1;
+        }
+    }
+    tokens
+}
+
+fn best_match(
+    input: &[u8],
+    pos: usize,
+    end: usize,
+    buckets: &[Vec<usize>],
+) -> Option<(usize, usize)> {
+    let max_distance = pos.min(MAX_ENCODER_MATCH_OFFSET);
+    let max_length = (end - pos).min(MAX_ENCODER_MATCH_LENGTH);
+    if max_distance == 0 || max_length < 4 || pos + 2 >= input.len() {
+        return None;
+    }
+    let bucket = &buckets[match_hash(input, pos)];
+    let mut best = None;
+    let mut checked = 0usize;
+    for &candidate in bucket.iter().rev() {
+        if candidate >= pos {
+            continue;
+        }
+        let distance = pos - candidate;
+        if distance > max_distance {
+            break;
+        }
+        checked += 1;
+        let mut length = 0usize;
+        while length < max_length && input[pos + length] == input[pos + length - distance] {
+            length += 1;
+        }
+        let encodable = length >= 4 && length_slot_for_match_length(length, distance).is_some();
+        if encodable
+            && best.is_none_or(|(best_length, best_distance)| {
+                length > best_length || (length == best_length && distance < best_distance)
+            })
+        {
+            best = Some((length, distance));
+            if length == max_length {
+                break;
+            }
+        }
+        if checked >= MAX_MATCH_CANDIDATES {
+            break;
+        }
+    }
+    best
+}
+
+fn length_slot_for_match_length(length: usize, distance: usize) -> Option<(usize, usize)> {
+    let encoded_length = length.checked_sub(length_bonus(distance))?;
+    length_slot_for_match(encoded_length).ok()
+}
+
+fn insert_match_position(input: &[u8], pos: usize, buckets: &mut [Vec<usize>]) {
+    if pos + 2 < input.len() {
+        buckets[match_hash(input, pos)].push(pos);
+    }
+}
+
+fn match_hash(input: &[u8], pos: usize) -> usize {
+    let value =
+        ((input[pos] as usize) << 8) ^ ((input[pos + 1] as usize) << 4) ^ input[pos + 2] as usize;
+    value & (MATCH_HASH_BUCKETS - 1)
+}
+
+fn length_slot_for_match(length: usize) -> Result<(usize, usize)> {
+    if length < 2 {
+        return Err(Error::InvalidData("RAR 5 match length is too short"));
+    }
+    for slot in 0..LENGTH_TABLE_SIZE {
+        let bit_count = usize::from(length_slot_extra_bits(slot)?);
+        let base = slot_to_length(slot, 0)?;
+        let max = base
+            + if bit_count == 0 {
+                0
+            } else {
+                (1usize << bit_count) - 1
+            };
+        if length >= base && length <= max {
+            return Ok((slot, length - base));
+        }
+    }
+    Err(Error::InvalidData("RAR 5 match length is too long"))
+}
+
+fn distance_slot_for_match(distance: usize, distance_size: usize) -> Result<(usize, usize)> {
+    if distance == 0 {
+        return Err(Error::InvalidData("RAR 5 match distance is zero"));
+    }
+    for slot in 0..distance_size {
+        let bit_count = distance_slot_bit_count(slot)?;
+        let base = slot_to_distance(slot, 0)?;
+        let max = base
+            + if bit_count == 0 {
+                0
+            } else {
+                (1usize << bit_count) - 1
+            };
+        if distance >= base && distance <= max {
+            return Ok((slot, distance - base));
+        }
+    }
+    Err(Error::InvalidData("RAR 5 match distance is too large"))
+}
+
+fn literal_presence(data: &[u8]) -> [bool; 256] {
+    let mut present = [false; 256];
+    for &byte in data {
+        present[byte as usize] = true;
+    }
+    present
+}
+
+fn huffman_bits_for_symbol_count(count: usize) -> u8 {
+    match count {
+        0 | 1 => 1,
+        _ => usize::BITS as u8 - (count - 1).leading_zeros() as u8,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -421,8 +1084,8 @@ impl Unpack50Decoder {
                         } else {
                             bits.read_bits(distance_bit_count as u8)?
                         };
-                        length += length_bonus(distance_bit_count);
                         let distance = slot_to_distance(distance_slot, distance_extra)?;
+                        length += length_bonus(distance);
                         self.reps.rotate_right(1);
                         self.reps[0] = distance;
                         self.last_length = length;
@@ -621,6 +1284,45 @@ fn read_filter_data(bits: &mut BitReader<'_>) -> Result<u32> {
     Ok(data)
 }
 
+fn write_filter(writer: &mut BitWriter, filter: EncodeFilter) -> Result<()> {
+    if filter.length > u32::MAX as usize {
+        return Err(Error::InvalidData("RAR 5 filter length is too large"));
+    }
+    write_filter_data(writer, 0);
+    write_filter_data(writer, filter.length as u32);
+    match filter.filter_type {
+        FilterType::Delta => {
+            if filter.channels == 0 || filter.channels > 32 {
+                return Err(Error::InvalidData(
+                    "RAR 5 DELTA filter channel count is invalid",
+                ));
+            }
+            writer.write_bits(0, 3);
+            writer.write_bits(filter.channels - 1, 5);
+        }
+        FilterType::E8 => writer.write_bits(1, 3),
+        FilterType::E8E9 => writer.write_bits(2, 3),
+        FilterType::Arm => writer.write_bits(3, 3),
+    }
+    Ok(())
+}
+
+fn write_filter_data(writer: &mut BitWriter, value: u32) {
+    let byte_count = if value <= 0xff {
+        1
+    } else if value <= 0xffff {
+        2
+    } else if value <= 0x00ff_ffff {
+        3
+    } else {
+        4
+    };
+    writer.write_bits(byte_count - 1, 2);
+    for index in 0..byte_count {
+        writer.write_bits(((value >> (index * 8)) & 0xff) as usize, 8);
+    }
+}
+
 fn apply_filters(output: &mut [u8], filters: &[PendingFilter]) -> Result<()> {
     for filter in filters {
         let end = filter
@@ -675,6 +1377,38 @@ fn e8e9_decode(data: &mut [u8], file_offset: u32, include_e9: bool) {
     }
 }
 
+fn e8e9_encode(data: &mut [u8], file_offset: u32, include_e9: bool) {
+    if data.len() <= 4 {
+        return;
+    }
+    let cmp_mask = if include_e9 { 0xfe } else { 0xff };
+    let mut cur_pos = 0usize;
+    while cur_pos < data.len() - 4 {
+        cur_pos += 1;
+        let opcode = data[cur_pos - 1];
+        if opcode & cmp_mask == 0xe8 {
+            let offset = file_offset.wrapping_add(cur_pos as u32);
+            let addr = u32::from_le_bytes([
+                data[cur_pos],
+                data[cur_pos + 1],
+                data[cur_pos + 2],
+                data[cur_pos + 3],
+            ]);
+            let candidate = addr.wrapping_add(offset);
+            if candidate < 0x0100_0000 {
+                data[cur_pos..cur_pos + 4].copy_from_slice(&candidate.to_le_bytes());
+            } else {
+                let candidate = addr.wrapping_sub(0x0100_0000);
+                if candidate & 0x8000_0000 != 0 && candidate.wrapping_add(offset) & 0x8000_0000 == 0
+                {
+                    data[cur_pos..cur_pos + 4].copy_from_slice(&candidate.to_le_bytes());
+                }
+            }
+            cur_pos += 4;
+        }
+    }
+}
+
 fn delta_decode(data: &[u8], channels: usize) -> Result<Vec<u8>> {
     if channels == 0 {
         return Err(Error::InvalidData("RAR 5 DELTA filter has zero channels"));
@@ -697,6 +1431,26 @@ fn delta_decode(data: &[u8], channels: usize) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+fn delta_encode(data: &[u8], channels: usize) -> Result<Vec<u8>> {
+    if channels == 0 || channels > 32 {
+        return Err(Error::InvalidData(
+            "RAR 5 DELTA filter channel count is invalid",
+        ));
+    }
+    let mut out = Vec::with_capacity(data.len());
+    for channel in 0..channels {
+        let mut prev = 0u8;
+        let mut src = channel;
+        while src < data.len() {
+            let byte = data[src];
+            out.push(prev.wrapping_sub(byte));
+            prev = byte;
+            src += channels;
+        }
+    }
+    Ok(out)
+}
+
 fn arm_decode(data: &mut [u8], file_offset: u32) {
     let mut pos = 0usize;
     while pos + 3 < data.len() {
@@ -705,6 +1459,22 @@ fn arm_decode(data: &mut [u8], file_offset: u32) {
                 | (u32::from(data[pos + 1]) << 8)
                 | (u32::from(data[pos + 2]) << 16);
             offset = offset.wrapping_sub((file_offset + pos as u32) / 4);
+            data[pos] = offset as u8;
+            data[pos + 1] = (offset >> 8) as u8;
+            data[pos + 2] = (offset >> 16) as u8;
+        }
+        pos += 4;
+    }
+}
+
+fn arm_encode(data: &mut [u8], file_offset: u32) {
+    let mut pos = 0usize;
+    while pos + 3 < data.len() {
+        if data[pos + 3] == 0xeb {
+            let mut offset = u32::from(data[pos])
+                | (u32::from(data[pos + 1]) << 8)
+                | (u32::from(data[pos + 2]) << 16);
+            offset = offset.wrapping_add((file_offset + pos as u32) / 4);
             data[pos] = offset as u8;
             data[pos + 1] = (offset >> 8) as u8;
             data[pos + 2] = (offset >> 16) as u8;
@@ -726,13 +1496,8 @@ fn length_slot_extra_bits(slot: usize) -> Result<u8> {
     }
 }
 
-fn length_bonus(distance_bit_count: usize) -> usize {
-    match distance_bit_count {
-        0..=6 => 0,
-        7..=11 => 1,
-        12..=16 => 2,
-        _ => 3,
-    }
+fn length_bonus(distance: usize) -> usize {
+    usize::from(distance > 0x100) + usize::from(distance > 0x2000) + usize::from(distance > 0x40000)
 }
 
 pub fn slot_to_length(slot: usize, extra_bits: u32) -> Result<usize> {
@@ -871,6 +1636,14 @@ impl HuffmanTable {
         }
         Err(Error::InvalidData("RAR 5 invalid Huffman code"))
     }
+
+    fn code_for_symbol(&self, symbol: usize) -> Result<(u16, u8)> {
+        self.symbols
+            .iter()
+            .find(|item| item.symbol == symbol)
+            .map(|item| (item.code, item.len))
+            .ok_or(Error::InvalidData("RAR 5 missing Huffman symbol"))
+    }
 }
 
 struct BitReader<'a> {
@@ -911,6 +1684,55 @@ impl<'a> BitReader<'a> {
         }
 
         Ok(value)
+    }
+}
+
+struct BitWriter {
+    bytes: Vec<u8>,
+    bit_pos: usize,
+}
+
+impl BitWriter {
+    fn new() -> Self {
+        Self {
+            bytes: Vec::new(),
+            bit_pos: 0,
+        }
+    }
+
+    fn write_bits(&mut self, value: usize, count: usize) {
+        for bit in (0..count).rev() {
+            if self.bit_pos.is_multiple_of(8) {
+                self.bytes.push(0);
+            }
+            if (value >> bit) & 1 != 0 {
+                let byte = self.bytes.last_mut().unwrap();
+                *byte |= 1 << (7 - (self.bit_pos % 8));
+            }
+            self.bit_pos += 1;
+        }
+    }
+
+    fn finish(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+fn write_zero_lengths(writer: &mut BitWriter, mut count: usize) {
+    while count >= 11 {
+        let run = count.min(138);
+        writer.write_bits(19, 5);
+        writer.write_bits(run - 11, 7);
+        count -= run;
+    }
+    while count >= 3 {
+        let run = count.min(10);
+        writer.write_bits(18, 5);
+        writer.write_bits(run - 3, 3);
+        count -= run;
+    }
+    for _ in 0..count {
+        writer.write_bits(0, 5);
     }
 }
 
@@ -1056,6 +1878,43 @@ mod tests {
     }
 
     #[test]
+    fn encoded_table_lengths_round_trip_with_bit_count() {
+        let mut lengths = TableLengths {
+            main: vec![0; MAIN_TABLE_SIZE],
+            distance: vec![0; DISTANCE_TABLE_SIZE_50],
+            align: vec![0; ALIGN_TABLE_SIZE],
+            length: vec![0; LENGTH_TABLE_SIZE],
+        };
+        lengths.main[b'A' as usize] = 1;
+        lengths.main[b'B' as usize] = 3;
+        lengths.main[262] = 3;
+        lengths.distance[1] = 1;
+        lengths.align[0] = 4;
+        lengths.length[0] = 1;
+
+        let (encoded, bit_count) = encode_table_lengths_with_bit_count(&lengths, 0).unwrap();
+        let (decoded, decoded_bits) = read_table_lengths(&encoded, 0).unwrap();
+
+        assert_eq!(decoded, lengths);
+        assert_eq!(decoded_bits, bit_count);
+    }
+
+    #[test]
+    fn encoded_compressed_block_round_trips_header_fields() {
+        let payload = [0xaa, 0xbb, 0xc0];
+        let block = encode_compressed_block(&payload, 18, true, true).unwrap();
+
+        let parsed = parse_compressed_block(&block).unwrap();
+
+        assert_eq!(parsed.payload, 3..6);
+        assert!(parsed.header.has_tables);
+        assert!(parsed.header.is_last);
+        assert_eq!(parsed.header.final_byte_bits, 2);
+        assert_eq!(parsed.header.payload_bits, 18);
+        assert_eq!(&block[parsed.payload], payload);
+    }
+
+    #[test]
     fn rejects_table_repeat_without_previous_length() {
         let mut writer = BitWriter::new();
         for _ in 0..LEVEL_TABLE_SIZE {
@@ -1069,6 +1928,18 @@ mod tests {
             Err(Error::InvalidData(
                 "RAR 5 table repeats missing previous length"
             ))
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_encoded_block_bit_counts() {
+        assert_eq!(
+            encode_compressed_block(&[0], 0, true, true),
+            Err(Error::InvalidData("RAR 5 block has unused payload bytes"))
+        );
+        assert_eq!(
+            encode_compressed_block(&[], 1, true, true),
+            Err(Error::InvalidData("RAR 5 block bit count exceeds payload"))
         );
     }
 
@@ -1109,11 +1980,176 @@ mod tests {
     #[test]
     fn decodes_synthetic_literal_only_block() {
         let payload = literal_only_payload(b"ABBA");
-        let input = compressed_block(0xc7, &payload);
+        let input = encode_compressed_block(&payload, payload.len() * 8, true, true).unwrap();
 
         let output = decode_literal_only(&input, 0, 4).unwrap();
 
         assert_eq!(output, b"ABBA");
+    }
+
+    #[test]
+    fn encodes_literal_only_member_that_decoder_reads() {
+        let data = b"literal-only RAR5 codec stream\nwith repeated words words words";
+        let input = encode_literal_only(data, 0).unwrap();
+
+        let output = decode_literal_only(&input, 0, data.len()).unwrap();
+
+        assert_eq!(output, data);
+    }
+
+    #[test]
+    fn encodes_literal_only_rar70_table_shape_that_decoder_reads() {
+        let data = b"small RAR7-compatible literal block";
+        let input = encode_literal_only(data, 1).unwrap();
+
+        let output = decode_literal_only(&input, 1, data.len()).unwrap();
+
+        assert_eq!(output, data);
+    }
+
+    #[test]
+    fn encodes_empty_literal_only_member() {
+        let input = encode_literal_only(b"", 0).unwrap();
+
+        let output = decode_literal_only(&input, 0, 0).unwrap();
+
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn encodes_lz_member_with_same_member_matches() {
+        let data = b"RAR5 match writer phrase. RAR5 match writer phrase. RAR5 match writer phrase.";
+        let lz = encode_lz_member(data, 0).unwrap();
+        let literal = encode_literal_only(data, 0).unwrap();
+
+        let output = decode_lz(&lz, 0, data.len()).unwrap();
+
+        assert_eq!(output, data);
+        assert!(lz.len() < literal.len());
+        assert!(encode_tokens(data, &[])
+            .iter()
+            .any(|token| matches!(token, EncodeToken::Match { .. })));
+    }
+
+    #[test]
+    fn encodes_lz_member_with_delta_filter_record() {
+        let data: Vec<u8> = (0..96).map(|index| (index * 7 + index / 3) as u8).collect();
+        let input = encode_lz_member_with_delta_filter(&data, 3, 0).unwrap();
+        let block = parse_compressed_block(&input).unwrap();
+        let (lengths, _) = read_table_lengths(&input[block.payload], 0).unwrap();
+
+        let output = decode_lz(&input, 0, data.len()).unwrap();
+
+        assert_eq!(output, data);
+        assert_ne!(lengths.main[256], 0);
+    }
+
+    #[test]
+    fn rejects_invalid_delta_filter_channel_count() {
+        assert_eq!(
+            encode_lz_member_with_delta_filter(b"abc", 0, 0),
+            Err(Error::InvalidData(
+                "RAR 5 DELTA filter channel count is invalid"
+            ))
+        );
+        assert_eq!(
+            encode_lz_member_with_delta_filter(b"abc", 33, 0),
+            Err(Error::InvalidData(
+                "RAR 5 DELTA filter channel count is invalid"
+            ))
+        );
+    }
+
+    #[test]
+    fn encodes_lz_member_with_e8_filter_record() {
+        let mut data = b"\xe8\0\0\0\0plain text after call".to_vec();
+        data.extend_from_slice(&[0xe8, 3, 0, 0, 0, b'X']);
+        let input = encode_lz_member_with_e8_filter(&data, false, 0).unwrap();
+        let block = parse_compressed_block(&input).unwrap();
+        let (lengths, _) = read_table_lengths(&input[block.payload], 0).unwrap();
+
+        let output = decode_lz(&input, 0, data.len()).unwrap();
+
+        assert_eq!(output, data);
+        assert_ne!(lengths.main[256], 0);
+    }
+
+    #[test]
+    fn encodes_lz_member_with_e8e9_filter_record() {
+        let data = b"\xe9\0\0\0\0jump target through e9".to_vec();
+        let input = encode_lz_member_with_e8_filter(&data, true, 0).unwrap();
+        let block = parse_compressed_block(&input).unwrap();
+        let (lengths, _) = read_table_lengths(&input[block.payload], 0).unwrap();
+
+        let output = decode_lz(&input, 0, data.len()).unwrap();
+
+        assert_eq!(output, data);
+        assert_ne!(lengths.main[256], 0);
+    }
+
+    #[test]
+    fn encodes_lz_member_with_arm_filter_record() {
+        let data = [0x04, 0x00, 0x00, 0xeb, b'A', b'R', b'M', b'!'];
+        let input = encode_lz_member_with_arm_filter(&data, 0).unwrap();
+        let block = parse_compressed_block(&input).unwrap();
+        let (lengths, _) = read_table_lengths(&input[block.payload], 0).unwrap();
+
+        let output = decode_lz(&input, 0, data.len()).unwrap();
+
+        assert_eq!(output, data);
+        assert_ne!(lengths.main[256], 0);
+    }
+
+    #[test]
+    fn solid_encoder_emits_rar50_matches_against_previous_member_history() {
+        let first = b"RAR5 solid shared phrase alpha beta gamma\n".repeat(16);
+        let second = b"RAR5 solid shared phrase alpha beta gamma\nsecond\n".repeat(4);
+        let solid = encode_lz_member_with_history(&second, &first, 0).unwrap();
+        let standalone = encode_lz_member(&second, 0).unwrap();
+        let mut decoder = Unpack50Decoder::new();
+
+        assert_eq!(
+            decoder
+                .decode_member(
+                    &encode_lz_member(&first, 0).unwrap(),
+                    0,
+                    first.len(),
+                    false,
+                    DecodeMode::Lz
+                )
+                .unwrap(),
+            first
+        );
+        assert_eq!(
+            decoder
+                .decode_member(&solid, 0, second.len(), true, DecodeMode::Lz)
+                .unwrap(),
+            second
+        );
+        assert!(solid.len() < standalone.len());
+    }
+
+    #[test]
+    fn encodes_lz_member_with_last_length_repeat_symbols() {
+        let data = b"abcdXabcdYabcdZabcd";
+        let input = encode_lz_member(data, 0).unwrap();
+        let block = parse_compressed_block(&input).unwrap();
+        let (lengths, _) = read_table_lengths(&input[block.payload], 0).unwrap();
+
+        let output = decode_lz(&input, 0, data.len()).unwrap();
+
+        assert_eq!(output, data);
+        assert_ne!(lengths.main[257], 0);
+    }
+
+    #[test]
+    fn encodes_lz_member_using_rar70_distance_table_shape() {
+        let data = b"RAR7-compatible repeated phrase repeated phrase repeated phrase";
+        let input = encode_lz_member(data, 1).unwrap();
+
+        let output = decode_lz(&input, 1, data.len()).unwrap();
+
+        assert_eq!(output, data);
     }
 
     #[test]
@@ -1135,7 +2171,7 @@ mod tests {
         }
 
         let payload = literal_only_payload(b"ABBA");
-        let input = compressed_block(0xc7, &payload);
+        let input = encode_compressed_block(&payload, payload.len() * 8, true, true).unwrap();
         let mut reader = OneByteReader {
             data: &input,
             pos: 0,
@@ -1152,7 +2188,7 @@ mod tests {
     #[test]
     fn decodes_synthetic_new_match_block() {
         let payload = new_match_payload();
-        let input = compressed_block(0xc7, &payload);
+        let input = encode_compressed_block(&payload, payload.len() * 8, true, true).unwrap();
 
         let output = decode_lz(&input, 0, 4).unwrap();
 
@@ -1162,7 +2198,7 @@ mod tests {
     #[test]
     fn decodes_synthetic_last_length_match_block() {
         let payload = repeat_payload(257);
-        let input = compressed_block(0xc7, &payload);
+        let input = encode_compressed_block(&payload, payload.len() * 8, true, true).unwrap();
 
         let output = decode_lz(&input, 0, 6).unwrap();
 
@@ -1172,7 +2208,7 @@ mod tests {
     #[test]
     fn decodes_synthetic_repeat_distance_match_block() {
         let payload = repeat_payload(258);
-        let input = compressed_block(0xc7, &payload);
+        let input = encode_compressed_block(&payload, payload.len() * 8, true, true).unwrap();
 
         let output = decode_lz(&input, 0, 6).unwrap();
 
@@ -1181,7 +2217,7 @@ mod tests {
 
     #[test]
     fn rejects_literal_only_block_without_tables() {
-        let input = compressed_block(0x47, &[0]);
+        let input = encode_compressed_block(&[0], 8, false, true).unwrap();
 
         assert_eq!(
             decode_literal_only(&input, 0, 1),
@@ -1265,8 +2301,12 @@ mod tests {
     #[test]
     fn solid_history_is_capped_to_dictionary_size() {
         let mut decoder = Unpack50Decoder::new();
-        let first = compressed_block(0xc7, &literal_only_payload(b"ABBA"));
-        let second = compressed_block(0xc7, &literal_only_payload(b"BAAB"));
+        let first_payload = literal_only_payload(b"ABBA");
+        let first =
+            encode_compressed_block(&first_payload, first_payload.len() * 8, true, true).unwrap();
+        let second_payload = literal_only_payload(b"BAAB");
+        let second =
+            encode_compressed_block(&second_payload, second_payload.len() * 8, true, true).unwrap();
 
         assert_eq!(
             decoder
@@ -1285,57 +2325,17 @@ mod tests {
         assert_eq!(decoder.history, b"BABAAB");
     }
 
-    struct BitWriter {
-        bytes: Vec<u8>,
-        bit_pos: usize,
-    }
-
-    impl BitWriter {
-        fn new() -> Self {
-            Self {
-                bytes: Vec::new(),
-                bit_pos: 0,
-            }
-        }
-
-        fn write_bits(&mut self, value: usize, count: usize) {
-            for bit in (0..count).rev() {
-                if self.bit_pos.is_multiple_of(8) {
-                    self.bytes.push(0);
-                }
-                if (value >> bit) & 1 != 0 {
-                    let byte = self.bytes.last_mut().unwrap();
-                    *byte |= 1 << (7 - (self.bit_pos % 8));
-                }
-                self.bit_pos += 1;
-            }
-        }
-
-        fn finish(self) -> Vec<u8> {
-            self.bytes
-        }
-    }
-
-    fn compressed_block(flags: u8, payload: &[u8]) -> Vec<u8> {
-        assert!(payload.len() <= 0xff);
-        let size = [payload.len() as u8];
-        let mut block = vec![flags, checksum(flags, &size), size[0]];
-        block.extend_from_slice(payload);
-        block
-    }
-
     fn literal_only_payload(data: &[u8]) -> Vec<u8> {
-        let mut writer = BitWriter::new();
-        for _ in 0..LEVEL_TABLE_SIZE {
-            writer.write_bits(5, 4);
-        }
-        write_zero_lengths(&mut writer, b'A' as usize);
-        writer.write_bits(1, 5);
-        writer.write_bits(1, 5);
-        write_zero_lengths(
-            &mut writer,
-            table_length_count(0).unwrap() - b'A' as usize - 2,
-        );
+        let mut lengths = TableLengths {
+            main: vec![0; MAIN_TABLE_SIZE],
+            distance: vec![0; DISTANCE_TABLE_SIZE_50],
+            align: vec![0; ALIGN_TABLE_SIZE],
+            length: vec![0; LENGTH_TABLE_SIZE],
+        };
+        lengths.main[b'A' as usize] = 1;
+        lengths.main[b'B' as usize] = 1;
+        let (bytes, bit_pos) = encode_table_lengths_with_bit_count(&lengths, 0).unwrap();
+        let mut writer = BitWriter { bytes, bit_pos };
         for &byte in data {
             match byte {
                 b'A' => writer.write_bits(0, 1),
@@ -1347,21 +2347,18 @@ mod tests {
     }
 
     fn new_match_payload() -> Vec<u8> {
-        let mut writer = BitWriter::new();
-        for _ in 0..LEVEL_TABLE_SIZE {
-            writer.write_bits(5, 4);
-        }
-        write_zero_lengths(&mut writer, b'A' as usize);
-        writer.write_bits(2, 5); // main literal 'A'
-        writer.write_bits(2, 5); // main literal 'B'
-        write_zero_lengths(&mut writer, 262 - b'B' as usize - 1);
-        writer.write_bits(2, 5); // main new-match symbol 262, length slot 0
-        write_zero_lengths(&mut writer, MAIN_TABLE_SIZE - 263);
-        writer.write_bits(0, 5); // distance slot 0 unused
-        writer.write_bits(1, 5); // distance slot 1, distance 2
-        write_zero_lengths(&mut writer, DISTANCE_TABLE_SIZE_50 - 2);
-        write_zero_lengths(&mut writer, ALIGN_TABLE_SIZE);
-        write_zero_lengths(&mut writer, LENGTH_TABLE_SIZE);
+        let mut lengths = TableLengths {
+            main: vec![0; MAIN_TABLE_SIZE],
+            distance: vec![0; DISTANCE_TABLE_SIZE_50],
+            align: vec![0; ALIGN_TABLE_SIZE],
+            length: vec![0; LENGTH_TABLE_SIZE],
+        };
+        lengths.main[b'A' as usize] = 2;
+        lengths.main[b'B' as usize] = 2;
+        lengths.main[262] = 2;
+        lengths.distance[1] = 1;
+        let (bytes, bit_pos) = encode_table_lengths_with_bit_count(&lengths, 0).unwrap();
+        let mut writer = BitWriter { bytes, bit_pos };
 
         writer.write_bits(0b00, 2); // 'A'
         writer.write_bits(0b01, 2); // 'B'
@@ -1371,24 +2368,20 @@ mod tests {
     }
 
     fn repeat_payload(repeat_symbol: usize) -> Vec<u8> {
-        let mut writer = BitWriter::new();
-        for _ in 0..LEVEL_TABLE_SIZE {
-            writer.write_bits(5, 4);
-        }
-        write_zero_lengths(&mut writer, b'A' as usize);
-        writer.write_bits(2, 5); // main literal 'A'
-        writer.write_bits(2, 5); // main literal 'B'
-        write_zero_lengths(&mut writer, repeat_symbol - b'B' as usize - 1);
-        writer.write_bits(2, 5); // repeat control symbol
-        write_zero_lengths(&mut writer, 262 - repeat_symbol - 1);
-        writer.write_bits(2, 5); // main new-match symbol 262, length slot 0
-        write_zero_lengths(&mut writer, MAIN_TABLE_SIZE - 263);
-        writer.write_bits(0, 5); // distance slot 0 unused
-        writer.write_bits(1, 5); // distance slot 1, distance 2
-        write_zero_lengths(&mut writer, DISTANCE_TABLE_SIZE_50 - 2);
-        write_zero_lengths(&mut writer, ALIGN_TABLE_SIZE);
-        writer.write_bits(1, 5); // length table slot 0, length 2
-        write_zero_lengths(&mut writer, LENGTH_TABLE_SIZE - 1);
+        let mut lengths = TableLengths {
+            main: vec![0; MAIN_TABLE_SIZE],
+            distance: vec![0; DISTANCE_TABLE_SIZE_50],
+            align: vec![0; ALIGN_TABLE_SIZE],
+            length: vec![0; LENGTH_TABLE_SIZE],
+        };
+        lengths.main[b'A' as usize] = 2;
+        lengths.main[b'B' as usize] = 2;
+        lengths.main[repeat_symbol] = 2;
+        lengths.main[262] = 2;
+        lengths.distance[1] = 1;
+        lengths.length[0] = 1;
+        let (bytes, bit_pos) = encode_table_lengths_with_bit_count(&lengths, 0).unwrap();
+        let mut writer = BitWriter { bytes, bit_pos };
 
         writer.write_bits(0b00, 2); // 'A'
         writer.write_bits(0b01, 2); // 'B'
@@ -1399,23 +2392,5 @@ mod tests {
             writer.write_bits(0, 1); // length slot 0
         }
         writer.finish()
-    }
-
-    fn write_zero_lengths(writer: &mut BitWriter, mut count: usize) {
-        while count >= 11 {
-            let run = count.min(138);
-            writer.write_bits(19, 5);
-            writer.write_bits(run - 11, 7);
-            count -= run;
-        }
-        while count >= 3 {
-            let run = count.min(10);
-            writer.write_bits(18, 5);
-            writer.write_bits(run - 3, 3);
-            count -= run;
-        }
-        for _ in 0..count {
-            writer.write_bits(0, 5);
-        }
     }
 }

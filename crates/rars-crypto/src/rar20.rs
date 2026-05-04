@@ -37,6 +37,12 @@ impl Rar20Cipher {
         }
     }
 
+    pub fn encrypt_in_place(&mut self, data: &mut [u8]) {
+        for block in data.chunks_exact_mut(16) {
+            self.encrypt_block(block);
+        }
+    }
+
     fn set_key(&mut self, password: &[u8]) {
         for j in 0..=255u32 {
             for i in (0..password.len()).step_by(2) {
@@ -148,4 +154,21 @@ fn crc32_table_entry(index: u8) -> u32 {
         }
     }
     value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Rar20Cipher;
+
+    #[test]
+    fn rar20_encrypt_decrypt_round_trips_blocks() {
+        let mut encrypted = *b"0123456789abcdefRAR2.0 block pad";
+        let original = encrypted;
+
+        Rar20Cipher::new(b"password").encrypt_in_place(&mut encrypted);
+        assert_ne!(encrypted, original);
+
+        Rar20Cipher::new(b"password").decrypt_in_place(&mut encrypted);
+        assert_eq!(encrypted, original);
+    }
 }

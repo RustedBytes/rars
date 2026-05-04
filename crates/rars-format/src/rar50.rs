@@ -17,7 +17,30 @@ pub use extract::{
     extract_volumes, extract_volumes_to, extract_volumes_to_with_password,
     extract_volumes_with_password,
 };
-pub use write::{write_stored_archive, StoredEntry, WriterOptions};
+pub use write::{
+    write_arm_filtered_compressed_archive, write_compressed_archive,
+    write_compressed_archive_with_comment_and_metadata,
+    write_compressed_archive_with_filter_policy, write_compressed_archive_with_metadata,
+    write_compressed_archive_with_recovery, write_compressed_volume_set,
+    write_compressed_volume_set_with_recovery, write_compressed_volumes,
+    write_delta_filtered_compressed_archive, write_e8_filtered_compressed_archive,
+    write_encrypted_compressed_archive,
+    write_encrypted_compressed_archive_with_comment_and_metadata,
+    write_encrypted_compressed_archive_with_metadata,
+    write_encrypted_compressed_archive_with_recovery, write_encrypted_compressed_volume_set,
+    write_encrypted_compressed_volume_set_with_recovery, write_encrypted_compressed_volumes,
+    write_encrypted_stored_archive, write_encrypted_stored_archive_with_comment,
+    write_encrypted_stored_archive_with_comment_and_metadata,
+    write_encrypted_stored_archive_with_file_services,
+    write_encrypted_stored_archive_with_recovery, write_encrypted_stored_volumes,
+    write_encrypted_stored_volumes_with_recovery, write_stored_archive,
+    write_stored_archive_with_comment, write_stored_archive_with_comment_and_metadata,
+    write_stored_archive_with_file_services, write_stored_archive_with_recovery,
+    write_stored_volumes, write_stored_volumes_with_recovery, ArchiveMetadataEntry,
+    CompressedEntry, EncryptedArchiveCommentEntry, EncryptedCompressedEntry, EncryptedStoredEntry,
+    EncryptedStoredEntryWithServices, EncryptedStoredServiceEntry, FilterKind, FilterPolicy,
+    StoredEntry, StoredEntryWithServices, StoredServiceEntry, WriterOptions,
+};
 
 const HEAD_MAIN: u64 = 1;
 const HEAD_FILE: u64 = 2;

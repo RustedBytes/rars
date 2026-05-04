@@ -1,11 +1,22 @@
 use rars_format::rar15_40::{
-    crc32, extract_volumes, write_compressed_archive, write_compressed_volumes,
+    crc32, extract_volumes, write_compressed_archive, write_compressed_archive_with_comment,
+    write_compressed_volumes, write_rar29_audio_filtered_compressed_archive,
+    write_rar29_audio_range_filtered_compressed_archive,
+    write_rar29_auto_filtered_compressed_archive, write_rar29_delta_filtered_compressed_archive,
+    write_rar29_delta_range_filtered_compressed_archive,
+    write_rar29_e8_filtered_compressed_archive, write_rar29_e8_range_filtered_compressed_archive,
+    write_rar29_e8e9_filtered_compressed_archive,
+    write_rar29_e8e9_range_filtered_compressed_archive,
+    write_rar29_itanium_filtered_compressed_archive,
+    write_rar29_itanium_range_filtered_compressed_archive,
+    write_rar29_rgb_filtered_compressed_archive, write_rar29_rgb_range_filtered_compressed_archive,
     write_stored_archive, write_stored_archive_with_comment, write_stored_volumes, Archive, Block,
     FileEntry, NewSubKind, StoredEntry, WriterOptions,
 };
 use rars_format::{detect_archive_family, ArchiveFamily, ArchiveVersion, Error, FeatureSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -38,6 +49,1338 @@ fn detects_rar15_40_signature_family() {
     assert_eq!(sig.family, ArchiveFamily::Rar15To40);
     assert_eq!(sig.offset, 0);
     assert_eq!(sig.length, 7);
+}
+
+#[test]
+fn generated_rar29_e8_filtered_archive_round_trips() {
+    let payload = b"\xe8\0\0\0\0rar29 e8 filter payload\n".repeat(16);
+    let entries = [FileEntry {
+        name: b"rar29-e8-filtered.bin",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+
+    let bytes = write_rar29_e8_filtered_compressed_archive(
+        &entries,
+        WriterOptions {
+            target: ArchiveVersion::Rar29,
+            features: FeatureSet::store_only(),
+        },
+    )
+    .unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let file = archive.files().next().unwrap();
+
+    assert_eq!(file.unp_ver, 29);
+    assert_eq!(file.method, 0x33);
+    assert!(file.pack_size < file.unp_size);
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].name, b"rar29-e8-filtered.bin");
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+fn generated_rar29_auto_filtered_archive_round_trips() {
+    let payload = b"\xe8\0\0\0\0rar29 auto filtered payload\n".repeat(16);
+    let entries = [FileEntry {
+        name: b"rar29-auto-filtered.bin",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+
+    let bytes = write_rar29_auto_filtered_compressed_archive(
+        &entries,
+        WriterOptions {
+            target: ArchiveVersion::Rar29,
+            features: FeatureSet::store_only(),
+        },
+    )
+    .unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let file = archive.files().next().unwrap();
+
+    assert_eq!(file.unp_ver, 29);
+    assert_eq!(file.method, 0x33);
+    let plain = write_compressed_archive(
+        &entries,
+        WriterOptions {
+            target: ArchiveVersion::Rar29,
+            features: FeatureSet::store_only(),
+        },
+    )
+    .unwrap();
+    let plain_archive = Archive::parse(&plain).unwrap();
+    let plain_file = plain_archive.files().next().unwrap();
+    assert!(file.pack_size <= plain_file.pack_size);
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].name, b"rar29-auto-filtered.bin");
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+fn generated_rar29_auto_filtered_archive_considers_delta_candidates() {
+    let payload: Vec<u8> = (0..768).map(|index| (index / 3) as u8).collect();
+    let entries = [FileEntry {
+        name: b"rar29-auto-delta-candidate.bin",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+    let options = WriterOptions {
+        target: ArchiveVersion::Rar29,
+        features: FeatureSet::store_only(),
+    };
+
+    let auto = write_rar29_auto_filtered_compressed_archive(&entries, options).unwrap();
+    let explicit = write_rar29_delta_filtered_compressed_archive(&entries, options, 3).unwrap();
+    let auto_archive = Archive::parse(&auto).unwrap();
+    let explicit_archive = Archive::parse(&explicit).unwrap();
+    let auto_file = auto_archive.files().next().unwrap();
+    let explicit_file = explicit_archive.files().next().unwrap();
+
+    assert!(auto_file.pack_size <= explicit_file.pack_size);
+    let extracted = auto_archive.extract().unwrap();
+    assert_eq!(extracted[0].name, b"rar29-auto-delta-candidate.bin");
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+fn generated_rar29_auto_filtered_archive_considers_audio_candidates() {
+    let payload: Vec<u8> = (0..512)
+        .map(|index| (128 + ((index * 9) % 73) - ((index * 5) % 41)) as u8)
+        .collect();
+    let entries = [FileEntry {
+        name: b"rar29-auto-audio-candidate.bin",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+    let options = WriterOptions {
+        target: ArchiveVersion::Rar29,
+        features: FeatureSet::store_only(),
+    };
+
+    let auto = write_rar29_auto_filtered_compressed_archive(&entries, options).unwrap();
+    let explicit = write_rar29_audio_filtered_compressed_archive(&entries, options, 2).unwrap();
+    let auto_archive = Archive::parse(&auto).unwrap();
+    let explicit_archive = Archive::parse(&explicit).unwrap();
+    let auto_file = auto_archive.files().next().unwrap();
+    let explicit_file = explicit_archive.files().next().unwrap();
+
+    assert!(auto_file.pack_size <= explicit_file.pack_size);
+    let extracted = auto_archive.extract().unwrap();
+    assert_eq!(extracted[0].name, b"rar29-auto-audio-candidate.bin");
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+fn generated_rar29_auto_filtered_archive_considers_rgb_candidates() {
+    let width = 24;
+    let mut payload = Vec::new();
+    for y in 0..32 {
+        for x in 0..8 {
+            payload.extend_from_slice(&[
+                (x * 23 + y * 3) as u8,
+                (x * 5 + y * 17) as u8,
+                (x * 13 + y * 19) as u8,
+            ]);
+        }
+    }
+    let entries = [FileEntry {
+        name: b"rar29-auto-rgb-candidate.bin",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+    let options = WriterOptions {
+        target: ArchiveVersion::Rar29,
+        features: FeatureSet::store_only(),
+    };
+
+    let auto = write_rar29_auto_filtered_compressed_archive(&entries, options).unwrap();
+    let explicit =
+        write_rar29_rgb_filtered_compressed_archive(&entries, options, width, 0).unwrap();
+    let auto_archive = Archive::parse(&auto).unwrap();
+    let explicit_archive = Archive::parse(&explicit).unwrap();
+    let auto_file = auto_archive.files().next().unwrap();
+    let explicit_file = explicit_archive.files().next().unwrap();
+
+    assert!(auto_file.pack_size <= explicit_file.pack_size);
+    let extracted = auto_archive.extract().unwrap();
+    assert_eq!(extracted[0].name, b"rar29-auto-rgb-candidate.bin");
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+fn generated_rar29_auto_filtered_archive_considers_itanium_candidates() {
+    let payload = bytearray_like_itanium_payload(512);
+    let entries = [FileEntry {
+        name: b"rar29-auto-itanium-candidate.bin",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+    let options = WriterOptions {
+        target: ArchiveVersion::Rar29,
+        features: FeatureSet::store_only(),
+    };
+
+    let auto = write_rar29_auto_filtered_compressed_archive(&entries, options).unwrap();
+    let explicit = write_rar29_itanium_filtered_compressed_archive(&entries, options).unwrap();
+    let auto_archive = Archive::parse(&auto).unwrap();
+    let explicit_archive = Archive::parse(&explicit).unwrap();
+    let auto_file = auto_archive.files().next().unwrap();
+    let explicit_file = explicit_archive.files().next().unwrap();
+
+    assert!(auto_file.pack_size <= explicit_file.pack_size);
+    let extracted = auto_archive.extract().unwrap();
+    assert_eq!(extracted[0].name, b"rar29-auto-itanium-candidate.bin");
+    assert_eq!(extracted[0].data, payload);
+}
+
+fn bytearray_like_itanium_payload(len: usize) -> Vec<u8> {
+    let mut payload = vec![0u8; len];
+    for (index, byte) in payload.iter_mut().enumerate() {
+        *byte = (index * 11 + 5) as u8;
+    }
+    for chunk in payload.chunks_mut(32) {
+        if chunk.len() > 21 {
+            chunk[16] = 22;
+            chunk[21] = 20;
+        }
+    }
+    payload
+}
+
+#[test]
+fn generated_rar29_segmented_e8_filtered_archive_round_trips() {
+    let mut payload = b"unfiltered prefix before x86 segment ".to_vec();
+    let filter_start = payload.len();
+    payload.extend_from_slice(b"\xe8\0\0\0\0rar29 segmented e8 filter payload\n");
+    let filter_end = payload.len();
+    payload.extend_from_slice(b"unfiltered suffix after x86 segment\n");
+    let entries = [FileEntry {
+        name: b"rar29-segmented-e8-filtered.bin",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+
+    let bytes = write_rar29_e8_range_filtered_compressed_archive(
+        &entries,
+        WriterOptions {
+            target: ArchiveVersion::Rar29,
+            features: FeatureSet::store_only(),
+        },
+        filter_start..filter_end,
+    )
+    .unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let file = archive.files().next().unwrap();
+
+    assert_eq!(file.unp_ver, 29);
+    assert_eq!(file.method, 0x33);
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].name, b"rar29-segmented-e8-filtered.bin");
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+fn generated_rar29_solid_e8_filtered_archive_round_trips() {
+    let first = b"\xe8\0\0\0\0rar29 solid e8 filtered first payload\n".repeat(12);
+    let second = b"\xe8\0\0\0\0rar29 solid e8 filtered second payload\n".repeat(12);
+    let entries = [
+        FileEntry {
+            name: b"rar29-solid-e8-first.bin",
+            data: &first,
+            file_time: 0x5a21_0000,
+            file_attr: 0x20,
+            host_os: 3,
+            password: None,
+            file_comment: None,
+        },
+        FileEntry {
+            name: b"rar29-solid-e8-second.bin",
+            data: &second,
+            file_time: 0x5a21_0000,
+            file_attr: 0x20,
+            host_os: 3,
+            password: None,
+            file_comment: None,
+        },
+    ];
+    let mut features = FeatureSet::store_only();
+    features.solid = true;
+
+    let bytes = write_rar29_e8_filtered_compressed_archive(
+        &entries,
+        WriterOptions {
+            target: ArchiveVersion::Rar29,
+            features,
+        },
+    )
+    .unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let files: Vec<_> = archive.files().collect();
+
+    assert!(archive.main.is_solid());
+    assert!(!files[0].is_solid());
+    assert!(files[1].is_solid());
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].name, b"rar29-solid-e8-first.bin");
+    assert_eq!(extracted[0].data, first);
+    assert_eq!(extracted[1].name, b"rar29-solid-e8-second.bin");
+    assert_eq!(extracted[1].data, second);
+}
+
+#[test]
+fn generated_rar29_encrypted_e8_filtered_archive_round_trips() {
+    let payload = b"\xe8\0\0\0\0rar29 encrypted e8 filtered payload\n".repeat(12);
+    let entries = [FileEntry {
+        name: b"rar29-encrypted-e8-filtered.bin",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: Some(b"password"),
+        file_comment: None,
+    }];
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+
+    let bytes = write_rar29_e8_filtered_compressed_archive(
+        &entries,
+        WriterOptions {
+            target: ArchiveVersion::Rar29,
+            features,
+        },
+    )
+    .unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let file = archive.files().next().unwrap();
+
+    assert!(file.is_encrypted());
+    assert!(file.salt.is_some());
+    assert!(matches!(
+        archive.extract_with_password(Some(b"wrong")),
+        Err(Error::WrongPasswordOrCorruptData)
+    ));
+    let extracted = archive.extract_with_password(Some(b"password")).unwrap();
+    assert_eq!(extracted[0].name, b"rar29-encrypted-e8-filtered.bin");
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+fn generated_rar30_header_encrypted_e8_filtered_archive_round_trips() {
+    let payload = b"\xe8\0\0\0\0rar30 header encrypted e8 filtered payload\n".repeat(12);
+    let entries = [FileEntry {
+        name: b"rar30-header-encrypted-e8-filtered.bin",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: Some(b"password"),
+        file_comment: None,
+    }];
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    features.header_encryption = true;
+
+    let bytes = write_rar29_e8_filtered_compressed_archive(
+        &entries,
+        WriterOptions {
+            target: ArchiveVersion::Rar30,
+            features,
+        },
+    )
+    .unwrap();
+
+    assert!(matches!(Archive::parse(&bytes), Err(Error::NeedPassword)));
+    let archive = Archive::parse_with_password(&bytes, Some(b"password")).unwrap();
+    assert!(archive.main.has_encrypted_headers());
+    let file = archive.files().next().unwrap();
+    assert_eq!(file.name, b"rar30-header-encrypted-e8-filtered.bin");
+    assert!(file.is_encrypted());
+    assert!(file.salt.is_some());
+    let extracted = archive.extract_with_password(Some(b"password")).unwrap();
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+#[ignore = "requires local WinRAR/UnRAR 3.00 and 4.20 Wine prefixes"]
+fn reference_unrar_accepts_rar29_solid_e8_filter_record() {
+    const UNRAR300_PREFIX: &str = "/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar300";
+    const UNRAR300: &str =
+        "/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar300/drive_c/Program Files (x86)/WinRAR/UnRAR.exe";
+    const UNRAR420_PREFIX: &str = "/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar420";
+    const UNRAR420: &str =
+        "/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar420/drive_c/Program Files (x86)/WinRAR/UnRAR.exe";
+
+    for tool in [UNRAR300, UNRAR420] {
+        if !Path::new(tool).is_file() {
+            panic!("missing reference tool: {tool}");
+        }
+    }
+
+    let dir = std::env::temp_dir().join(format!("rars-rar29-solid-e8-ref-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let archive_path = dir.join("solid-e8.rar");
+    let first = b"\xe8\0\0\0\0rar29 solid e8 first reference payload\n".repeat(12);
+    let second = b"\xe8\0\0\0\0rar29 solid e8 second reference payload\n".repeat(12);
+    let entries = [
+        FileEntry {
+            name: b"solid-e8-first.bin",
+            data: &first,
+            file_time: 0x5a21_0000,
+            file_attr: 0x20,
+            host_os: 3,
+            password: None,
+            file_comment: None,
+        },
+        FileEntry {
+            name: b"solid-e8-second.bin",
+            data: &second,
+            file_time: 0x5a21_0000,
+            file_attr: 0x20,
+            host_os: 3,
+            password: None,
+            file_comment: None,
+        },
+    ];
+    let mut features = FeatureSet::store_only();
+    features.solid = true;
+    let bytes = write_rar29_e8_filtered_compressed_archive(
+        &entries,
+        WriterOptions {
+            target: ArchiveVersion::Rar29,
+            features,
+        },
+    )
+    .unwrap();
+    std::fs::write(&archive_path, bytes).unwrap();
+
+    for (wineprefix, unrar) in [(UNRAR300_PREFIX, UNRAR300), (UNRAR420_PREFIX, UNRAR420)] {
+        let wine_archive = format!("Z:{}", archive_path.to_string_lossy().replace('/', "\\"));
+        let output = Command::new("env")
+            .arg(format!("WINEPREFIX={wineprefix}"))
+            .arg("wine")
+            .arg(unrar)
+            .arg("t")
+            .arg("-inul")
+            .arg(wine_archive)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{unrar} rejected solid E8 archive: status={:?}\nstdout={}\nstderr={}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires local WinRAR/UnRAR 4.20 Wine prefix"]
+fn reference_unrar_accepts_rar29_segmented_e8_filter_record() {
+    const WINEPREFIX: &str = "/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar420";
+    const UNRAR: &str =
+        "/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar420/drive_c/Program Files (x86)/WinRAR/UnRAR.exe";
+
+    if !Path::new(UNRAR).is_file() {
+        panic!("missing reference tool: {UNRAR}");
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "rars-rar29-segmented-e8-ref-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let archive_path = dir.join("segmented-e8.rar");
+    let mut payload = b"unfiltered prefix before x86 segment ".to_vec();
+    let filter_start = payload.len();
+    payload.extend_from_slice(b"\xe8\0\0\0\0rar29 segmented e8 reference payload\n");
+    let filter_end = payload.len();
+    payload.extend_from_slice(b"unfiltered suffix after x86 segment\n");
+    let entries = [FileEntry {
+        name: b"segmented-e8.bin",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+    let bytes = write_rar29_e8_range_filtered_compressed_archive(
+        &entries,
+        WriterOptions {
+            target: ArchiveVersion::Rar29,
+            features: FeatureSet::store_only(),
+        },
+        filter_start..filter_end,
+    )
+    .unwrap();
+    std::fs::write(&archive_path, bytes).unwrap();
+
+    let wine_archive = format!("Z:{}", archive_path.to_string_lossy().replace('/', "\\"));
+    let output = Command::new("env")
+        .arg(format!("WINEPREFIX={WINEPREFIX}"))
+        .arg("wine")
+        .arg(UNRAR)
+        .arg("t")
+        .arg("-inul")
+        .arg(wine_archive)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "UnRAR 4.20 rejected segmented E8 archive: status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[ignore = "requires local WinRAR/UnRAR 4.20 Wine prefix"]
+fn reference_unrar_accepts_rar29_segmented_e8e9_filter_record() {
+    const WINEPREFIX: &str = "/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar420";
+    const UNRAR: &str =
+        "/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar420/drive_c/Program Files (x86)/WinRAR/UnRAR.exe";
+
+    if !Path::new(UNRAR).is_file() {
+        panic!("missing reference tool: {UNRAR}");
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "rars-rar29-segmented-e8e9-ref-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let archive_path = dir.join("segmented-e8e9.rar");
+    let mut payload = b"unfiltered prefix before x86 segment ".to_vec();
+    let filter_start = payload.len();
+    payload.extend_from_slice(b"\xe9\0\0\0\0rar29 segmented e8e9 reference payload\n");
+    let filter_end = payload.len();
+    payload.extend_from_slice(b"unfiltered suffix after x86 segment\n");
+    let entries = [FileEntry {
+        name: b"segmented-e8e9.bin",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+    let bytes = write_rar29_e8e9_range_filtered_compressed_archive(
+        &entries,
+        WriterOptions {
+            target: ArchiveVersion::Rar29,
+            features: FeatureSet::store_only(),
+        },
+        filter_start..filter_end,
+    )
+    .unwrap();
+    std::fs::write(&archive_path, bytes).unwrap();
+
+    let wine_archive = format!("Z:{}", archive_path.to_string_lossy().replace('/', "\\"));
+    let output = Command::new("env")
+        .arg(format!("WINEPREFIX={WINEPREFIX}"))
+        .arg("wine")
+        .arg(UNRAR)
+        .arg("t")
+        .arg("-inul")
+        .arg(wine_archive)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "UnRAR 4.20 rejected segmented E8E9 archive: status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn generated_rar29_e8e9_filtered_archive_round_trips() {
+    let payload = b"\xe9\0\0\0\0rar29 e8e9 filter payload\n".repeat(16);
+    let entries = [FileEntry {
+        name: b"rar29-e8e9-filtered.bin",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+
+    let bytes = write_rar29_e8e9_filtered_compressed_archive(
+        &entries,
+        WriterOptions {
+            target: ArchiveVersion::Rar29,
+            features: FeatureSet::store_only(),
+        },
+    )
+    .unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let file = archive.files().next().unwrap();
+
+    assert_eq!(file.unp_ver, 29);
+    assert_eq!(file.method, 0x33);
+    assert!(file.pack_size < file.unp_size);
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].name, b"rar29-e8e9-filtered.bin");
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+fn generated_rar29_delta_filtered_archive_round_trips() {
+    let payload: Vec<u8> = (0..384).map(|index| (index * 17 + 3) as u8).collect();
+    let entries = [FileEntry {
+        name: b"rar29-delta-filtered.bin",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+
+    let bytes = write_rar29_delta_filtered_compressed_archive(
+        &entries,
+        WriterOptions {
+            target: ArchiveVersion::Rar29,
+            features: FeatureSet::store_only(),
+        },
+        3,
+    )
+    .unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let file = archive.files().next().unwrap();
+
+    assert_eq!(file.unp_ver, 29);
+    assert_eq!(file.method, 0x33);
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].name, b"rar29-delta-filtered.bin");
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+fn generated_rar29_segmented_delta_filtered_archive_round_trips() {
+    let mut payload = b"unfiltered prefix before delta segment ".to_vec();
+    let filter_start = payload.len();
+    payload.extend((0..384).map(|index| (index * 17 + 3) as u8));
+    let filter_end = payload.len();
+    payload.extend_from_slice(b"unfiltered suffix after delta segment\n");
+    let entries = [FileEntry {
+        name: b"rar29-segmented-delta-filtered.bin",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+
+    let bytes = write_rar29_delta_range_filtered_compressed_archive(
+        &entries,
+        WriterOptions {
+            target: ArchiveVersion::Rar29,
+            features: FeatureSet::store_only(),
+        },
+        filter_start..filter_end,
+        3,
+    )
+    .unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let file = archive.files().next().unwrap();
+
+    assert_eq!(file.unp_ver, 29);
+    assert_eq!(file.method, 0x33);
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].name, b"rar29-segmented-delta-filtered.bin");
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+#[ignore = "requires local WinRAR/UnRAR 4.20 Wine prefix"]
+fn reference_unrar_accepts_rar29_segmented_delta_filter_record() {
+    const WINEPREFIX: &str = "/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar420";
+    const UNRAR: &str =
+        "/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar420/drive_c/Program Files (x86)/WinRAR/UnRAR.exe";
+
+    if !Path::new(UNRAR).is_file() {
+        panic!("missing reference tool: {UNRAR}");
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "rars-rar29-segmented-delta-ref-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let archive_path = dir.join("segmented-delta.rar");
+    let mut payload = b"unfiltered prefix before delta segment ".to_vec();
+    let filter_start = payload.len();
+    payload.extend((0..384).map(|index| (index * 17 + 3) as u8));
+    let filter_end = payload.len();
+    payload.extend_from_slice(b"unfiltered suffix after delta segment\n");
+    let entries = [FileEntry {
+        name: b"segmented-delta.bin",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+    let bytes = write_rar29_delta_range_filtered_compressed_archive(
+        &entries,
+        WriterOptions {
+            target: ArchiveVersion::Rar29,
+            features: FeatureSet::store_only(),
+        },
+        filter_start..filter_end,
+        3,
+    )
+    .unwrap();
+    std::fs::write(&archive_path, bytes).unwrap();
+
+    let wine_archive = format!("Z:{}", archive_path.to_string_lossy().replace('/', "\\"));
+    let output = Command::new("env")
+        .arg(format!("WINEPREFIX={WINEPREFIX}"))
+        .arg("wine")
+        .arg(UNRAR)
+        .arg("t")
+        .arg("-inul")
+        .arg(wine_archive)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "UnRAR 4.20 rejected segmented DELTA archive: status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn generated_rar29_itanium_filtered_archive_round_trips() {
+    let mut payload = vec![0u8; 48];
+    payload[16] = 22;
+    payload[21] = 20;
+    payload.extend_from_slice(b"rar29 itanium format payload\n");
+    let entries = [FileEntry {
+        name: b"rar29-itanium-filtered.bin",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+
+    let bytes = write_rar29_itanium_filtered_compressed_archive(
+        &entries,
+        WriterOptions {
+            target: ArchiveVersion::Rar29,
+            features: FeatureSet::store_only(),
+        },
+    )
+    .unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let file = archive.files().next().unwrap();
+
+    assert_eq!(file.unp_ver, 29);
+    assert_eq!(file.method, 0x33);
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].name, b"rar29-itanium-filtered.bin");
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+fn generated_rar29_segmented_itanium_filtered_archive_round_trips() {
+    let mut payload = b"unfiltered prefix before itanium segment ".to_vec();
+    let filter_start = payload.len();
+    payload.extend_from_slice(&[0; 48]);
+    payload[filter_start + 16] = 22;
+    payload[filter_start + 21] = 20;
+    payload.extend_from_slice(b"rar29 segmented itanium format payload\n");
+    let filter_end = payload.len();
+    payload.extend_from_slice(b"unfiltered suffix after itanium segment\n");
+    let entries = [FileEntry {
+        name: b"rar29-segmented-itanium-filtered.bin",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+
+    let bytes = write_rar29_itanium_range_filtered_compressed_archive(
+        &entries,
+        WriterOptions {
+            target: ArchiveVersion::Rar29,
+            features: FeatureSet::store_only(),
+        },
+        filter_start..filter_end,
+    )
+    .unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let file = archive.files().next().unwrap();
+
+    assert_eq!(file.unp_ver, 29);
+    assert_eq!(file.method, 0x33);
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].name, b"rar29-segmented-itanium-filtered.bin");
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+#[ignore = "requires local WinRAR/UnRAR 4.20 Wine prefix"]
+fn reference_unrar_accepts_rar29_segmented_itanium_filter_record() {
+    const WINEPREFIX: &str = "/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar420";
+    const UNRAR: &str =
+        "/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar420/drive_c/Program Files (x86)/WinRAR/UnRAR.exe";
+
+    if !Path::new(UNRAR).is_file() {
+        panic!("missing reference tool: {UNRAR}");
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "rars-rar29-segmented-itanium-ref-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let archive_path = dir.join("segmented-itanium.rar");
+    let mut payload = b"unfiltered prefix before itanium segment ".to_vec();
+    let filter_start = payload.len();
+    payload.extend_from_slice(&[0; 48]);
+    payload[filter_start + 16] = 22;
+    payload[filter_start + 21] = 20;
+    payload.extend_from_slice(b"rar29 segmented itanium reference payload\n");
+    let filter_end = payload.len();
+    payload.extend_from_slice(b"unfiltered suffix after itanium segment\n");
+    let entries = [FileEntry {
+        name: b"segmented-itanium.bin",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+    let bytes = write_rar29_itanium_range_filtered_compressed_archive(
+        &entries,
+        WriterOptions {
+            target: ArchiveVersion::Rar29,
+            features: FeatureSet::store_only(),
+        },
+        filter_start..filter_end,
+    )
+    .unwrap();
+    std::fs::write(&archive_path, bytes).unwrap();
+
+    let wine_archive = format!("Z:{}", archive_path.to_string_lossy().replace('/', "\\"));
+    let output = Command::new("env")
+        .arg(format!("WINEPREFIX={WINEPREFIX}"))
+        .arg("wine")
+        .arg(UNRAR)
+        .arg("t")
+        .arg("-inul")
+        .arg(wine_archive)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "UnRAR 4.20 rejected segmented ITANIUM archive: status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn generated_rar29_rgb_filtered_archive_round_trips() {
+    let width = 12;
+    let payload: Vec<u8> = (0..96).map(|index| (index * 31 + 13) as u8).collect();
+    let entries = [FileEntry {
+        name: b"rar29-rgb-filtered.bin",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+
+    let bytes = write_rar29_rgb_filtered_compressed_archive(
+        &entries,
+        WriterOptions {
+            target: ArchiveVersion::Rar29,
+            features: FeatureSet::store_only(),
+        },
+        width,
+        0,
+    )
+    .unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let file = archive.files().next().unwrap();
+
+    assert_eq!(file.unp_ver, 29);
+    assert_eq!(file.method, 0x33);
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].name, b"rar29-rgb-filtered.bin");
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+fn generated_rar29_segmented_rgb_filtered_archive_round_trips() {
+    let width = 12;
+    let mut payload = b"unfiltered prefix before rgb segment ".to_vec();
+    let filter_start = payload.len();
+    payload.extend((0..96).map(|index| (index * 31 + 13) as u8));
+    let filter_end = payload.len();
+    payload.extend_from_slice(b"unfiltered suffix after rgb segment\n");
+    let entries = [FileEntry {
+        name: b"rar29-segmented-rgb-filtered.bin",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+
+    let bytes = write_rar29_rgb_range_filtered_compressed_archive(
+        &entries,
+        WriterOptions {
+            target: ArchiveVersion::Rar29,
+            features: FeatureSet::store_only(),
+        },
+        filter_start..filter_end,
+        width,
+        0,
+    )
+    .unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let file = archive.files().next().unwrap();
+
+    assert_eq!(file.unp_ver, 29);
+    assert_eq!(file.method, 0x33);
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].name, b"rar29-segmented-rgb-filtered.bin");
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+#[ignore = "requires local WinRAR/UnRAR 4.20 Wine prefix"]
+fn reference_unrar_accepts_rar29_segmented_rgb_filter_record() {
+    const WINEPREFIX: &str = "/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar420";
+    const UNRAR: &str =
+        "/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar420/drive_c/Program Files (x86)/WinRAR/UnRAR.exe";
+
+    if !Path::new(UNRAR).is_file() {
+        panic!("missing reference tool: {UNRAR}");
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "rars-rar29-segmented-rgb-ref-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let archive_path = dir.join("segmented-rgb.rar");
+    let width = 12;
+    let mut payload = b"unfiltered prefix before rgb segment ".to_vec();
+    let filter_start = payload.len();
+    payload.extend((0..96).map(|index| (index * 31 + 13) as u8));
+    let filter_end = payload.len();
+    payload.extend_from_slice(b"unfiltered suffix after rgb segment\n");
+    let entries = [FileEntry {
+        name: b"segmented-rgb.bin",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+    let bytes = write_rar29_rgb_range_filtered_compressed_archive(
+        &entries,
+        WriterOptions {
+            target: ArchiveVersion::Rar29,
+            features: FeatureSet::store_only(),
+        },
+        filter_start..filter_end,
+        width,
+        0,
+    )
+    .unwrap();
+    std::fs::write(&archive_path, bytes).unwrap();
+
+    let wine_archive = format!("Z:{}", archive_path.to_string_lossy().replace('/', "\\"));
+    let output = Command::new("env")
+        .arg(format!("WINEPREFIX={WINEPREFIX}"))
+        .arg("wine")
+        .arg(UNRAR)
+        .arg("t")
+        .arg("-inul")
+        .arg(wine_archive)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "UnRAR 4.20 rejected segmented RGB archive: status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn generated_rar29_audio_filtered_archive_round_trips() {
+    let payload: Vec<u8> = (0..160)
+        .map(|index| (index * 9 + index / 5) as u8)
+        .collect();
+    let entries = [FileEntry {
+        name: b"rar29-audio-filtered.bin",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+
+    let bytes = write_rar29_audio_filtered_compressed_archive(
+        &entries,
+        WriterOptions {
+            target: ArchiveVersion::Rar29,
+            features: FeatureSet::store_only(),
+        },
+        2,
+    )
+    .unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let file = archive.files().next().unwrap();
+
+    assert_eq!(file.unp_ver, 29);
+    assert_eq!(file.method, 0x33);
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].name, b"rar29-audio-filtered.bin");
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+fn generated_rar29_segmented_audio_filtered_archive_round_trips() {
+    let mut payload = b"unfiltered prefix before audio segment ".to_vec();
+    let filter_start = payload.len();
+    payload.extend((0..160).map(|index| (index * 9 + index / 5) as u8));
+    let filter_end = payload.len();
+    payload.extend_from_slice(b"unfiltered suffix after audio segment\n");
+    let entries = [FileEntry {
+        name: b"rar29-segmented-audio-filtered.bin",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+
+    let bytes = write_rar29_audio_range_filtered_compressed_archive(
+        &entries,
+        WriterOptions {
+            target: ArchiveVersion::Rar29,
+            features: FeatureSet::store_only(),
+        },
+        filter_start..filter_end,
+        2,
+    )
+    .unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let file = archive.files().next().unwrap();
+
+    assert_eq!(file.unp_ver, 29);
+    assert_eq!(file.method, 0x33);
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted[0].name, b"rar29-segmented-audio-filtered.bin");
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+#[ignore = "requires local WinRAR/UnRAR 3.00 Wine prefix"]
+fn reference_unrar300_accepts_rar29_segmented_filter_records() {
+    const WINEPREFIX: &str = "/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar300";
+    const UNRAR: &str =
+        "/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar300/drive_c/Program Files (x86)/WinRAR/UnRAR.exe";
+
+    if !Path::new(UNRAR).is_file() {
+        panic!("missing reference tool: {UNRAR}");
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "rars-rar29-segmented-unrar300-ref-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let mut e8 = b"unfiltered prefix before x86 segment ".to_vec();
+    let e8_start = e8.len();
+    e8.extend_from_slice(b"\xe8\0\0\0\0rar29 segmented e8 reference payload\n");
+    let e8_end = e8.len();
+    e8.extend_from_slice(b"unfiltered suffix after x86 segment\n");
+    write_reference_segmented_archive(
+        &dir.join("segmented-e8.rar"),
+        b"segmented-e8.bin",
+        &e8,
+        |entries| {
+            write_rar29_e8_range_filtered_compressed_archive(
+                entries,
+                reference_rar29_options(),
+                e8_start..e8_end,
+            )
+        },
+    );
+
+    let mut e8e9 = b"unfiltered prefix before x86 segment ".to_vec();
+    let e8e9_start = e8e9.len();
+    e8e9.extend_from_slice(b"\xe9\0\0\0\0rar29 segmented e8e9 reference payload\n");
+    let e8e9_end = e8e9.len();
+    e8e9.extend_from_slice(b"unfiltered suffix after x86 segment\n");
+    write_reference_segmented_archive(
+        &dir.join("segmented-e8e9.rar"),
+        b"segmented-e8e9.bin",
+        &e8e9,
+        |entries| {
+            write_rar29_e8e9_range_filtered_compressed_archive(
+                entries,
+                reference_rar29_options(),
+                e8e9_start..e8e9_end,
+            )
+        },
+    );
+
+    let mut delta = b"unfiltered prefix before delta segment ".to_vec();
+    let delta_start = delta.len();
+    delta.extend((0..384).map(|index| (index * 17 + 3) as u8));
+    let delta_end = delta.len();
+    delta.extend_from_slice(b"unfiltered suffix after delta segment\n");
+    write_reference_segmented_archive(
+        &dir.join("segmented-delta.rar"),
+        b"segmented-delta.bin",
+        &delta,
+        |entries| {
+            write_rar29_delta_range_filtered_compressed_archive(
+                entries,
+                reference_rar29_options(),
+                delta_start..delta_end,
+                3,
+            )
+        },
+    );
+
+    let mut itanium = b"unfiltered prefix before itanium segment ".to_vec();
+    let itanium_start = itanium.len();
+    itanium.extend_from_slice(&[0; 48]);
+    itanium[itanium_start + 16] = 22;
+    itanium[itanium_start + 21] = 20;
+    itanium.extend_from_slice(b"rar29 segmented itanium reference payload\n");
+    let itanium_end = itanium.len();
+    itanium.extend_from_slice(b"unfiltered suffix after itanium segment\n");
+    write_reference_segmented_archive(
+        &dir.join("segmented-itanium.rar"),
+        b"segmented-itanium.bin",
+        &itanium,
+        |entries| {
+            write_rar29_itanium_range_filtered_compressed_archive(
+                entries,
+                reference_rar29_options(),
+                itanium_start..itanium_end,
+            )
+        },
+    );
+
+    let mut rgb = b"unfiltered prefix before rgb segment ".to_vec();
+    let rgb_start = rgb.len();
+    rgb.extend((0..96).map(|index| (index * 31 + 13) as u8));
+    let rgb_end = rgb.len();
+    rgb.extend_from_slice(b"unfiltered suffix after rgb segment\n");
+    write_reference_segmented_archive(
+        &dir.join("segmented-rgb.rar"),
+        b"segmented-rgb.bin",
+        &rgb,
+        |entries| {
+            write_rar29_rgb_range_filtered_compressed_archive(
+                entries,
+                reference_rar29_options(),
+                rgb_start..rgb_end,
+                12,
+                0,
+            )
+        },
+    );
+
+    let mut audio = b"unfiltered prefix before audio segment ".to_vec();
+    let audio_start = audio.len();
+    audio.extend((0..160).map(|index| (index * 9 + index / 5) as u8));
+    let audio_end = audio.len();
+    audio.extend_from_slice(b"unfiltered suffix after audio segment\n");
+    write_reference_segmented_archive(
+        &dir.join("segmented-audio.rar"),
+        b"segmented-audio.bin",
+        &audio,
+        |entries| {
+            write_rar29_audio_range_filtered_compressed_archive(
+                entries,
+                reference_rar29_options(),
+                audio_start..audio_end,
+                2,
+            )
+        },
+    );
+
+    for archive_path in [
+        "segmented-e8.rar",
+        "segmented-e8e9.rar",
+        "segmented-delta.rar",
+        "segmented-itanium.rar",
+        "segmented-rgb.rar",
+        "segmented-audio.rar",
+    ] {
+        let archive_path = dir.join(archive_path);
+        let wine_archive = format!("Z:{}", archive_path.to_string_lossy().replace('/', "\\"));
+        let output = Command::new("env")
+            .arg(format!("WINEPREFIX={WINEPREFIX}"))
+            .arg("wine")
+            .arg(UNRAR)
+            .arg("t")
+            .arg("-inul")
+            .arg(wine_archive)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "UnRAR 3.00 rejected {}: status={:?}\nstdout={}\nstderr={}",
+            archive_path.display(),
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+fn reference_rar29_options() -> WriterOptions {
+    WriterOptions {
+        target: ArchiveVersion::Rar29,
+        features: FeatureSet::store_only(),
+    }
+}
+
+fn write_reference_segmented_archive(
+    archive_path: &Path,
+    name: &'static [u8],
+    payload: &[u8],
+    write: impl FnOnce(&[FileEntry<'_>]) -> rars_format::Result<Vec<u8>>,
+) {
+    let entries = [FileEntry {
+        name,
+        data: payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+    let bytes = write(&entries).unwrap();
+    std::fs::write(archive_path, bytes).unwrap();
+}
+
+#[test]
+#[ignore = "requires local WinRAR/UnRAR 4.20 Wine prefix"]
+fn reference_unrar_accepts_rar29_segmented_audio_filter_record() {
+    const WINEPREFIX: &str = "/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar420";
+    const UNRAR: &str =
+        "/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar420/drive_c/Program Files (x86)/WinRAR/UnRAR.exe";
+
+    if !Path::new(UNRAR).is_file() {
+        panic!("missing reference tool: {UNRAR}");
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "rars-rar29-segmented-audio-ref-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let archive_path = dir.join("segmented-audio.rar");
+    let mut payload = b"unfiltered prefix before audio segment ".to_vec();
+    let filter_start = payload.len();
+    payload.extend((0..160).map(|index| (index * 9 + index / 5) as u8));
+    let filter_end = payload.len();
+    payload.extend_from_slice(b"unfiltered suffix after audio segment\n");
+    let entries = [FileEntry {
+        name: b"segmented-audio.bin",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+    let bytes = write_rar29_audio_range_filtered_compressed_archive(
+        &entries,
+        WriterOptions {
+            target: ArchiveVersion::Rar29,
+            features: FeatureSet::store_only(),
+        },
+        filter_start..filter_end,
+        2,
+    )
+    .unwrap();
+    std::fs::write(&archive_path, bytes).unwrap();
+
+    let wine_archive = format!("Z:{}", archive_path.to_string_lossy().replace('/', "\\"));
+    let output = Command::new("env")
+        .arg(format!("WINEPREFIX={WINEPREFIX}"))
+        .arg("wine")
+        .arg(UNRAR)
+        .arg("t")
+        .arg("-inul")
+        .arg(wine_archive)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "UnRAR 4.20 rejected segmented AUDIO archive: status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -208,6 +1551,165 @@ fn writes_rar15_file_comments_that_reader_decodes() {
 }
 
 #[test]
+fn writes_rar20_old_style_comments_that_reader_decodes() {
+    let mut archive_features = FeatureSet::store_only();
+    archive_features.archive_comment = true;
+    let stored = [StoredEntry {
+        name: b"rar20-commented.txt",
+        data: b"rar20 archive comment payload\n",
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+    let archive_bytes = write_stored_archive_with_comment(
+        &stored,
+        WriterOptions {
+            target: ArchiveVersion::Rar20,
+            features: archive_features,
+        },
+        Some(b"rar20 archive note\r\n"),
+    )
+    .unwrap();
+    let archive = Archive::parse(&archive_bytes).unwrap();
+    assert!(archive.main.has_archive_comment());
+    assert_eq!(
+        archive.archive_comment().unwrap().as_deref(),
+        Some(b"rar20 archive note\r\n".as_slice())
+    );
+    assert_eq!(archive.extract().unwrap()[0].data, stored[0].data);
+
+    let mut file_features = FeatureSet::store_only();
+    file_features.file_comment = true;
+    let compressed = [FileEntry {
+        name: b"rar20-file-commented.txt",
+        data: b"rar20 compressed file comment payload payload payload\n",
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: Some(b"rar20 file note"),
+    }];
+    let file_bytes = write_compressed_archive_with_comment(
+        &compressed,
+        WriterOptions {
+            target: ArchiveVersion::Rar20,
+            features: file_features,
+        },
+        None,
+    )
+    .unwrap();
+    let archive = Archive::parse(&file_bytes).unwrap();
+    let file = archive.files().next().unwrap();
+    assert_eq!(file.unp_ver, 20);
+    assert!(file.has_file_comment());
+    assert_eq!(
+        file.file_comment().unwrap().as_deref(),
+        Some(b"rar20 file note".as_slice())
+    );
+    assert_eq!(archive.extract().unwrap()[0].data, compressed[0].data);
+}
+
+#[test]
+fn writes_rar29_old_style_comments_that_reader_decodes() {
+    let mut archive_features = FeatureSet::store_only();
+    archive_features.archive_comment = true;
+    let stored = [StoredEntry {
+        name: b"rar29-commented.txt",
+        data: b"rar29 archive comment payload\n",
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+    let archive_bytes = write_stored_archive_with_comment(
+        &stored,
+        WriterOptions {
+            target: ArchiveVersion::Rar29,
+            features: archive_features,
+        },
+        Some(b"rar29 archive note\r\n"),
+    )
+    .unwrap();
+    let archive = Archive::parse(&archive_bytes).unwrap();
+    assert!(archive.main.has_archive_comment());
+    assert_eq!(
+        archive.archive_comment().unwrap().as_deref(),
+        Some(b"rar29 archive note\r\n".as_slice())
+    );
+    assert_eq!(archive.extract().unwrap()[0].data, stored[0].data);
+
+    let mut file_features = FeatureSet::store_only();
+    file_features.file_comment = true;
+    let compressed = [FileEntry {
+        name: b"rar29-file-commented.txt",
+        data: b"rar29 compressed file comment payload payload payload\n",
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: Some(b"rar29 file note"),
+    }];
+    let file_bytes = write_compressed_archive_with_comment(
+        &compressed,
+        WriterOptions {
+            target: ArchiveVersion::Rar29,
+            features: file_features,
+        },
+        None,
+    )
+    .unwrap();
+    let archive = Archive::parse(&file_bytes).unwrap();
+    let file = archive.files().next().unwrap();
+    assert_eq!(file.unp_ver, 29);
+    assert!(file.has_file_comment());
+    assert_eq!(
+        file.file_comment().unwrap().as_deref(),
+        Some(b"rar29 file note".as_slice())
+    );
+    assert_eq!(archive.extract().unwrap()[0].data, compressed[0].data);
+}
+
+#[test]
+fn writes_rar3_newsub_archive_comment_that_reader_decodes() {
+    for target in [ArchiveVersion::Rar30, ArchiveVersion::Rar40] {
+        let mut features = FeatureSet::store_only();
+        features.archive_comment = true;
+        let entries = [FileEntry {
+            name: b"rar3-commented.txt",
+            data: b"rar3 NEWSUB comment payload payload payload\n",
+            file_time: 0x5a21_0000,
+            file_attr: 0x20,
+            host_os: 3,
+            password: None,
+            file_comment: None,
+        }];
+        let bytes = write_compressed_archive_with_comment(
+            &entries,
+            WriterOptions { target, features },
+            Some(b"rar3 NEWSUB archive note\r\n"),
+        )
+        .unwrap();
+
+        let archive = Archive::parse(&bytes).unwrap();
+        assert!(!archive.main.has_archive_comment());
+        let subblocks: Vec<_> = archive.new_subs().collect();
+        assert_eq!(subblocks.len(), 1);
+        assert_eq!(subblocks[0].kind, NewSubKind::ArchiveComment);
+        assert_eq!(subblocks[0].file.name, b"CMT");
+        assert_eq!(subblocks[0].file.unp_ver, 29);
+        assert_eq!(subblocks[0].file.method, 0x33);
+        assert_eq!(
+            archive.archive_comment().unwrap().as_deref(),
+            Some(b"rar3 NEWSUB archive note\r\n".as_slice())
+        );
+        assert_eq!(archive.extract().unwrap()[0].data, entries[0].data);
+    }
+}
+
+#[test]
 fn writes_compressed_rar15_archive_that_reader_extracts() {
     let entries = [
         FileEntry {
@@ -267,6 +1769,24 @@ fn writes_literal_compressed_rar20_archive_that_reader_extracts() {
             password: None,
             file_comment: None,
         },
+        FileEntry {
+            name: b"rar20-run.bin",
+            data: &[b'A'; 1024],
+            file_time: 0x5a21_0000,
+            file_attr: 0x20,
+            host_os: 3,
+            password: None,
+            file_comment: None,
+        },
+        FileEntry {
+            name: b"rar20-repeat.bin",
+            data: &b"abc123xyz-"[..].repeat(128),
+            file_time: 0x5a21_0000,
+            file_attr: 0x20,
+            host_os: 3,
+            password: None,
+            file_comment: None,
+        },
     ];
     let bytes = write_compressed_archive(
         &entries,
@@ -279,16 +1799,151 @@ fn writes_literal_compressed_rar20_archive_that_reader_extracts() {
     let archive = Archive::parse(&bytes).unwrap();
     let files: Vec<_> = archive.files().collect();
 
-    assert_eq!(files.len(), 2);
+    assert_eq!(files.len(), 4);
     assert!(files.iter().all(|file| file.unp_ver == 20));
     assert!(files.iter().all(|file| file.method == 0x33));
     assert_eq!(files[0].file_crc, crc32(entries[0].data));
     assert_eq!(files[1].file_crc, crc32(entries[1].data));
+    assert_eq!(files[2].file_crc, crc32(entries[2].data));
+    assert_eq!(files[3].file_crc, crc32(entries[3].data));
+    assert!(files.iter().all(|file| !file.is_solid()));
+    assert!(files[2].pack_size < files[2].unp_size / 4);
+    assert!(files[3].pack_size < files[3].unp_size / 2);
 
     let extracted = archive.extract().unwrap();
-    assert_eq!(extracted.len(), 2);
+    assert_eq!(extracted.len(), 4);
     assert_eq!(extracted[0].data, entries[0].data);
     assert_eq!(extracted[1].data, entries[1].data);
+    assert_eq!(extracted[2].data, entries[2].data);
+    assert_eq!(extracted[3].data, entries[3].data);
+}
+
+#[test]
+fn writes_encrypted_rar20_archives_that_reader_extracts_with_password() {
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    let options = WriterOptions {
+        target: ArchiveVersion::Rar20,
+        features,
+    };
+
+    let stored = [StoredEntry {
+        name: b"rar20-secret-store.txt",
+        data: b"RAR 2.0 encrypted stored payload\n",
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: Some(b"password"),
+        file_comment: None,
+    }];
+    let stored_bytes = write_stored_archive(&stored, options).unwrap();
+    let stored_archive = Archive::parse(&stored_bytes).unwrap();
+    let stored_file = stored_archive.files().next().unwrap();
+    assert_eq!(stored_file.unp_ver, 20);
+    assert!(stored_file.is_encrypted());
+    assert_eq!(stored_file.pack_size % 16, 0);
+    assert!(matches!(stored_archive.extract(), Err(Error::NeedPassword)));
+    assert!(matches!(
+        stored_archive.extract_with_password(Some(b"wrong")),
+        Err(Error::WrongPasswordOrCorruptData)
+    ));
+    let extracted = stored_archive
+        .extract_with_password(Some(b"password"))
+        .unwrap();
+    assert_eq!(extracted[0].data, stored[0].data);
+
+    let compressed = [FileEntry {
+        name: b"rar20-secret-compressed.txt",
+        data: b"RAR 2.0 encrypted compressed payload payload payload\n",
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: Some(b"password"),
+        file_comment: None,
+    }];
+    let compressed_bytes = write_compressed_archive(&compressed, options).unwrap();
+    let compressed_archive = Archive::parse(&compressed_bytes).unwrap();
+    let compressed_file = compressed_archive.files().next().unwrap();
+    assert_eq!(compressed_file.unp_ver, 20);
+    assert!(compressed_file.is_encrypted());
+    assert_eq!(compressed_file.pack_size % 16, 0);
+    assert!(matches!(
+        compressed_archive.extract(),
+        Err(Error::NeedPassword)
+    ));
+    assert!(matches!(
+        compressed_archive.extract_with_password(Some(b"wrong")),
+        Err(Error::WrongPasswordOrCorruptData)
+    ));
+    let extracted = compressed_archive
+        .extract_with_password(Some(b"password"))
+        .unwrap();
+    assert_eq!(extracted[0].data, compressed[0].data);
+}
+
+#[test]
+fn writes_encrypted_rar29_archives_that_reader_extracts_with_password() {
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    let options = WriterOptions {
+        target: ArchiveVersion::Rar29,
+        features,
+    };
+
+    let stored = [StoredEntry {
+        name: b"rar29-secret-store.txt",
+        data: b"RAR 2.9 encrypted stored payload\n",
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: Some(b"password"),
+        file_comment: None,
+    }];
+    let stored_bytes = write_stored_archive(&stored, options).unwrap();
+    let stored_archive = Archive::parse(&stored_bytes).unwrap();
+    let stored_file = stored_archive.files().next().unwrap();
+    assert_eq!(stored_file.unp_ver, 29);
+    assert!(stored_file.is_encrypted());
+    assert!(stored_file.salt.is_some());
+    assert_eq!(stored_file.pack_size % 16, 0);
+    assert!(matches!(stored_archive.extract(), Err(Error::NeedPassword)));
+    assert!(matches!(
+        stored_archive.extract_with_password(Some(b"wrong")),
+        Err(Error::WrongPasswordOrCorruptData)
+    ));
+    let extracted = stored_archive
+        .extract_with_password(Some(b"password"))
+        .unwrap();
+    assert_eq!(extracted[0].data, stored[0].data);
+
+    let compressed = [FileEntry {
+        name: b"rar29-secret-compressed.txt",
+        data: b"RAR 2.9 encrypted compressed payload payload payload\n",
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: Some(b"password"),
+        file_comment: None,
+    }];
+    let compressed_bytes = write_compressed_archive(&compressed, options).unwrap();
+    let compressed_archive = Archive::parse(&compressed_bytes).unwrap();
+    let compressed_file = compressed_archive.files().next().unwrap();
+    assert_eq!(compressed_file.unp_ver, 29);
+    assert!(compressed_file.is_encrypted());
+    assert!(compressed_file.salt.is_some());
+    assert_eq!(compressed_file.pack_size % 16, 0);
+    assert!(matches!(
+        compressed_archive.extract(),
+        Err(Error::NeedPassword)
+    ));
+    assert!(matches!(
+        compressed_archive.extract_with_password(Some(b"wrong")),
+        Err(Error::WrongPasswordOrCorruptData)
+    ));
+    let extracted = compressed_archive
+        .extract_with_password(Some(b"password"))
+        .unwrap();
+    assert_eq!(extracted[0].data, compressed[0].data);
 }
 
 #[test]
@@ -312,6 +1967,24 @@ fn writes_literal_compressed_rar29_archive_that_reader_extracts() {
             password: None,
             file_comment: None,
         },
+        FileEntry {
+            name: b"rar29-run.bin",
+            data: &[b'Z'; 1024],
+            file_time: 0x5a21_0000,
+            file_attr: 0x20,
+            host_os: 3,
+            password: None,
+            file_comment: None,
+        },
+        FileEntry {
+            name: b"rar29-repeat.bin",
+            data: &b"abc123xyz-"[..].repeat(128),
+            file_time: 0x5a21_0000,
+            file_attr: 0x20,
+            host_os: 3,
+            password: None,
+            file_comment: None,
+        },
     ];
     let bytes = write_compressed_archive(
         &entries,
@@ -324,16 +1997,140 @@ fn writes_literal_compressed_rar29_archive_that_reader_extracts() {
     let archive = Archive::parse(&bytes).unwrap();
     let files: Vec<_> = archive.files().collect();
 
-    assert_eq!(files.len(), 2);
+    assert_eq!(files.len(), 4);
     assert!(files.iter().all(|file| file.unp_ver == 29));
     assert!(files.iter().all(|file| file.method == 0x33));
     assert_eq!(files[0].file_crc, crc32(entries[0].data));
     assert_eq!(files[1].file_crc, crc32(entries[1].data));
+    assert_eq!(files[2].file_crc, crc32(entries[2].data));
+    assert_eq!(files[3].file_crc, crc32(entries[3].data));
+    assert!(files.iter().all(|file| !file.is_solid()));
+    assert!(files[2].pack_size < files[2].unp_size / 4);
+    assert!(files[3].pack_size < files[3].unp_size / 2);
+
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted.len(), 4);
+    assert_eq!(extracted[0].data, entries[0].data);
+    assert_eq!(extracted[1].data, entries[1].data);
+    assert_eq!(extracted[2].data, entries[2].data);
+    assert_eq!(extracted[3].data, entries[3].data);
+}
+
+#[test]
+fn writes_solid_compressed_rar29_rar30_and_rar40_archives_that_reader_extracts() {
+    for target in [
+        ArchiveVersion::Rar29,
+        ArchiveVersion::Rar30,
+        ArchiveVersion::Rar40,
+    ] {
+        let entries = [
+            FileEntry {
+                name: b"solid-one.txt",
+                data: b"solid writer baseline alpha beta gamma alpha beta gamma\n",
+                file_time: 0x5a21_0000,
+                file_attr: 0x20,
+                host_os: 3,
+                password: None,
+                file_comment: None,
+            },
+            FileEntry {
+                name: b"solid-two.txt",
+                data: b"solid writer baseline alpha beta gamma delta epsilon\n",
+                file_time: 0x5a21_0000,
+                file_attr: 0x20,
+                host_os: 3,
+                password: None,
+                file_comment: None,
+            },
+        ];
+        let mut features = FeatureSet::store_only();
+        features.solid = true;
+        let bytes = write_compressed_archive(&entries, WriterOptions { target, features }).unwrap();
+        let archive = Archive::parse(&bytes).unwrap();
+        let files: Vec<_> = archive.files().collect();
+
+        assert!(archive.main.is_solid());
+        assert_eq!(files.len(), 2);
+        assert!(!files[0].is_solid());
+        assert!(files[1].is_solid());
+        let independent = write_compressed_archive(
+            &[FileEntry {
+                name: b"solid-two.txt",
+                data: entries[1].data,
+                file_time: entries[1].file_time,
+                file_attr: entries[1].file_attr,
+                host_os: entries[1].host_os,
+                password: None,
+                file_comment: None,
+            }],
+            WriterOptions {
+                target,
+                features: FeatureSet::store_only(),
+            },
+        )
+        .unwrap();
+        let independent = Archive::parse(&independent).unwrap();
+        let independent = independent.files().next().unwrap();
+        assert!(files[1].pack_size < independent.pack_size);
+
+        let extracted = archive.extract().unwrap();
+        assert_eq!(extracted.len(), 2);
+        assert_eq!(extracted[0].data, entries[0].data);
+        assert_eq!(extracted[1].data, entries[1].data);
+    }
+}
+
+#[test]
+fn writes_solid_compressed_rar20_archive_that_reader_extracts() {
+    let shared = b"RAR 2.0 solid writer shared dictionary phrase alpha beta gamma.\n";
+    let first_data = shared.repeat(64);
+    let mut second_data = shared.repeat(32);
+    second_data.extend_from_slice(b"second member tail\n");
+    let entries = [
+        FileEntry {
+            name: b"solid-rar20-one.txt",
+            data: &first_data,
+            file_time: 0x5a21_0000,
+            file_attr: 0x20,
+            host_os: 3,
+            password: None,
+            file_comment: None,
+        },
+        FileEntry {
+            name: b"solid-rar20-two.txt",
+            data: &second_data,
+            file_time: 0x5a21_0000,
+            file_attr: 0x20,
+            host_os: 3,
+            password: None,
+            file_comment: None,
+        },
+    ];
+    let mut features = FeatureSet::store_only();
+    features.solid = true;
+
+    let bytes = write_compressed_archive(
+        &entries,
+        WriterOptions {
+            target: ArchiveVersion::Rar20,
+            features,
+        },
+    )
+    .unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let files: Vec<_> = archive.files().collect();
+
+    assert!(archive.main.is_solid());
+    assert_eq!(files.len(), 2);
+    assert!(!files[0].is_solid());
+    assert!(files[1].is_solid());
+    assert!(files.iter().all(|file| file.unp_ver == 20));
+    assert!(files[1].pack_size < files[0].pack_size);
 
     let extracted = archive.extract().unwrap();
     assert_eq!(extracted.len(), 2);
-    assert_eq!(extracted[0].data, entries[0].data);
-    assert_eq!(extracted[1].data, entries[1].data);
+    assert_eq!(extracted[0].data, first_data);
+    assert_eq!(extracted[1].data, second_data);
 }
 
 #[test]
@@ -464,7 +2261,7 @@ fn writes_aes_encrypted_rar3_and_rar4_archives_that_reader_extracts_with_passwor
         let stored_file = stored_archive.files().next().unwrap();
         assert!(stored_file.is_encrypted());
         assert_eq!(stored_file.unp_ver, 29);
-        assert_eq!(stored_file.salt, Some(*b"rars30\0\0"));
+        assert!(stored_file.salt.is_some());
         assert_eq!(stored_file.pack_size % 16, 0);
         assert!(matches!(stored_archive.extract(), Err(Error::NeedPassword)));
         assert!(matches!(
@@ -492,7 +2289,7 @@ fn writes_aes_encrypted_rar3_and_rar4_archives_that_reader_extracts_with_passwor
         let compressed_file = compressed_archive.files().next().unwrap();
         assert!(compressed_file.is_encrypted());
         assert_eq!(compressed_file.unp_ver, 29);
-        assert_eq!(compressed_file.salt, Some(*b"rars30\0\0"));
+        assert!(compressed_file.salt.is_some());
         assert_eq!(compressed_file.pack_size % 16, 0);
         assert!(matches!(
             compressed_archive.extract(),
@@ -507,6 +2304,135 @@ fn writes_aes_encrypted_rar3_and_rar4_archives_that_reader_extracts_with_passwor
             .unwrap();
         assert_eq!(extracted[0].data, compressed[0].data);
     }
+}
+
+#[test]
+fn writes_header_encrypted_rar3_and_rar4_archives_that_reader_extracts_with_password() {
+    for target in [ArchiveVersion::Rar30, ArchiveVersion::Rar40] {
+        let mut features = FeatureSet::store_only();
+        features.file_encryption = true;
+        features.header_encryption = true;
+        let entries = [FileEntry {
+            name: b"header-secret.txt",
+            data: b"RAR 3.x header encrypted writer payload\n",
+            file_time: 0x5a21_0000,
+            file_attr: 0x20,
+            host_os: 3,
+            password: Some(b"password"),
+            file_comment: None,
+        }];
+        let bytes = write_compressed_archive(&entries, WriterOptions { target, features }).unwrap();
+
+        assert!(matches!(Archive::parse(&bytes), Err(Error::NeedPassword)));
+        let archive = Archive::parse_with_password(&bytes, Some(b"password")).unwrap();
+        assert!(archive.main.has_encrypted_headers());
+        let files: Vec<_> = archive.files().collect();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].name, b"header-secret.txt");
+        assert!(files[0].is_encrypted());
+
+        let extracted = archive.extract_with_password(Some(b"password")).unwrap();
+        assert_eq!(extracted.len(), 1);
+        assert_eq!(extracted[0].data, entries[0].data);
+    }
+}
+
+#[test]
+fn writes_solid_header_encrypted_rar3_and_rar4_archives_that_reader_extracts_with_password() {
+    for target in [ArchiveVersion::Rar30, ArchiveVersion::Rar40] {
+        let mut features = FeatureSet::store_only();
+        features.file_encryption = true;
+        features.header_encryption = true;
+        features.solid = true;
+        let entries = [
+            FileEntry {
+                name: b"solid-header-one.txt",
+                data: b"solid header encrypted common prefix one one one\n",
+                file_time: 0x5a21_0000,
+                file_attr: 0x20,
+                host_os: 3,
+                password: Some(b"password"),
+                file_comment: None,
+            },
+            FileEntry {
+                name: b"solid-header-two.txt",
+                data: b"solid header encrypted common prefix two two two\n",
+                file_time: 0x5a21_0000,
+                file_attr: 0x20,
+                host_os: 3,
+                password: Some(b"password"),
+                file_comment: None,
+            },
+        ];
+        let bytes = write_compressed_archive(&entries, WriterOptions { target, features }).unwrap();
+
+        assert!(matches!(Archive::parse(&bytes), Err(Error::NeedPassword)));
+        let archive = Archive::parse_with_password(&bytes, Some(b"password")).unwrap();
+        assert!(archive.main.has_encrypted_headers());
+        assert!(archive.main.is_solid());
+        let files: Vec<_> = archive.files().collect();
+        assert_eq!(files.len(), 2);
+        assert!(!files[0].is_solid());
+        assert!(files[1].is_solid());
+        assert!(files.iter().all(|file| file.is_encrypted()));
+
+        let extracted = archive.extract_with_password(Some(b"password")).unwrap();
+        assert_eq!(extracted[0].data, entries[0].data);
+        assert_eq!(extracted[1].data, entries[1].data);
+    }
+}
+
+#[test]
+fn rar3_and_rar4_aes_writer_uses_fresh_salts() {
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    let entry = [FileEntry {
+        name: b"aes-salt.txt",
+        data: b"same plaintext same password\n",
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: Some(b"password"),
+        file_comment: None,
+    }];
+
+    let first = write_compressed_archive(
+        &entry,
+        WriterOptions {
+            target: ArchiveVersion::Rar30,
+            features,
+        },
+    )
+    .unwrap();
+    let second = write_compressed_archive(
+        &entry,
+        WriterOptions {
+            target: ArchiveVersion::Rar30,
+            features,
+        },
+    )
+    .unwrap();
+    let first_archive = Archive::parse(&first).unwrap();
+    let second_archive = Archive::parse(&second).unwrap();
+    let first_file = first_archive.files().next().unwrap();
+    let second_file = second_archive.files().next().unwrap();
+
+    assert_ne!(first, second);
+    assert_ne!(first_file.salt, second_file.salt);
+    assert_eq!(
+        first_archive
+            .extract_with_password(Some(b"password"))
+            .unwrap()[0]
+            .data,
+        entry[0].data
+    );
+    assert_eq!(
+        second_archive
+            .extract_with_password(Some(b"password"))
+            .unwrap()[0]
+            .data,
+        entry[0].data
+    );
 }
 
 #[test]
@@ -572,6 +2498,76 @@ fn writes_compressed_rar15_volume_set_that_reader_reassembles() {
 }
 
 #[test]
+fn writes_compressed_rar20_volume_set_that_reader_reassembles() {
+    let entry = FileEntry {
+        name: b"split-rar20-compressed.txt",
+        data: &b"rar20 split compressed phrase alpha beta gamma "[..].repeat(32),
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    };
+    let options = WriterOptions {
+        target: ArchiveVersion::Rar20,
+        features: FeatureSet::store_only(),
+    };
+
+    let parts = write_compressed_volumes(entry, options, 8).unwrap();
+    assert!(parts.len() >= 2);
+
+    let archives: Vec<_> = parts
+        .iter()
+        .map(|part| Archive::parse(part).unwrap())
+        .collect();
+    assert!(archives[0].main.is_volume());
+    assert!(archives[0].main.is_first_volume());
+    let first_file = archives[0].files().next().unwrap();
+    assert_eq!(first_file.unp_ver, 20);
+    assert!(first_file.is_split_after());
+
+    let extracted = extract_volumes(&archives).unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].name, entry.name);
+    assert_eq!(extracted[0].data, entry.data);
+}
+
+#[test]
+fn writes_compressed_rar29_volume_set_that_reader_reassembles() {
+    let entry = FileEntry {
+        name: b"split-rar29-compressed.txt",
+        data: &b"rar29 split compressed phrase alpha beta gamma "[..].repeat(32),
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    };
+    let options = WriterOptions {
+        target: ArchiveVersion::Rar29,
+        features: FeatureSet::store_only(),
+    };
+
+    let parts = write_compressed_volumes(entry, options, 8).unwrap();
+    assert!(parts.len() >= 2);
+
+    let archives: Vec<_> = parts
+        .iter()
+        .map(|part| Archive::parse(part).unwrap())
+        .collect();
+    assert!(archives[0].main.is_volume());
+    assert!(archives[0].main.is_first_volume());
+    let first_file = archives[0].files().next().unwrap();
+    assert_eq!(first_file.unp_ver, 29);
+    assert!(first_file.is_split_after());
+
+    let extracted = extract_volumes(&archives).unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].name, entry.name);
+    assert_eq!(extracted[0].data, entry.data);
+}
+
+#[test]
 fn writes_encrypted_rar15_volume_sets_that_reader_reassembles_with_password() {
     let mut features = FeatureSet::store_only();
     features.file_encryption = true;
@@ -618,6 +2614,317 @@ fn writes_encrypted_rar15_volume_sets_that_reader_reassembles_with_password() {
         .iter()
         .map(|part| Archive::parse(part).unwrap())
         .collect();
+    assert!(compressed_archives[0]
+        .files()
+        .next()
+        .unwrap()
+        .is_encrypted());
+    assert!(matches!(
+        rars_format::rar15_40::extract_volumes_with_password(&compressed_archives, Some(b"wrong")),
+        Err(Error::WrongPasswordOrCorruptData)
+    ));
+    let extracted = rars_format::rar15_40::extract_volumes_with_password(
+        &compressed_archives,
+        Some(b"password"),
+    )
+    .unwrap();
+    assert_eq!(extracted[0].data, compressed.data);
+}
+
+#[test]
+fn writes_encrypted_rar20_volume_sets_that_reader_reassembles_with_password() {
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    let options = WriterOptions {
+        target: ArchiveVersion::Rar20,
+        features,
+    };
+
+    let stored = StoredEntry {
+        name: b"split-rar20-secret-store.bin",
+        data: b"abcdefghijklmnopqrstuvwxyz0123456789",
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: Some(b"password"),
+        file_comment: None,
+    };
+    let stored_parts = write_stored_volumes(stored, options, 10).unwrap();
+    let stored_archives: Vec<_> = stored_parts
+        .iter()
+        .map(|part| Archive::parse(part).unwrap())
+        .collect();
+    let first_stored = stored_archives[0].files().next().unwrap();
+    assert_eq!(first_stored.unp_ver, 20);
+    assert!(first_stored.is_encrypted());
+    assert!(matches!(
+        extract_volumes(&stored_archives),
+        Err(Error::NeedPassword)
+    ));
+    assert!(matches!(
+        rars_format::rar15_40::extract_volumes_with_password(&stored_archives, Some(b"wrong")),
+        Err(Error::WrongPasswordOrCorruptData)
+    ));
+    let extracted =
+        rars_format::rar15_40::extract_volumes_with_password(&stored_archives, Some(b"password"))
+            .unwrap();
+    assert_eq!(extracted[0].data, stored.data);
+
+    let compressed = FileEntry {
+        name: b"split-rar20-secret-compressed.txt",
+        data: b"secret rar20 compressed secret rar20 compressed secret rar20 compressed\n",
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: Some(b"password"),
+        file_comment: None,
+    };
+    let compressed_parts = write_compressed_volumes(compressed, options, 8).unwrap();
+    let compressed_archives: Vec<_> = compressed_parts
+        .iter()
+        .map(|part| Archive::parse(part).unwrap())
+        .collect();
+    let first_compressed = compressed_archives[0].files().next().unwrap();
+    assert_eq!(first_compressed.unp_ver, 20);
+    assert!(first_compressed.is_encrypted());
+    assert!(matches!(
+        rars_format::rar15_40::extract_volumes_with_password(&compressed_archives, Some(b"wrong")),
+        Err(Error::WrongPasswordOrCorruptData)
+    ));
+    let extracted = rars_format::rar15_40::extract_volumes_with_password(
+        &compressed_archives,
+        Some(b"password"),
+    )
+    .unwrap();
+    assert_eq!(extracted[0].data, compressed.data);
+}
+
+#[test]
+fn writes_encrypted_rar29_volume_sets_that_reader_reassembles_with_password() {
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    let options = WriterOptions {
+        target: ArchiveVersion::Rar29,
+        features,
+    };
+
+    let stored = StoredEntry {
+        name: b"split-rar29-secret-store.bin",
+        data: b"abcdefghijklmnopqrstuvwxyz0123456789",
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: Some(b"password"),
+        file_comment: None,
+    };
+    let stored_parts = write_stored_volumes(stored, options, 10).unwrap();
+    let stored_archives: Vec<_> = stored_parts
+        .iter()
+        .map(|part| Archive::parse(part).unwrap())
+        .collect();
+    let first_stored = stored_archives[0].files().next().unwrap();
+    assert_eq!(first_stored.unp_ver, 29);
+    assert!(first_stored.is_encrypted());
+    assert!(first_stored.salt.is_some());
+    for archive in &stored_archives[1..] {
+        assert_eq!(archive.files().next().unwrap().salt, first_stored.salt);
+    }
+    assert!(matches!(
+        extract_volumes(&stored_archives),
+        Err(Error::NeedPassword)
+    ));
+    assert!(matches!(
+        rars_format::rar15_40::extract_volumes_with_password(&stored_archives, Some(b"wrong")),
+        Err(Error::WrongPasswordOrCorruptData)
+    ));
+    let extracted =
+        rars_format::rar15_40::extract_volumes_with_password(&stored_archives, Some(b"password"))
+            .unwrap();
+    assert_eq!(extracted[0].data, stored.data);
+
+    let compressed = FileEntry {
+        name: b"split-rar29-secret-compressed.txt",
+        data: b"secret rar29 compressed secret rar29 compressed secret rar29 compressed\n",
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: Some(b"password"),
+        file_comment: None,
+    };
+    let compressed_parts = write_compressed_volumes(compressed, options, 8).unwrap();
+    let compressed_archives: Vec<_> = compressed_parts
+        .iter()
+        .map(|part| Archive::parse(part).unwrap())
+        .collect();
+    let first_compressed = compressed_archives[0].files().next().unwrap();
+    assert_eq!(first_compressed.unp_ver, 29);
+    assert!(first_compressed.is_encrypted());
+    assert!(first_compressed.salt.is_some());
+    for archive in &compressed_archives[1..] {
+        assert_eq!(archive.files().next().unwrap().salt, first_compressed.salt);
+    }
+    assert!(matches!(
+        rars_format::rar15_40::extract_volumes_with_password(&compressed_archives, Some(b"wrong")),
+        Err(Error::WrongPasswordOrCorruptData)
+    ));
+    let extracted = rars_format::rar15_40::extract_volumes_with_password(
+        &compressed_archives,
+        Some(b"password"),
+    )
+    .unwrap();
+    assert_eq!(extracted[0].data, compressed.data);
+}
+
+#[test]
+fn writes_encrypted_rar3_and_rar4_volume_sets_that_reader_reassembles_with_password() {
+    for target in [ArchiveVersion::Rar30, ArchiveVersion::Rar40] {
+        assert_encrypted_rar3_volume_sets_round_trip(target);
+    }
+}
+
+#[test]
+fn writes_header_encrypted_rar3_and_rar4_volume_sets_that_reader_reassembles_with_password() {
+    for target in [ArchiveVersion::Rar30, ArchiveVersion::Rar40] {
+        assert_header_encrypted_rar3_volume_sets_round_trip(target);
+    }
+}
+
+fn assert_encrypted_rar3_volume_sets_round_trip(target: ArchiveVersion) {
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    let options = WriterOptions { target, features };
+
+    let stored = StoredEntry {
+        name: b"rar30-split-secret-store.bin",
+        data: b"abcdefghijklmnopqrstuvwxyz0123456789",
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: Some(b"password"),
+        file_comment: None,
+    };
+    let stored_parts = write_stored_volumes(stored, options, 10).unwrap();
+    let stored_archives: Vec<_> = stored_parts
+        .iter()
+        .map(|part| Archive::parse(part).unwrap())
+        .collect();
+    let first_stored = stored_archives[0].files().next().unwrap();
+    assert!(first_stored.is_encrypted());
+    assert!(first_stored.salt.is_some());
+    assert_eq!(
+        first_stored.file_crc,
+        crc32(&first_stored.packed_data(&stored_archives[0]).unwrap())
+    );
+    for archive in &stored_archives[1..] {
+        assert_eq!(archive.files().next().unwrap().salt, first_stored.salt);
+    }
+    assert!(matches!(
+        extract_volumes(&stored_archives),
+        Err(Error::NeedPassword)
+    ));
+    assert!(matches!(
+        rars_format::rar15_40::extract_volumes_with_password(&stored_archives, Some(b"wrong")),
+        Err(Error::WrongPasswordOrCorruptData)
+    ));
+    let extracted =
+        rars_format::rar15_40::extract_volumes_with_password(&stored_archives, Some(b"password"))
+            .unwrap();
+    assert_eq!(extracted[0].data, stored.data);
+
+    let compressed = FileEntry {
+        name: b"rar30-split-secret-compressed.txt",
+        data: b"secret compressed secret compressed secret compressed\n",
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: Some(b"password"),
+        file_comment: None,
+    };
+    let compressed_parts = write_compressed_volumes(compressed, options, 8).unwrap();
+    let compressed_archives: Vec<_> = compressed_parts
+        .iter()
+        .map(|part| Archive::parse(part).unwrap())
+        .collect();
+    let first_compressed = compressed_archives[0].files().next().unwrap();
+    assert!(first_compressed.is_encrypted());
+    assert!(first_compressed.salt.is_some());
+    assert_eq!(
+        first_compressed.file_crc,
+        crc32(
+            &first_compressed
+                .packed_data(&compressed_archives[0])
+                .unwrap()
+        )
+    );
+    for archive in &compressed_archives[1..] {
+        assert_eq!(archive.files().next().unwrap().salt, first_compressed.salt);
+    }
+    assert!(matches!(
+        rars_format::rar15_40::extract_volumes_with_password(&compressed_archives, Some(b"wrong")),
+        Err(Error::WrongPasswordOrCorruptData)
+    ));
+    let extracted = rars_format::rar15_40::extract_volumes_with_password(
+        &compressed_archives,
+        Some(b"password"),
+    )
+    .unwrap();
+    assert_eq!(extracted[0].data, compressed.data);
+}
+
+fn assert_header_encrypted_rar3_volume_sets_round_trip(target: ArchiveVersion) {
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    features.header_encryption = true;
+    let options = WriterOptions { target, features };
+
+    let stored = StoredEntry {
+        name: b"rar30-header-split-secret-store.bin",
+        data: b"header encrypted stored split data repeats repeats",
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: Some(b"password"),
+        file_comment: None,
+    };
+    let stored_parts = write_stored_volumes(stored, options, 10).unwrap();
+    assert!(matches!(
+        Archive::parse(&stored_parts[0]),
+        Err(Error::NeedPassword)
+    ));
+    let stored_archives: Vec<_> = stored_parts
+        .iter()
+        .map(|part| Archive::parse_with_password(part, Some(b"password")).unwrap())
+        .collect();
+    assert!(stored_archives[0].main.has_encrypted_headers());
+    assert!(stored_archives[0].files().next().unwrap().is_encrypted());
+    assert!(matches!(
+        rars_format::rar15_40::extract_volumes_with_password(&stored_archives, Some(b"wrong")),
+        Err(Error::WrongPasswordOrCorruptData)
+    ));
+    let extracted =
+        rars_format::rar15_40::extract_volumes_with_password(&stored_archives, Some(b"password"))
+            .unwrap();
+    assert_eq!(extracted[0].data, stored.data);
+
+    let compressed = FileEntry {
+        name: b"rar30-header-split-secret-compressed.txt",
+        data: b"header encrypted compressed split data repeats repeats repeats\n",
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: Some(b"password"),
+        file_comment: None,
+    };
+    let compressed_parts = write_compressed_volumes(compressed, options, 8).unwrap();
+    assert!(matches!(
+        Archive::parse(&compressed_parts[0]),
+        Err(Error::NeedPassword)
+    ));
+    let compressed_archives: Vec<_> = compressed_parts
+        .iter()
+        .map(|part| Archive::parse_with_password(part, Some(b"password")).unwrap())
+        .collect();
+    assert!(compressed_archives[0].main.has_encrypted_headers());
     assert!(compressed_archives[0]
         .files()
         .next()

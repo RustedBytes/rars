@@ -80,12 +80,27 @@ Keep this section short. Detailed behavioural claims belong in tests.
   multivolumes, old-style archive comments, and RAR 1.5 per-file encryption
   including encrypted split volumes, are exposed through the public facade and
   CLI, with reader round-trip tests for small generated archives. RAR 2.0 has
-  baseline literal-only Unpack20 and Unpack29 compressed writers exposed
-  through the format crate, facade, and CLI; generated Unpack20 and Unpack29
-  archives are accepted by WinRAR/UnRAR 4.20. RAR 3.x/4.x has baseline
-  per-file AES writer support for stored and literal-only Unpack29 compressed
-  members, exposed through the format crate, facade, and CLI; generated RAR30
-  and RAR40 archives are accepted by WinRAR/UnRAR 4.20.
+  baseline Unpack20 and Unpack29 compressed writers exposed through the format
+  crate, facade, and CLI; they emit literals plus bounded hash-chain matches
+  for repeated byte runs and phrases. Current writer search windows are 1 MiB
+  for both Unpack20 and Unpack29, including offset-dependent match-length
+  compensation for long-distance slots, and generated Unpack20 and Unpack29
+  archives are accepted by
+  WinRAR/UnRAR 4.20. RAR 2.9 has baseline per-file AES writer support for
+  stored and literal-only Unpack29 compressed members, including encrypted
+  split volumes. RAR 3.x/4.x has baseline per-file AES writer support for
+  stored and literal-only Unpack29 compressed members with OS-randomized salts,
+  `MHD_PASSWORD` header-encrypted RAR30/RAR40 compressed archives, encrypted
+  and header-encrypted RAR30/RAR40 split volumes, RAR3 `NEWSUB` `CMT`
+  archive-comment records, solid
+  RAR29/RAR30/RAR40 compressed archives whose writer can match against prior
+  member history, and solid `MHD_PASSWORD` header-encrypted RAR30/RAR40
+  compressed archives, exposed through the format crate, facade, and CLI;
+  generated RAR30 and RAR40 archives are accepted by
+  WinRAR/UnRAR 4.20.
+- Codec-level writer coverage explicitly pins Unpack20 and Unpack29 match
+  finding against previous solid-member history, in addition to same-member
+  repeated-byte, repeated-sequence, and long-distance match cases.
 - Extraction is reader-backed for normal archive paths and avoids cloning packed
   payloads into parsed entries. Stored, compressed, and encrypted RAR 1.5-4.x
   volume sets stream through `extract_volumes_to`; encrypted split sets use a
@@ -105,10 +120,55 @@ Keep this section short. Detailed behavioural claims belong in tests.
   multivolume extraction. Encrypted service payloads are covered by a
   header-encrypted archive-comment fixture. RAR 7.x shared-format archives are
   handled through the RAR 5 reader, and the WinRAR 7 `-ams` archive metadata
-  main-extra record is parsed. RAR 5.0 has a baseline store-only writer
-  exposed through the format crate, facade, and CLI; generated archives are
-  accepted by WinRAR/UnRAR 7.21. True Unpack70 remains fixture-blocked because
-  it requires a >4 GiB dictionary input.
+  main-extra record is parsed. RAR 5.0 has a baseline store-only writer with
+  CRC32+BLAKE2sp file integrity records, per-file AES-256 encrypted stored
+  members with password-check and hash-MAC records, OS-randomized salts and IVs
+  covered for encrypted file payloads, encrypted services, `HEAD_CRYPT`
+  headers, and encrypted volumes, archive-comment `CMT` service records
+  including stored, compressed, encrypted compressed, and header-encrypted
+  compressed comments, archive metadata main-extra records including compressed,
+  encrypted, and header-encrypted archive outputs, stored Quick Open `QO`
+  service records with locator offsets
+  and CRC-wrapped cached headers, stored `ACL`/`STM` file-service headers, and
+  stored file-comment `CMT` service records including encrypted and
+  header-encrypted stored comments, and structural stored, compressed,
+  encrypted, and header-encrypted `RR` recovery service records with locator
+  offsets through the format crate, facade, and CLI,
+  archive-wide header encryption for stored encrypted members, and stored split
+  volumes with optional file encryption including header encryption, plus a
+  match-capable RAR5 compressed writer, including compressed split volumes,
+  encrypted compressed members, encrypted compressed volumes, header-encrypted
+  compressed archive/volume outputs, DELTA/E8/E8E9/ARM filter-control records
+  for compressed members, plain solid compressed archives, and
+  encrypted/header-encrypted solid compressed archives and solid compressed
+  volume sets, exposed through the format crate, facade, and CLI. Inline `RR`
+  recovery service records are emitted per volume for stored, compressed, and
+  encrypted split volume sets and are covered by format, CLI, and `rar t`
+  reference-script oracles. Header-encrypted recovery volumes remain gated off:
+  a local RAR 7.12 check rejected the first generated compressed
+  header-encrypted recovery volume after testing the file body. The current
+  RAR5 match
+  encoder covers same-member matches, repeat-distance matches, and plain
+  solid-history matches, including multi-file solid partitioning across split
+  volume sets. Non-QO generated archives and volume sets are accepted by
+  WinRAR/UnRAR 7.21; generated QO, compressed archive/volume, and
+  solid-compressed archive output, including DELTA/E8/E8E9/ARM-filtered compressed
+  archives, encrypted/header-encrypted solid compressed archives, solid volume
+  sets, ACL/STM file-service output, and CRC64-protected `{RB}` recovery
+  service chunks, including header-encrypted archives, is accepted by RAR 7.12.
+  Generated RR output now passes `rar t` recovery-record validation and repairs
+  stored and encrypted stored payload mutations spanning multiple recovery
+  shards under `rar r -y`.
+  The `rars-recovery` crate now contains the RAR 5 GF(2^16) field,
+  Cauchy encoder matrix, scalar parity-shard primitive, inline-RR shard
+  dimension planner, CRC64/XZ chunk checksum, prefix shard splitting, and
+  inline `{RB}` chunk construction with the per-data-shard raw CRC64 state
+  fields observed in WinRAR-authored output. The format writer now uses those
+  primitives instead of percent-sized zero placeholders. Remaining work is
+  broadening the repair oracle beyond the current stored and encrypted stored
+  payload mutation cases spanning multiple recovery shards.
+  True Unpack70 remains fixture-blocked because it
+  requires a >4 GiB dictionary input.
 
 ## Priority Backlog
 
@@ -193,8 +253,9 @@ Keep this section short. Detailed behavioural claims belong in tests.
   - Explicit WinRAR-authored stored-split and solid-across-volume fixtures are
     promoted into crate tests.
 - RAR 5 recovery metadata parsing is implemented for inline `RR` service
-  headers and RAR 5 `.rev` recovery volumes. Repair/reconstruction remains
-  deferred.
+  headers and RAR 5 `.rev` recovery volumes. Writer-side inline RR output now
+  has a stored-payload repair oracle; reader-side repair/reconstruction APIs and
+  REV-based reconstruction remain deferred.
 
 ### 3. Writer Work
 
@@ -208,16 +269,64 @@ Keep this section short. Detailed behavioural claims belong in tests.
   bytes are pinned.
 - Add later RAR 1.5-4.x writer families only where the corresponding read-side
   codec is already strong enough to validate the output:
-  - Improve the RAR 2.0/2.6 Unpack20 writer beyond the current literal-only
-    baseline: matches, solid mode, comments, volumes, and optional encryption.
-  - Improve the RAR 2.9/3.x Unpack29 writer beyond the current literal-only
-    baseline: matches, solid mode, PPMd, RARVM filter records, comments,
-    volumes, and optional encryption.
-  - Improve the RAR 3.x/4.x AES writer beyond the current per-file baseline:
-    encrypted volumes, randomized salts, and header-encrypted archives.
-- Improve the RAR 5 writer beyond the current store-only baseline: compressed
-  Unpack50 members, BLAKE2sp hash records, file encryption, header encryption,
-  comments/service records, volumes, and optional RAR7 target metadata.
+  - Improve the RAR 2.0/2.6 Unpack20 writer beyond the current literal plus
+    bounded hash-chain baseline: broader solid/table-boundary stress coverage.
+  - Improve the RAR 2.9/3.x Unpack29 writer beyond the current literal plus
+    bounded hash-chain baseline: PPMd and additional RARVM filter records.
+    The first RARVM writer slices emit whole-member standard AUDIO, DELTA, E8,
+    E8E9, ITANIUM, and RGB filter records for non-solid RAR 2.9/3.x/4.x
+    compressed archives, plus segmented AUDIO/DELTA/E8/E8E9/ITANIUM/RGB filter
+    placement. Whole-member and segmented records are accepted by WinRAR/UnRAR
+    3.00 and 4.20. The filtered writer also honors RAR 2.9/3.x/4.x solid
+    archive flags for multi-member outputs and per-file encrypted filtered
+    members, including RAR 3.x header-encrypted filtered archives. A
+    deterministic `AutoSize` writer path compares plain Unpack29 against
+    E8/E8E9 whole-member filters plus a bounded set of dense segmented x86
+    ranges, whole-member DELTA candidates for channel counts 1..4, and
+    whole-member AUDIO candidates for channel counts 1..4, plus whole-member
+    RGB candidates for a small set of common scanline byte widths and a
+    whole-member ITANIUM candidate, then keeps the smallest packed member.
+    Remaining work is broader filter placement with real heuristics for
+    segmented non-x86 ranges.
+  - Improve the RAR 3.x/4.x AES writer beyond the current baseline only when
+    new combinations are added. Current generated per-file encrypted,
+    encrypted split-volume, header-encrypted, header-encrypted split-volume,
+    and solid header-encrypted RAR30/RAR40 archives are accepted by
+    WinRAR/UnRAR 4.20.
+- Improve the RAR 5 writer beyond the current store/encrypted-store baseline:
+  real recovery repair data and fully repaired RR writer output.
+  The first recovery implementation slice is in `rars-recovery`: GF(2^16)
+  arithmetic with polynomial `0x1100b`, Cauchy encoder matrix construction,
+  byte-shard parity generation, the WinRAR 6.02 inline-RR dimension formula,
+  CRC64/XZ checksums, protected-prefix shard splitting, and structural `{RB}`
+  chunk construction, raw per-data-shard CRC64 state fields, and
+  `chunk_data_extent` are unit-tested or reference-checked. `rars-format` uses
+  this to emit real parity chunks for RAR5 RR service records; RAR 7.12 accepts
+  both normal and header-encrypted records in `rar t`, and `rar r -y` repairs
+  stored and encrypted stored payload damage spanning multiple recovery shards.
+  Remaining work is broader repair coverage across compressed payloads,
+  header-encrypted archives, split-volume payloads, and heavier damage within
+  the available recovery budget. A local RAR 7.12 probe against
+  RAR-authored compressed `-rr20` output found the recovery record but could
+  not repair the same packed-payload mutation pattern used by the stored oracle,
+  so compressed repair needs a more careful damage model before it can be used
+  as a rars correctness oracle.
+  WinRAR-authored chunks use one
+  shared final state across all `{RB}` chunks; the writer now does the same,
+  using the first parity shard's raw CRC64 state as the shared value because
+  RAR validates and repairs when the field is consistent.
+  The current compressed writer emits deterministic method-1 Unpack50 blocks
+  with bounded hash-chain matches. It is covered for single archives, split
+  volumes, encrypted compressed archives, encrypted compressed volumes,
+  header-encrypted compressed archives, header-encrypted compressed volumes,
+  DELTA/E8/E8E9/ARM-filtered compressed archives, compressed/encrypted/header-encrypted
+  compressed archives with `RR` service records, plain solid compressed archives,
+  encrypted/header-encrypted solid compressed archives, and single-entry plus
+  multi-file solid compressed volume sets by codec, format, facade, CLI, and
+  `rar t` reference-script oracles. A deterministic `AutoSize`
+  filter-selection policy hook tries the implemented fixed filters and keeps
+  the smallest packed member when it beats plain LZ. The next compression work
+  is richer policy tuning.
 - Keep byte-identical WinRAR output out of scope for baseline writers; expose
   policy hooks so better heuristics can be added without changing wire writers.
 
@@ -248,6 +357,19 @@ Keep this section short. Detailed behavioural claims belong in tests.
   `scripts/verify-fixtures.py` when adding or regenerating fixtures.
   For historical-reader coverage, run the optional verifier path with both
   the WinRAR/UnRAR 3.00 and 4.20 Wine prefixes.
+- Use `bash scripts/reference-rar5-writer.sh` when checking generated RAR 5
+  writer output against a local RAR/WinRAR command-line tool. It verifies
+  stored, Quick Open, encrypted, header-encrypted, and RR outputs with `rar t`.
+- Use `bash scripts/reference-rar5-recovery-repair.sh` for the current RAR5
+  repair oracle. It proves both RAR-authored and rars-authored stored and
+  encrypted stored archives with RR can repair payload damage spanning multiple
+  recovery shards.
+- Use `bash scripts/reference-rar29-rarvm-writer.sh` when checking generated
+  RAR 2.9 standard RARVM filter records against the local WinRAR/UnRAR 3.00
+  and 4.20 Wine prefixes.
+- Use `bash scripts/reference-rar3-aes-writer.sh` when checking generated
+  RAR 2.9/3.x/4.x AES file encryption, header encryption, and encrypted split
+  outputs against the local WinRAR/UnRAR 4.20 Wine prefix.
 - Add failing tests before changing format or codec behaviour.
 - Use `./scripts/coverage.sh` periodically; it writes HTML coverage to
   `target/coverage/html/index.html`.
@@ -258,6 +380,9 @@ Keep this section short. Detailed behavioural claims belong in tests.
   structure, but not a real registered-signature oracle.
 - AV writing.
 - SFX writer/stub generation.
-- Recovery repair, as distinct from recovery metadata parsing.
+- General recovery repair APIs, including RAR 5 REV reconstruction. The current
+  writer has narrow inline-RR repair oracles for stored and encrypted stored
+  payload damage spanning multiple recovery shards, but no public repair
+  command/API yet.
 - Byte-identical compressor heuristics: filter selection, match-finder tuning,
   solid reset thresholds, and exact block partitioning.

@@ -2,6 +2,7 @@ use crate::ppmd::{PpmdByteReader, PpmdDecoder};
 use crate::rarvm;
 use crate::{Error, Result};
 use std::io::{Read, Write};
+use std::ops::Range;
 
 const MAIN_COUNT: usize = 299;
 const OFFSET_COUNT: usize = 60;
@@ -34,6 +35,64 @@ const OFFSET_BITS: [u8; OFFSET_COUNT] = [
 ];
 const SHORT_BASES: [usize; 8] = [0, 4, 8, 16, 32, 64, 128, 192];
 const SHORT_BITS: [u8; 8] = [2, 2, 3, 4, 5, 6, 6, 6];
+const MAX_ENCODER_MATCH_OFFSET: usize = 1024 * 1024;
+const MAX_ENCODER_MATCH_LENGTH: usize = 258;
+const MATCH_HASH_BUCKETS: usize = 4096;
+const MAX_MATCH_CANDIDATES: usize = 256;
+const RAR3_E8_FILTER_BYTECODE: &[u8] = &[
+    0x97, 0x1b, 0x01, 0x28, 0x07, 0x06, 0x98, 0x08, 0x00, 0x00, 0x00, 0xd1, 0x3a, 0x10, 0x15, 0x92,
+    0xec, 0x50, 0xcb, 0x99, 0x20, 0xb9, 0x25, 0xf0, 0x29, 0x19, 0x15, 0x53, 0x03, 0x12, 0xae, 0x51,
+    0x10, 0x35, 0x59, 0x2b, 0x60, 0x04, 0x15, 0x6d, 0x40, 0x66, 0xab, 0x02, 0x34, 0x49, 0x04, 0x36,
+    0x02, 0x52, 0x3e, 0x97, 0x00,
+];
+const RAR3_E8E9_FILTER_BYTECODE: &[u8] = &[
+    0x84, 0x1b, 0x01, 0x28, 0x11, 0x10, 0x69, 0x80, 0x80, 0x00, 0x00, 0x0d, 0x13, 0xa1, 0x01, 0xc6,
+    0x89, 0xd2, 0x80, 0xac, 0x97, 0x62, 0x85, 0x5c, 0xc9, 0x05, 0xc9, 0x2f, 0x81, 0x48, 0xc8, 0xaa,
+    0x98, 0x18, 0x95, 0x72, 0x88, 0x81, 0xaa, 0xc9, 0x5b, 0x00, 0x20, 0xab, 0x6a, 0x03, 0x35, 0x58,
+    0x11, 0xa2, 0x48, 0x21, 0xb0, 0x12, 0x91, 0xf4, 0xb8,
+];
+const RAR3_DELTA_FILTER_BYTECODE: &[u8] = &[
+    0x2f, 0x01, 0x9a, 0x41, 0x80, 0xec, 0x27, 0x48, 0x2f, 0x09, 0x76, 0x6d, 0xd3, 0xea, 0x41, 0x5b,
+    0x59, 0x44, 0xe8, 0x17, 0x5c, 0xe1, 0x6c, 0x91, 0x4c, 0x4e, 0x3f, 0x77, 0x00,
+];
+const RAR3_ITANIUM_FILTER_BYTECODE: &[u8] = &[
+    0x46, 0x9e, 0x08, 0x08, 0x0c, 0x0c, 0x00, 0x00, 0x0e, 0x0e, 0x08, 0x08, 0x00, 0x00, 0x08, 0x08,
+    0x00, 0x00, 0x6c, 0x11, 0x5a, 0x04, 0xac, 0x0c, 0xc4, 0xcc, 0x5c, 0x08, 0x18, 0x46, 0x24, 0x08,
+    0xf9, 0xa0, 0x44, 0x25, 0x12, 0x12, 0x45, 0x85, 0x99, 0x0c, 0x14, 0x00, 0x26, 0x25, 0x58, 0x99,
+    0x90, 0x03, 0x38, 0x1a, 0x08, 0xdc, 0x02, 0x30, 0x0c, 0x4e, 0xd1, 0x1d, 0x89, 0xa1, 0xe2, 0xd0,
+    0x55, 0x11, 0x33, 0x60, 0x8c, 0x5a, 0x23, 0x06, 0xde, 0x06, 0x18, 0x00, 0x7f, 0xff, 0xfc, 0x4d,
+    0xcc, 0x19, 0x17, 0xb3, 0x06, 0xc4, 0x44, 0xb2, 0x32, 0x5a, 0x44, 0xc4, 0xa6, 0x01, 0xf4, 0x24,
+    0x88, 0x83, 0x38, 0xcc, 0xc4, 0x11, 0x09, 0x87, 0xa6, 0xe0, 0x46, 0x02, 0xb2, 0x24, 0x03, 0xe2,
+    0xa0, 0x32, 0x54, 0x83, 0x52, 0xc5, 0xb1, 0x70,
+];
+const RAR3_RGB_FILTER_BYTECODE: &[u8] = &[
+    0xc5, 0x01, 0x9a, 0x41, 0x95, 0xc9, 0xa6, 0x4d, 0xba, 0x4b, 0x14, 0x0a, 0xf4, 0x9b, 0x80, 0x4c,
+    0x00, 0x15, 0xa6, 0xa8, 0x07, 0x26, 0x2a, 0xc9, 0xc4, 0x8b, 0x86, 0x62, 0x32, 0x0f, 0x86, 0x64,
+    0x24, 0x06, 0x66, 0x71, 0x19, 0x98, 0xcc, 0x43, 0x33, 0x31, 0x99, 0x00, 0x66, 0x88, 0x33, 0x30,
+    0xcc, 0xd1, 0x0e, 0x98, 0x0b, 0x33, 0x34, 0x40, 0x0c, 0xd1, 0x46, 0x66, 0x19, 0x9a, 0x28, 0xcc,
+    0x49, 0x80, 0xb3, 0x33, 0x45, 0x00, 0xcd, 0x18, 0x66, 0x61, 0x99, 0xa3, 0x0c, 0xc8, 0x98, 0x0b,
+    0x33, 0x34, 0x60, 0x4c, 0xd1, 0x06, 0x68, 0xa5, 0x20, 0x62, 0x66, 0x88, 0x33, 0x46, 0x28, 0x05,
+    0x0f, 0x32, 0x0c, 0x4c, 0xd1, 0x46, 0x68, 0xc5, 0x00, 0x41, 0xe4, 0x8f, 0xc8, 0x85, 0x5e, 0x02,
+    0x7c, 0xc9, 0x26, 0x81, 0x83, 0xb0, 0x9d, 0xc2, 0xde, 0x9c, 0x78, 0xac, 0xd6, 0x68, 0xb4, 0x0e,
+    0x71, 0xdb, 0xb2, 0x49, 0x38, 0x6e, 0x02, 0x2a, 0x2c, 0x41, 0x2b, 0x10, 0x98, 0x82, 0x49, 0x03,
+    0x14, 0xf4, 0xe1, 0x97, 0x00,
+];
+const RAR3_AUDIO_FILTER_BYTECODE: &[u8] = &[
+    0x47, 0x01, 0x9a, 0x41, 0x95, 0xe5, 0x72, 0x0d, 0xc2, 0x64, 0x82, 0x74, 0x93, 0x24, 0xb1, 0x40,
+    0x06, 0xd8, 0x38, 0x44, 0x00, 0xa8, 0x01, 0x34, 0x11, 0xdc, 0xa1, 0xba, 0x01, 0x99, 0x0c, 0xc4,
+    0x03, 0x31, 0x19, 0xa4, 0x06, 0x66, 0x22, 0x60, 0x4d, 0x9a, 0x40, 0x0d, 0x66, 0x8e, 0x60, 0xd0,
+    0x30, 0x40, 0x18, 0x26, 0xc1, 0xc8, 0xf6, 0xe6, 0x26, 0x13, 0x78, 0x92, 0x08, 0xe8, 0x50, 0xbc,
+    0x5a, 0x07, 0xc6, 0xe9, 0xf5, 0x20, 0xa9, 0xa0, 0xed, 0x37, 0x33, 0x47, 0x39, 0x66, 0x90, 0x70,
+    0x19, 0xa3, 0x9b, 0xcf, 0x25, 0x83, 0x80, 0xc1, 0xbd, 0x30, 0x16, 0x6e, 0x23, 0x34, 0x93, 0x81,
+    0x16, 0x09, 0xb0, 0x50, 0x18, 0x3b, 0x4d, 0xc8, 0x4c, 0x05, 0x9b, 0x88, 0xc5, 0x28, 0xe0, 0x76,
+    0x93, 0x90, 0x98, 0x0b, 0x37, 0x11, 0x8a, 0x59, 0xc4, 0x80, 0x42, 0x48, 0x43, 0xa9, 0x47, 0xee,
+    0x43, 0x34, 0x60, 0x47, 0xd4, 0x4a, 0x0d, 0xbb, 0xd3, 0x59, 0xa4, 0x86, 0xee, 0x05, 0x09, 0x40,
+    0x26, 0xc9, 0x34, 0x24, 0x76, 0xa0, 0x30, 0x6a, 0x20, 0xea, 0x02, 0x20, 0x04, 0xa0, 0x41, 0x50,
+    0x9e, 0x50, 0x3f, 0xe6, 0xe1, 0x28, 0x94, 0x46, 0x01, 0xbd, 0x8b, 0x40, 0xf0, 0x68, 0x11, 0x36,
+    0xc9, 0xa1, 0x92, 0x38, 0x11, 0x41, 0x9c, 0xa8, 0x95, 0x10, 0xee, 0x50, 0x66, 0x2b, 0x00, 0x20,
+    0x95, 0x11, 0x04, 0x02, 0x62, 0xac, 0x66, 0x8c, 0x6a, 0xca, 0x26, 0x40, 0xb2, 0x67, 0x1b, 0x4b,
+    0x26, 0xcc, 0x64, 0x8a, 0x62, 0x71, 0xa2, 0xb8,
+];
 
 pub fn unpack29_decode(input: &[u8], output_size: usize) -> Result<Vec<u8>> {
     let mut decoder = Unpack29::new();
@@ -41,11 +100,243 @@ pub fn unpack29_decode(input: &[u8], output_size: usize) -> Result<Vec<u8>> {
 }
 
 pub fn unpack29_encode_literals(input: &[u8]) -> Result<Vec<u8>> {
+    encode_member(input, &[])
+}
+
+pub fn unpack29_encode_with_e8_filter(input: &[u8]) -> Result<Vec<u8>> {
+    unpack29_encode_with_x86_filter(input, false)
+}
+
+pub fn unpack29_encode_with_e8e9_filter(input: &[u8]) -> Result<Vec<u8>> {
+    unpack29_encode_with_x86_filter(input, true)
+}
+
+pub fn unpack29_encode_with_e8_filter_range(input: &[u8], range: Range<usize>) -> Result<Vec<u8>> {
+    unpack29_encode_with_x86_filter_range(input, range, false)
+}
+
+pub fn unpack29_encode_with_e8e9_filter_range(
+    input: &[u8],
+    range: Range<usize>,
+) -> Result<Vec<u8>> {
+    unpack29_encode_with_x86_filter_range(input, range, true)
+}
+
+pub fn unpack29_encode_with_delta_filter(input: &[u8], channels: usize) -> Result<Vec<u8>> {
+    unpack29_encode_with_delta_filter_range(input, 0..input.len(), channels)
+}
+
+pub fn unpack29_encode_with_delta_filter_range(
+    input: &[u8],
+    range: Range<usize>,
+    channels: usize,
+) -> Result<Vec<u8>> {
+    if range.start >= range.end || range.end > input.len() {
+        return Err(Error::InvalidData("RAR 2.9 VM filter range is invalid"));
+    }
+    let mut output = input.to_vec();
+    output[range.clone()].copy_from_slice(&delta_encode(&input[range.clone()], channels)?);
+    encode_member_with_initial_filter(
+        &output,
+        &[],
+        VmFilterRecord {
+            block_start: range.start,
+            block_size: range.end - range.start,
+            init_regs: &[(0, channels as u32)],
+            code: RAR3_DELTA_FILTER_BYTECODE,
+        },
+    )
+}
+
+pub fn unpack29_encode_with_itanium_filter(input: &[u8]) -> Result<Vec<u8>> {
+    unpack29_encode_with_itanium_filter_range(input, 0..input.len())
+}
+
+pub fn unpack29_encode_with_itanium_filter_range(
+    input: &[u8],
+    range: Range<usize>,
+) -> Result<Vec<u8>> {
+    if range.start >= range.end || range.end > input.len() {
+        return Err(Error::InvalidData("RAR 2.9 VM filter range is invalid"));
+    }
+    let mut filtered = input.to_vec();
+    itanium_encode(&mut filtered[range.clone()], range.start as u32);
+    encode_member_with_initial_filter(
+        &filtered,
+        &[],
+        VmFilterRecord {
+            block_start: range.start,
+            block_size: range.end - range.start,
+            init_regs: &[],
+            code: RAR3_ITANIUM_FILTER_BYTECODE,
+        },
+    )
+}
+
+pub fn unpack29_encode_with_rgb_filter(
+    input: &[u8],
+    width: usize,
+    pos_r: usize,
+) -> Result<Vec<u8>> {
+    unpack29_encode_with_rgb_filter_range(input, 0..input.len(), width, pos_r)
+}
+
+pub fn unpack29_encode_with_rgb_filter_range(
+    input: &[u8],
+    range: Range<usize>,
+    width: usize,
+    pos_r: usize,
+) -> Result<Vec<u8>> {
+    if range.start >= range.end || range.end > input.len() {
+        return Err(Error::InvalidData("RAR 2.9 VM filter range is invalid"));
+    }
+    let mut filtered = input.to_vec();
+    filtered[range.clone()].copy_from_slice(&rgb_encode(&input[range.clone()], width, pos_r)?);
+    let init_regs = if pos_r == 0 {
+        vec![(0, width as u32 + 3)]
+    } else {
+        vec![(0, width as u32 + 3), (1, pos_r as u32)]
+    };
+    encode_member_with_initial_filter(
+        &filtered,
+        &[],
+        VmFilterRecord {
+            block_start: range.start,
+            block_size: range.end - range.start,
+            init_regs: &init_regs,
+            code: RAR3_RGB_FILTER_BYTECODE,
+        },
+    )
+}
+
+pub fn unpack29_encode_with_audio_filter(input: &[u8], channels: usize) -> Result<Vec<u8>> {
+    unpack29_encode_with_audio_filter_range(input, 0..input.len(), channels)
+}
+
+pub fn unpack29_encode_with_audio_filter_range(
+    input: &[u8],
+    range: Range<usize>,
+    channels: usize,
+) -> Result<Vec<u8>> {
+    if range.start >= range.end || range.end > input.len() {
+        return Err(Error::InvalidData("RAR 2.9 VM filter range is invalid"));
+    }
+    let mut filtered = input.to_vec();
+    filtered[range.clone()].copy_from_slice(&audio_encode(&input[range.clone()], channels)?);
+    encode_member_with_initial_filter(
+        &filtered,
+        &[],
+        VmFilterRecord {
+            block_start: range.start,
+            block_size: range.end - range.start,
+            init_regs: &[(0, channels as u32)],
+            code: RAR3_AUDIO_FILTER_BYTECODE,
+        },
+    )
+}
+
+fn unpack29_encode_with_x86_filter(input: &[u8], include_e9: bool) -> Result<Vec<u8>> {
+    unpack29_encode_with_x86_filter_range(input, 0..input.len(), include_e9)
+}
+
+fn unpack29_encode_with_x86_filter_range(
+    input: &[u8],
+    range: Range<usize>,
+    include_e9: bool,
+) -> Result<Vec<u8>> {
+    if range.start >= range.end || range.end > input.len() {
+        return Err(Error::InvalidData("RAR 2.9 VM filter range is invalid"));
+    }
+    let mut filtered = input.to_vec();
+    e8e9_encode(&mut filtered[range.clone()], range.start as u32, include_e9);
+    let code = if include_e9 {
+        RAR3_E8E9_FILTER_BYTECODE
+    } else {
+        RAR3_E8_FILTER_BYTECODE
+    };
+    encode_member_with_initial_filter(
+        &filtered,
+        &[],
+        VmFilterRecord {
+            block_start: range.start,
+            block_size: range.end - range.start,
+            init_regs: &[],
+            code,
+        },
+    )
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Unpack29Encoder {
+    history: Vec<u8>,
+}
+
+impl Unpack29Encoder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn encode_member(&mut self, input: &[u8]) -> Result<Vec<u8>> {
+        let packed = encode_member(input, &self.history)?;
+        self.remember(input);
+        Ok(packed)
+    }
+
+    fn remember(&mut self, input: &[u8]) {
+        self.history.extend_from_slice(input);
+        let keep_from = self.history.len().saturating_sub(MAX_HISTORY);
+        if keep_from != 0 {
+            self.history.drain(..keep_from);
+        }
+    }
+}
+
+fn encode_member(input: &[u8], history: &[u8]) -> Result<Vec<u8>> {
+    encode_member_inner(input, history, None)
+}
+
+fn encode_member_with_initial_filter(
+    input: &[u8],
+    history: &[u8],
+    filter: VmFilterRecord<'_>,
+) -> Result<Vec<u8>> {
+    encode_member_inner(input, history, Some(filter))
+}
+
+fn encode_member_inner(
+    input: &[u8],
+    history: &[u8],
+    initial_filter: Option<VmFilterRecord<'_>>,
+) -> Result<Vec<u8>> {
+    let tokens = encode_tokens(input, history);
     let mut used_main = [false; MAIN_COUNT];
-    for &byte in input {
-        used_main[byte as usize] = true;
+    let mut used_match_slots = [false; LENGTH_COUNT];
+    let mut used_low_offsets = [false; LOW_OFFSET_COUNT];
+    if initial_filter.is_some() {
+        used_main[257] = true;
+    }
+    for token in &tokens {
+        match *token {
+            EncodeToken::Literal(byte) => used_main[byte as usize] = true,
+            EncodeToken::Match { length, offset } => {
+                let encoded_length = length.checked_sub(match_length_adjustment(offset)).ok_or(
+                    Error::InvalidData("RAR 2.9 adjusted match length underflows"),
+                )?;
+                let (slot, _) = length_slot_for_match(encoded_length)?;
+                let (offset_slot, offset_extra) = offset_slot_for_match(offset)?;
+                used_match_slots[slot] = true;
+                if offset_slot > 9 {
+                    used_low_offsets[offset_extra & 0x0f] = true;
+                }
+            }
+        }
     }
     used_main[256] = true;
+    for (slot, used) in used_match_slots.iter().enumerate() {
+        if *used {
+            used_main[271 + slot] = true;
+        }
+    }
     let main_symbol_count = used_main.iter().filter(|&&used| used).count();
     let main_len = literal_code_len(main_symbol_count)?;
 
@@ -53,6 +344,26 @@ pub fn unpack29_encode_literals(input: &[u8]) -> Result<Vec<u8>> {
     for (symbol, used) in used_main.iter().enumerate() {
         if *used {
             table_lengths[symbol] = main_len;
+        }
+    }
+    let mut used_offset_slots = [false; OFFSET_COUNT];
+    for token in &tokens {
+        if let EncodeToken::Match { offset, .. } = *token {
+            let (slot, _) = offset_slot_for_match(offset)?;
+            used_offset_slots[slot] = true;
+        }
+    }
+    for (slot, used) in used_offset_slots.iter().enumerate() {
+        if *used {
+            table_lengths[MAIN_COUNT + slot] = main_len;
+        }
+    }
+    if used_low_offsets.iter().all(|&used| !used) {
+        used_low_offsets[0] = true;
+    }
+    for (symbol, used) in used_low_offsets.iter().enumerate() {
+        if *used {
+            table_lengths[MAIN_COUNT + OFFSET_COUNT + symbol] = main_len;
         }
     }
 
@@ -73,11 +384,58 @@ pub fn unpack29_encode_literals(input: &[u8]) -> Result<Vec<u8>> {
         ))?;
         bits.write_bits(code.code as u32, code.len);
     }
-    for &byte in input {
-        let code = main_codes[byte as usize].ok_or(Error::InvalidData(
-            "RAR 2.9 encoder missing literal Huffman code",
+    let offset_codes = canonical_codes(&table_lengths[MAIN_COUNT..MAIN_COUNT + OFFSET_COUNT])?;
+    let low_offset_codes = canonical_codes(
+        &table_lengths[MAIN_COUNT + OFFSET_COUNT..MAIN_COUNT + OFFSET_COUNT + LOW_OFFSET_COUNT],
+    )?;
+    if let Some(filter) = initial_filter {
+        let code = main_codes[257].ok_or(Error::InvalidData(
+            "RAR 2.9 encoder missing VM filter Huffman code",
         ))?;
         bits.write_bits(code.code as u32, code.len);
+        for byte in encode_vm_filter_record(filter)? {
+            bits.write_bits(u32::from(byte), 8);
+        }
+    }
+    for token in tokens {
+        match token {
+            EncodeToken::Literal(byte) => {
+                let code = main_codes[byte as usize].ok_or(Error::InvalidData(
+                    "RAR 2.9 encoder missing literal Huffman code",
+                ))?;
+                bits.write_bits(code.code as u32, code.len);
+            }
+            EncodeToken::Match { length, offset } => {
+                let encoded_length = length.checked_sub(match_length_adjustment(offset)).ok_or(
+                    Error::InvalidData("RAR 2.9 adjusted match length underflows"),
+                )?;
+                let (slot, extra) = length_slot_for_match(encoded_length)?;
+                let code = main_codes[271 + slot].ok_or(Error::InvalidData(
+                    "RAR 2.9 encoder missing match Huffman code",
+                ))?;
+                bits.write_bits(code.code as u32, code.len);
+                if LENGTH_BITS[slot] != 0 {
+                    bits.write_bits(extra as u32, LENGTH_BITS[slot]);
+                }
+                let (offset_slot, offset_extra) = offset_slot_for_match(offset)?;
+                let offset = offset_codes[offset_slot].ok_or(Error::InvalidData(
+                    "RAR 2.9 encoder missing offset Huffman code",
+                ))?;
+                bits.write_bits(offset.code as u32, offset.len);
+                if offset_slot > 9 {
+                    let offset_bits = OFFSET_BITS[offset_slot];
+                    if offset_bits > 4 {
+                        bits.write_bits((offset_extra >> 4) as u32, offset_bits - 4);
+                    }
+                    let low_offset = low_offset_codes[offset_extra & 0x0f].ok_or(
+                        Error::InvalidData("RAR 2.9 encoder missing low-offset Huffman code"),
+                    )?;
+                    bits.write_bits(low_offset.code as u32, low_offset.len);
+                } else if OFFSET_BITS[offset_slot] != 0 {
+                    bits.write_bits(offset_extra as u32, OFFSET_BITS[offset_slot]);
+                }
+            }
+        }
     }
     let end = main_codes[256].ok_or(Error::InvalidData(
         "RAR 2.9 encoder missing end-of-block Huffman code",
@@ -85,6 +443,392 @@ pub fn unpack29_encode_literals(input: &[u8]) -> Result<Vec<u8>> {
     bits.write_bits(end.code as u32, end.len);
     bits.write_bit(true); // end member, no following table.
     Ok(bits.finish())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct VmFilterRecord<'a> {
+    block_start: usize,
+    block_size: usize,
+    init_regs: &'a [(usize, u32)],
+    code: &'a [u8],
+}
+
+fn encode_vm_filter_record(record: VmFilterRecord<'_>) -> Result<Vec<u8>> {
+    if record.block_size == 0 {
+        return Err(Error::InvalidData("RAR 2.9 VM filter block is empty"));
+    }
+    if record.code.is_empty() {
+        return Err(Error::InvalidData("RAR 2.9 VM filter bytecode is empty"));
+    }
+
+    let mut body = BitWriter::default();
+    body.write_encoded_u32(0);
+    body.write_encoded_u32(
+        u32::try_from(record.block_start)
+            .map_err(|_| Error::InvalidData("RAR 2.9 VM block start overflows"))?,
+    );
+    body.write_encoded_u32(
+        u32::try_from(record.block_size)
+            .map_err(|_| Error::InvalidData("RAR 2.9 VM block size overflows"))?,
+    );
+    if !record.init_regs.is_empty() {
+        let mut mask = 0u32;
+        for &(index, _) in record.init_regs {
+            if index >= 7 {
+                return Err(Error::InvalidData(
+                    "RAR 2.9 VM init register index is invalid",
+                ));
+            }
+            mask |= 1 << index;
+        }
+        body.write_bits(mask, 7);
+        for index in 0..7 {
+            if let Some((_, value)) = record.init_regs.iter().find(|(reg, _)| *reg == index) {
+                body.write_encoded_u32(*value);
+            }
+        }
+    }
+    body.write_encoded_u32(
+        u32::try_from(record.code.len())
+            .map_err(|_| Error::InvalidData("RAR 2.9 VM code size overflows"))?,
+    );
+    for &byte in record.code {
+        body.write_bits(u32::from(byte), 8);
+    }
+    let body = body.finish();
+
+    let mut out = Vec::new();
+    let mut first = 0x80 | 0x20;
+    if !record.init_regs.is_empty() {
+        first |= 0x10;
+    }
+    match body.len() {
+        1..=6 => first |= (body.len() as u8) - 1,
+        7..=262 => {
+            first |= 6;
+            out.push((body.len() - 7) as u8);
+        }
+        263..=65535 => {
+            first |= 7;
+            out.extend_from_slice(&(body.len() as u16).to_be_bytes());
+        }
+        _ => return Err(Error::InvalidData("RAR 2.9 VM filter record is too large")),
+    }
+    out.insert(0, first);
+    out.extend_from_slice(&body);
+    Ok(out)
+}
+
+fn e8e9_encode(data: &mut [u8], file_offset: u32, include_e9: bool) {
+    if data.len() <= 4 {
+        return;
+    }
+    let cmp_mask = if include_e9 { 0xfe } else { 0xff };
+    let mut cur_pos = 0usize;
+    while cur_pos < data.len() - 4 {
+        cur_pos += 1;
+        let opcode = data[cur_pos - 1];
+        if opcode & cmp_mask == 0xe8 {
+            let offset = file_offset.wrapping_add(cur_pos as u32);
+            let addr = u32::from_le_bytes([
+                data[cur_pos],
+                data[cur_pos + 1],
+                data[cur_pos + 2],
+                data[cur_pos + 3],
+            ]);
+            let candidate = addr.wrapping_add(offset);
+            if candidate < 0x0100_0000 {
+                data[cur_pos..cur_pos + 4].copy_from_slice(&candidate.to_le_bytes());
+            } else {
+                let candidate = addr.wrapping_sub(0x0100_0000);
+                if candidate & 0x8000_0000 != 0 && candidate.wrapping_add(offset) & 0x8000_0000 == 0
+                {
+                    data[cur_pos..cur_pos + 4].copy_from_slice(&candidate.to_le_bytes());
+                }
+            }
+            cur_pos += 4;
+        }
+    }
+}
+
+fn delta_encode(data: &[u8], channels: usize) -> Result<Vec<u8>> {
+    if channels == 0 || channels > 32 {
+        return Err(Error::InvalidData(
+            "RAR 2.9 DELTA filter channel count is invalid",
+        ));
+    }
+    let mut out = Vec::with_capacity(data.len());
+    for channel in 0..channels {
+        let mut prev = 0u8;
+        let mut src = channel;
+        while src < data.len() {
+            let byte = data[src];
+            out.push(prev.wrapping_sub(byte));
+            prev = byte;
+            src += channels;
+        }
+    }
+    Ok(out)
+}
+
+fn rgb_encode(data: &[u8], width: usize, pos_r: usize) -> Result<Vec<u8>> {
+    if data.len() < 3 || width == 0 || !width.is_multiple_of(3) || width > data.len() || pos_r > 2 {
+        return Err(Error::InvalidData(
+            "RAR 2.9 RGB filter parameters are invalid",
+        ));
+    }
+    let mut work = data.to_vec();
+    for i in (pos_r..work.len().saturating_sub(2)).step_by(3) {
+        let green = work[i + 1];
+        work[i] = work[i].wrapping_sub(green);
+        work[i + 2] = work[i + 2].wrapping_sub(green);
+    }
+
+    let mut out = Vec::with_capacity(data.len());
+    for channel in 0..3 {
+        let mut prev = 0u8;
+        let mut i = channel;
+        while i < work.len() {
+            let predicted = if i >= width + 3 {
+                rgb_predict(prev, work[i - width], work[i - width - 3])
+            } else {
+                prev
+            };
+            let byte = work[i];
+            out.push(predicted.wrapping_sub(byte));
+            prev = byte;
+            i += 3;
+        }
+    }
+    Ok(out)
+}
+
+fn audio_encode(data: &[u8], channels: usize) -> Result<Vec<u8>> {
+    if channels == 0 || channels > 32 {
+        return Err(Error::InvalidData(
+            "RAR 2.9 AUDIO filter channel count is invalid",
+        ));
+    }
+    let mut out = Vec::with_capacity(data.len());
+    for channel in 0..channels {
+        let mut prev_byte = 0u32;
+        let mut prev_delta = 0i32;
+        let mut d1 = 0i32;
+        let mut d2 = 0i32;
+        let mut k1 = 0i32;
+        let mut k2 = 0i32;
+        let mut k3 = 0i32;
+        let mut dif = [0u32; 7];
+        let mut byte_count = 0usize;
+        let mut i = channel;
+        while i < data.len() {
+            let d3 = d2;
+            d2 = prev_delta - d1;
+            d1 = prev_delta;
+            let predicted = ((8 * prev_byte as i32 + k1 * d1 + k2 * d2 + k3 * d3) >> 3) & 0xff;
+            let decoded = data[i];
+            let encoded = (predicted as u8).wrapping_sub(decoded);
+            out.push(encoded);
+            prev_delta = decoded.wrapping_sub(prev_byte as u8) as i8 as i32;
+            prev_byte = decoded as u32;
+            let d = (encoded as i8 as i32) << 3;
+            dif[0] += d.unsigned_abs();
+            dif[1] += (d - d1).unsigned_abs();
+            dif[2] += (d + d1).unsigned_abs();
+            dif[3] += (d - d2).unsigned_abs();
+            dif[4] += (d + d2).unsigned_abs();
+            dif[5] += (d - d3).unsigned_abs();
+            dif[6] += (d + d3).unsigned_abs();
+            if byte_count & 0x1f == 0 {
+                let mut min = dif[0];
+                let mut min_index = 0usize;
+                dif[0] = 0;
+                for (index, value) in dif.iter_mut().enumerate().skip(1) {
+                    if *value < min {
+                        min = *value;
+                        min_index = index;
+                    }
+                    *value = 0;
+                }
+                match min_index {
+                    1 if k1 >= -16 => k1 -= 1,
+                    2 if k1 < 16 => k1 += 1,
+                    3 if k2 >= -16 => k2 -= 1,
+                    4 if k2 < 16 => k2 += 1,
+                    5 if k3 >= -16 => k3 -= 1,
+                    6 if k3 < 16 => k3 += 1,
+                    _ => {}
+                }
+            }
+            byte_count += 1;
+            i += channels;
+        }
+    }
+    Ok(out)
+}
+
+fn itanium_encode(data: &mut [u8], file_offset: u32) {
+    if data.len() <= 21 {
+        return;
+    }
+    let mut file_offset = file_offset >> 4;
+    let data_size = ((data.len() as u32 - 21 + 15) >> 4) + file_offset;
+    let mut pos = 0usize;
+    while file_offset != data_size {
+        let mut mask = (0x334b_0000u32 >> (data[pos] & 0x1e)) & 3;
+        if mask != 0 {
+            mask += 1;
+            while mask <= 4 {
+                let p = pos + (mask as usize * 5 - 8);
+                if ((data[p + 3] >> mask) & 15) == 5 {
+                    let raw = u32::from_le_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]]);
+                    let mut value = raw >> mask;
+                    value = value.wrapping_add(file_offset) & 0x000f_ffff;
+                    let raw = (raw & !(0x000f_ffff << mask)) | (value << mask);
+                    data[p..p + 4].copy_from_slice(&raw.to_le_bytes());
+                }
+                mask += 1;
+            }
+        }
+        pos += 16;
+        file_offset += 1;
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum EncodeToken {
+    Literal(u8),
+    Match { length: usize, offset: usize },
+}
+
+fn encode_tokens(input: &[u8], history: &[u8]) -> Vec<EncodeToken> {
+    let mut tokens = Vec::new();
+    let mut buckets = vec![Vec::new(); MATCH_HASH_BUCKETS];
+    let history = &history[history.len().saturating_sub(MAX_ENCODER_MATCH_OFFSET)..];
+    let mut combined = Vec::with_capacity(history.len() + input.len());
+    combined.extend_from_slice(history);
+    combined.extend_from_slice(input);
+    for history_pos in 0..history.len().saturating_sub(2) {
+        insert_match_position(&combined, history_pos, &mut buckets);
+    }
+
+    let mut pos = history.len();
+    let end = combined.len();
+    while pos < end {
+        if let Some((length, offset)) = best_match(&combined, pos, end, &buckets) {
+            tokens.push(EncodeToken::Match { length, offset });
+            for history_pos in pos..pos + length {
+                insert_match_position(&combined, history_pos, &mut buckets);
+            }
+            pos += length;
+        } else {
+            tokens.push(EncodeToken::Literal(combined[pos]));
+            insert_match_position(&combined, pos, &mut buckets);
+            pos += 1;
+        }
+    }
+    tokens
+}
+
+fn best_match(
+    input: &[u8],
+    pos: usize,
+    end: usize,
+    buckets: &[Vec<usize>],
+) -> Option<(usize, usize)> {
+    let max_offset = pos.min(MAX_ENCODER_MATCH_OFFSET);
+    let max_length = (end - pos).min(MAX_ENCODER_MATCH_LENGTH);
+    if max_offset == 0 || max_length < 4 || pos + 2 >= input.len() {
+        return None;
+    }
+    let bucket = &buckets[match_hash(input, pos)];
+    let mut best = None;
+    let mut checked = 0usize;
+    for &candidate in bucket.iter().rev() {
+        if candidate >= pos {
+            continue;
+        }
+        let offset = pos - candidate;
+        if offset > max_offset {
+            break;
+        }
+        checked += 1;
+        let mut length = 0usize;
+        while length < max_length && input[pos + length] == input[pos + length - offset] {
+            length += 1;
+        }
+        let encodable = length >= 4 + match_length_adjustment(offset);
+        if encodable
+            && best.is_none_or(|(best_length, best_offset)| {
+                length > best_length || (length == best_length && offset < best_offset)
+            })
+        {
+            best = Some((length, offset));
+            if length == max_length {
+                break;
+            }
+        }
+        if checked >= MAX_MATCH_CANDIDATES {
+            break;
+        }
+    }
+    best
+}
+
+fn match_length_adjustment(offset: usize) -> usize {
+    usize::from(offset >= 0x2000) + usize::from(offset >= 0x40000)
+}
+
+fn insert_match_position(input: &[u8], pos: usize, buckets: &mut [Vec<usize>]) {
+    if pos + 2 < input.len() {
+        buckets[match_hash(input, pos)].push(pos);
+    }
+}
+
+fn match_hash(input: &[u8], pos: usize) -> usize {
+    let value =
+        ((input[pos] as usize) << 8) ^ ((input[pos + 1] as usize) << 4) ^ input[pos + 2] as usize;
+    value & (MATCH_HASH_BUCKETS - 1)
+}
+
+fn length_slot_for_match(length: usize) -> Result<(usize, usize)> {
+    if length < 3 {
+        return Err(Error::InvalidData("RAR 2.9 match length is too short"));
+    }
+    let adjusted = length - 3;
+    for (slot, &base) in LENGTH_BASES.iter().enumerate() {
+        let extra_bits = LENGTH_BITS[slot];
+        let max = base
+            + if extra_bits == 0 {
+                0
+            } else {
+                (1usize << extra_bits) - 1
+            };
+        if adjusted >= base && adjusted <= max {
+            return Ok((slot, adjusted - base));
+        }
+    }
+    Err(Error::InvalidData("RAR 2.9 match length is too long"))
+}
+
+fn offset_slot_for_match(offset: usize) -> Result<(usize, usize)> {
+    if offset == 0 {
+        return Err(Error::InvalidData("RAR 2.9 match offset is zero"));
+    }
+    let adjusted = offset - 1;
+    for (slot, &base) in OFFSET_BASES.iter().enumerate() {
+        let extra_bits = OFFSET_BITS[slot];
+        let max = base
+            + if extra_bits == 0 {
+                0
+            } else {
+                (1usize << extra_bits) - 1
+            };
+        if adjusted >= base && adjusted <= max {
+            return Ok((slot, adjusted - base));
+        }
+    }
+    Err(Error::InvalidData("RAR 2.9 match offset is too large"))
 }
 
 fn literal_code_len(symbol_count: usize) -> Result<u8> {
@@ -1194,6 +1938,23 @@ impl BitWriter {
         }
     }
 
+    fn write_encoded_u32(&mut self, value: u32) {
+        if value < 16 {
+            self.write_bits(0, 2);
+            self.write_bits(value, 4);
+        } else if value < 256 {
+            self.write_bits(1, 2);
+            self.write_bits(value, 8);
+        } else if value <= 0xffff {
+            self.write_bits(2, 2);
+            self.write_bits(value, 16);
+        } else {
+            self.write_bits(3, 2);
+            self.write_bits(value >> 16, 16);
+            self.write_bits(value & 0xffff, 16);
+        }
+    }
+
     fn write_bit(&mut self, bit: bool) {
         if self.bit_pos.is_multiple_of(8) {
             self.bytes.push(0);
@@ -1338,7 +2099,7 @@ fn delta_decode(data: &[u8], channels: usize) -> Result<Vec<u8>> {
 }
 
 fn rgb_decode(data: &[u8], width: usize, pos_r: usize) -> Result<Vec<u8>> {
-    if data.len() < 3 || width > data.len() || pos_r > 2 {
+    if data.len() < 3 || width == 0 || !width.is_multiple_of(3) || width > data.len() || pos_r > 2 {
         return Err(Error::InvalidData(
             "RAR 2.9 RGB filter parameters are invalid",
         ));
@@ -1350,19 +2111,7 @@ fn rgb_decode(data: &[u8], width: usize, pos_r: usize) -> Result<Vec<u8>> {
         let mut i = channel;
         while i < data.len() {
             let predicted = if i >= width + 3 {
-                let upper_left = out[i - width];
-                let upper = out[i - width + 3];
-                let pred = prev.wrapping_add(upper).wrapping_sub(upper_left);
-                let pa = (pred as i16 - prev as i16).abs();
-                let pb = (pred as i16 - upper as i16).abs();
-                let pc = (pred as i16 - upper_left as i16).abs();
-                if pa <= pb && pa <= pc {
-                    prev
-                } else if pb <= pc {
-                    upper
-                } else {
-                    upper_left
-                }
+                rgb_predict(prev, out[i - width], out[i - width - 3])
             } else {
                 prev
             };
@@ -1381,6 +2130,20 @@ fn rgb_decode(data: &[u8], width: usize, pos_r: usize) -> Result<Vec<u8>> {
         out[i + 2] = out[i + 2].wrapping_add(green);
     }
     Ok(out)
+}
+
+fn rgb_predict(prev: u8, upper: u8, upper_left: u8) -> u8 {
+    let predicted = i32::from(prev) + i32::from(upper) - i32::from(upper_left);
+    let pa = (predicted - i32::from(prev)).abs();
+    let pb = (predicted - i32::from(upper)).abs();
+    let pc = (predicted - i32::from(upper_left)).abs();
+    if pa <= pb && pa <= pc {
+        prev
+    } else if pb <= pc {
+        upper
+    } else {
+        upper_left
+    }
 }
 
 fn audio_decode(data: &[u8], channels: usize) -> Result<Vec<u8>> {
@@ -1463,8 +2226,14 @@ mod tests {
     use crate::rarvm::{Instruction, Opcode, Operand, Program};
 
     use super::{
-        unpack29_decode, unpack29_encode_literals, StandardFilter, Unpack29, VmFilter, VmProgram,
-        VmProgramKind,
+        encode_tokens, unpack29_decode, unpack29_encode_literals,
+        unpack29_encode_with_audio_filter, unpack29_encode_with_audio_filter_range,
+        unpack29_encode_with_delta_filter, unpack29_encode_with_delta_filter_range,
+        unpack29_encode_with_e8_filter, unpack29_encode_with_e8_filter_range,
+        unpack29_encode_with_e8e9_filter, unpack29_encode_with_e8e9_filter_range,
+        unpack29_encode_with_itanium_filter, unpack29_encode_with_itanium_filter_range,
+        unpack29_encode_with_rgb_filter, unpack29_encode_with_rgb_filter_range, EncodeToken,
+        StandardFilter, Unpack29, Unpack29Encoder, VmFilter, VmProgram, VmProgramKind,
     };
 
     const COMPRESSED_TEXT: &[u8] = &[
@@ -1488,6 +2257,216 @@ mod tests {
         let packed = unpack29_encode_literals(input).unwrap();
 
         assert_eq!(unpack29_decode(&packed, input.len()).unwrap(), input);
+    }
+
+    #[test]
+    fn encoder_emits_rar29_offset_one_matches_for_repeated_bytes() {
+        let input = b"Z".repeat(1024);
+        let packed = unpack29_encode_literals(&input).unwrap();
+
+        assert!(packed.len() < input.len() / 4);
+        assert_eq!(unpack29_decode(&packed, input.len()).unwrap(), input);
+    }
+
+    #[test]
+    fn encoder_emits_rar29_dictionary_matches_for_repeated_sequences() {
+        let input = b"abc123xyz-".repeat(128);
+        let packed = unpack29_encode_literals(&input).unwrap();
+
+        assert!(packed.len() < input.len() / 2);
+        assert_eq!(unpack29_decode(&packed, input.len()).unwrap(), input);
+    }
+
+    #[test]
+    fn encoder_finds_rar29_matches_beyond_near_offsets() {
+        let phrase = b"long-distance repeated phrase for rar29 low-offset coding.";
+        let mut input = Vec::new();
+        input.extend_from_slice(phrase);
+        input.extend(std::iter::repeat_n(0, 300 * 1024));
+        input.extend_from_slice(phrase);
+        input.extend_from_slice(phrase);
+        let tokens = encode_tokens(&input, &[]);
+        let packed = unpack29_encode_literals(&input).unwrap();
+
+        assert!(tokens.iter().any(|token| matches!(
+            token,
+            EncodeToken::Match { offset, .. } if *offset > 0x40000
+        )));
+        assert!(packed.len() < input.len());
+        let decoded = unpack29_decode(&packed, input.len()).unwrap();
+        assert!(
+            decoded == input,
+            "RAR 2.9 long-distance match round-trip failed"
+        );
+    }
+
+    #[test]
+    fn encoder_emits_rar29_e8_vm_filter_record() {
+        let input = b"\xe8\0\0\0\0rar29 e8 filter writer payload\n".repeat(8);
+        let packed = unpack29_encode_with_e8_filter(&input).unwrap();
+        let decoded = unpack29_decode(&packed, input.len()).unwrap();
+
+        assert_eq!(decoded, input);
+    }
+
+    #[test]
+    fn encoder_emits_rar29_e8e9_vm_filter_record() {
+        let input = b"\xe9\0\0\0\0rar29 e8e9 filter writer payload\n".repeat(8);
+        let packed = unpack29_encode_with_e8e9_filter(&input).unwrap();
+        let decoded = unpack29_decode(&packed, input.len()).unwrap();
+
+        assert_eq!(decoded, input);
+    }
+
+    #[test]
+    fn encoder_emits_rar29_segmented_e8_vm_filter_record() {
+        let mut input = b"prefix data that should not be x86 filtered ".to_vec();
+        let start = input.len();
+        input.extend_from_slice(b"\xe8\0\0\0\0segmented e8 filtered payload\n");
+        let end = input.len();
+        input.extend_from_slice(b" suffix data that should also remain raw");
+        let packed = unpack29_encode_with_e8_filter_range(&input, start..end).unwrap();
+        let decoded = unpack29_decode(&packed, input.len()).unwrap();
+
+        assert_eq!(decoded, input);
+    }
+
+    #[test]
+    fn encoder_emits_rar29_segmented_e8e9_vm_filter_record() {
+        let mut input = b"prefix data that should not be x86 filtered ".to_vec();
+        let start = input.len();
+        input.extend_from_slice(b"\xe9\0\0\0\0segmented e8e9 filtered payload\n");
+        let end = input.len();
+        input.extend_from_slice(b" suffix data that should also remain raw");
+        let packed = unpack29_encode_with_e8e9_filter_range(&input, start..end).unwrap();
+        let decoded = unpack29_decode(&packed, input.len()).unwrap();
+
+        assert_eq!(decoded, input);
+    }
+
+    #[test]
+    fn encoder_emits_rar29_delta_vm_filter_record() {
+        let input: Vec<u8> = (0..192).map(|index| (index * 13 + 7) as u8).collect();
+        let packed = unpack29_encode_with_delta_filter(&input, 3).unwrap();
+        let decoded = unpack29_decode(&packed, input.len()).unwrap();
+
+        assert_eq!(decoded, input);
+    }
+
+    #[test]
+    fn encoder_emits_rar29_segmented_delta_vm_filter_record() {
+        let mut input = b"prefix bytes before delta segment ".to_vec();
+        let start = input.len();
+        input.extend((0..192).map(|index| (index * 13 + 7) as u8));
+        let end = input.len();
+        input.extend_from_slice(b" suffix bytes after delta segment");
+        let packed = unpack29_encode_with_delta_filter_range(&input, start..end, 3).unwrap();
+        let decoded = unpack29_decode(&packed, input.len()).unwrap();
+
+        assert_eq!(decoded, input);
+    }
+
+    #[test]
+    fn encoder_emits_rar29_itanium_vm_filter_record() {
+        let mut input = vec![0u8; 48];
+        input[16] = 22;
+        input[21] = 20;
+        input.extend_from_slice(b"rar29 itanium filter writer payload\n");
+        let packed = unpack29_encode_with_itanium_filter(&input).unwrap();
+        let decoded = unpack29_decode(&packed, input.len()).unwrap();
+
+        assert_eq!(decoded, input);
+    }
+
+    #[test]
+    fn encoder_emits_rar29_segmented_itanium_vm_filter_record() {
+        let mut input = b"prefix bytes before itanium segment ".to_vec();
+        let start = input.len();
+        input.extend_from_slice(&[0; 48]);
+        input[start + 16] = 22;
+        input[start + 21] = 20;
+        input.extend_from_slice(b"rar29 segmented itanium filter writer payload\n");
+        let end = input.len();
+        input.extend_from_slice(b" suffix bytes after itanium segment");
+        let packed = unpack29_encode_with_itanium_filter_range(&input, start..end).unwrap();
+        let decoded = unpack29_decode(&packed, input.len()).unwrap();
+
+        assert_eq!(decoded, input);
+    }
+
+    #[test]
+    fn encoder_emits_rar29_rgb_vm_filter_record() {
+        let width = 12;
+        let input: Vec<u8> = (0..96).map(|index| (index * 29 + 11) as u8).collect();
+        let packed = unpack29_encode_with_rgb_filter(&input, width, 0).unwrap();
+        let decoded = unpack29_decode(&packed, input.len()).unwrap();
+
+        assert_eq!(decoded, input);
+    }
+
+    #[test]
+    fn encoder_emits_rar29_segmented_rgb_vm_filter_record() {
+        let width = 12;
+        let mut input = b"prefix bytes before rgb segment ".to_vec();
+        let start = input.len();
+        input.extend((0..96).map(|index| (index * 29 + 11) as u8));
+        let end = input.len();
+        input.extend_from_slice(b" suffix bytes after rgb segment");
+        let packed = unpack29_encode_with_rgb_filter_range(&input, start..end, width, 0).unwrap();
+        let decoded = unpack29_decode(&packed, input.len()).unwrap();
+
+        assert_eq!(decoded, input);
+    }
+
+    #[test]
+    fn encoder_rejects_rar29_rgb_filter_with_unaligned_scanline_width() {
+        let input: Vec<u8> = (0..96).map(|index| (index * 29 + 11) as u8).collect();
+        assert!(unpack29_encode_with_rgb_filter(&input, 8, 0).is_err());
+    }
+
+    #[test]
+    fn encoder_emits_rar29_audio_vm_filter_record() {
+        let input: Vec<u8> = (0..160)
+            .map(|index| (index * 7 + index / 3) as u8)
+            .collect();
+        let packed = unpack29_encode_with_audio_filter(&input, 2).unwrap();
+        let decoded = unpack29_decode(&packed, input.len()).unwrap();
+
+        assert_eq!(decoded, input);
+    }
+
+    #[test]
+    fn encoder_emits_rar29_segmented_audio_vm_filter_record() {
+        let mut input = b"prefix bytes before audio segment ".to_vec();
+        let start = input.len();
+        input.extend((0..160).map(|index| (index * 7 + index / 3) as u8));
+        let end = input.len();
+        input.extend_from_slice(b" suffix bytes after audio segment");
+        let packed = unpack29_encode_with_audio_filter_range(&input, start..end, 2).unwrap();
+        let decoded = unpack29_decode(&packed, input.len()).unwrap();
+
+        assert_eq!(decoded, input);
+    }
+
+    #[test]
+    fn solid_encoder_emits_rar29_matches_against_previous_member_history() {
+        let first = b"solid rar29 shared phrase alpha beta gamma ".repeat(4);
+        let second = b"solid rar29 shared phrase alpha beta gamma ".repeat(2);
+        let independent = unpack29_encode_literals(&second).unwrap();
+        let mut encoder = Unpack29Encoder::new();
+        let first_packed = encoder.encode_member(&first).unwrap();
+        let second_packed = encoder.encode_member(&second).unwrap();
+
+        assert!(second_packed.len() < independent.len());
+        let mut decoder = Unpack29::new();
+        assert_eq!(
+            decoder.decode_member(&first_packed, first.len()).unwrap(),
+            first
+        );
+        assert_eq!(
+            decoder.decode_member(&second_packed, second.len()).unwrap(),
+            second
+        );
     }
 
     #[test]
