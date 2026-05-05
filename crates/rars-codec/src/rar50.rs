@@ -1,3 +1,4 @@
+use crate::filters::{self, DeltaErrorMessages, FilterOp};
 use crate::{Error, Result};
 use std::io::Read;
 use std::ops::Range;
@@ -452,19 +453,22 @@ impl Rar50FilterSpec {
 
 fn filtered_lz_member(data: &[u8], filter: Rar50FilterSpec) -> Result<(Vec<u8>, EncodeFilter)> {
     let (filtered, filter_type, channels) = match filter.kind {
-        Rar50FilterKind::Delta { channels } => {
-            (delta_encode(data, channels)?, FilterType::Delta, channels)
-        }
-        Rar50FilterKind::E8 => {
-            let mut filtered = data.to_vec();
-            e8e9_encode(&mut filtered, 0, false);
-            (filtered, FilterType::E8, 0)
-        }
-        Rar50FilterKind::E8E9 => {
-            let mut filtered = data.to_vec();
-            e8e9_encode(&mut filtered, 0, true);
-            (filtered, FilterType::E8E9, 0)
-        }
+        Rar50FilterKind::Delta { channels } => (
+            filters::encode_with_messages(
+                FilterOp::Delta { channels },
+                data,
+                0,
+                rar50_delta_messages(),
+            )?,
+            FilterType::Delta,
+            channels,
+        ),
+        Rar50FilterKind::E8 => (filters::encode(FilterOp::E8, data, 0)?, FilterType::E8, 0),
+        Rar50FilterKind::E8E9 => (
+            filters::encode(FilterOp::E8E9, data, 0)?,
+            FilterType::E8E9,
+            0,
+        ),
         Rar50FilterKind::Arm => {
             let mut filtered = data.to_vec();
             arm_encode(&mut filtered, 0);
@@ -1332,121 +1336,23 @@ fn apply_filters(output: &mut [u8], filters: &[PendingFilter]) -> Result<()> {
             .ok_or(Error::InvalidData("RAR 5 filter range exceeds output"))?;
         match filter.filter_type {
             FilterType::Delta => {
-                let decoded = delta_decode(data, filter.channels)?;
+                let decoded = filters::delta_decode(data, filter.channels, rar50_delta_messages())?;
                 data.copy_from_slice(&decoded);
             }
-            FilterType::E8 => e8e9_decode(data, filter.start as u32, false),
-            FilterType::E8E9 => e8e9_decode(data, filter.start as u32, true),
+            FilterType::E8 => filters::e8e9_decode(data, filter.start as u32, false),
+            FilterType::E8E9 => filters::e8e9_decode(data, filter.start as u32, true),
             FilterType::Arm => arm_decode(data, filter.start as u32),
         }
     }
     Ok(())
 }
 
-fn e8e9_decode(data: &mut [u8], file_offset: u32, include_e9: bool) {
-    if data.len() <= 4 {
-        return;
+fn rar50_delta_messages() -> DeltaErrorMessages {
+    DeltaErrorMessages {
+        invalid_channels: "RAR 5 DELTA filter channel count is invalid",
+        zero_channels: "RAR 5 DELTA filter has zero channels",
+        truncated_source: "RAR 5 DELTA filter source is truncated",
     }
-    let cmp_mask = if include_e9 { 0xfe } else { 0xff };
-    let mut cur_pos = 0usize;
-    while cur_pos < data.len() - 4 {
-        cur_pos += 1;
-        let opcode = data[cur_pos - 1];
-        if opcode & cmp_mask == 0xe8 {
-            let offset = file_offset.wrapping_add(cur_pos as u32);
-            let addr = u32::from_le_bytes([
-                data[cur_pos],
-                data[cur_pos + 1],
-                data[cur_pos + 2],
-                data[cur_pos + 3],
-            ]);
-            let new_addr = if addr < 0x0100_0000 {
-                Some(addr.wrapping_sub(offset))
-            } else if addr & 0x8000_0000 != 0 && addr.wrapping_add(offset) & 0x8000_0000 == 0 {
-                Some(addr.wrapping_add(0x0100_0000))
-            } else {
-                None
-            };
-            if let Some(value) = new_addr {
-                data[cur_pos..cur_pos + 4].copy_from_slice(&value.to_le_bytes());
-            }
-            cur_pos += 4;
-        }
-    }
-}
-
-fn e8e9_encode(data: &mut [u8], file_offset: u32, include_e9: bool) {
-    if data.len() <= 4 {
-        return;
-    }
-    let cmp_mask = if include_e9 { 0xfe } else { 0xff };
-    let mut cur_pos = 0usize;
-    while cur_pos < data.len() - 4 {
-        cur_pos += 1;
-        let opcode = data[cur_pos - 1];
-        if opcode & cmp_mask == 0xe8 {
-            let offset = file_offset.wrapping_add(cur_pos as u32);
-            let addr = u32::from_le_bytes([
-                data[cur_pos],
-                data[cur_pos + 1],
-                data[cur_pos + 2],
-                data[cur_pos + 3],
-            ]);
-            let candidate = addr.wrapping_add(offset);
-            if candidate < 0x0100_0000 {
-                data[cur_pos..cur_pos + 4].copy_from_slice(&candidate.to_le_bytes());
-            } else {
-                let candidate = addr.wrapping_sub(0x0100_0000);
-                if candidate & 0x8000_0000 != 0 && candidate.wrapping_add(offset) & 0x8000_0000 == 0
-                {
-                    data[cur_pos..cur_pos + 4].copy_from_slice(&candidate.to_le_bytes());
-                }
-            }
-            cur_pos += 4;
-        }
-    }
-}
-
-fn delta_decode(data: &[u8], channels: usize) -> Result<Vec<u8>> {
-    if channels == 0 {
-        return Err(Error::InvalidData("RAR 5 DELTA filter has zero channels"));
-    }
-    let mut out = vec![0u8; data.len()];
-    let mut src = 0usize;
-    for channel in 0..channels {
-        let mut prev = 0u8;
-        let mut dest = channel;
-        while dest < out.len() {
-            let byte = *data
-                .get(src)
-                .ok_or(Error::InvalidData("RAR 5 DELTA filter source is truncated"))?;
-            prev = prev.wrapping_sub(byte);
-            out[dest] = prev;
-            src += 1;
-            dest += channels;
-        }
-    }
-    Ok(out)
-}
-
-fn delta_encode(data: &[u8], channels: usize) -> Result<Vec<u8>> {
-    if channels == 0 || channels > 32 {
-        return Err(Error::InvalidData(
-            "RAR 5 DELTA filter channel count is invalid",
-        ));
-    }
-    let mut out = Vec::with_capacity(data.len());
-    for channel in 0..channels {
-        let mut prev = 0u8;
-        let mut src = channel;
-        while src < data.len() {
-            let byte = data[src];
-            out.push(prev.wrapping_sub(byte));
-            prev = byte;
-            src += channels;
-        }
-    }
-    Ok(out)
 }
 
 fn arm_decode(data: &mut [u8], file_offset: u32) {

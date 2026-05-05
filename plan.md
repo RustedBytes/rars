@@ -268,6 +268,10 @@ Keep this section short. Detailed behavioural claims belong in tests.
   - Compressed split extraction is implemented for the promoted
     `multivol.part*.rar` fixture and preserves the Unpack50 decoder across the
     archive set.
+  - RAR5 extraction now uses a named decoder session to own the Unpack50
+    decoder and password context across single-archive and multivolume member
+    extraction, matching the RAR 1.5-4.x vocabulary for solid/stateful decode
+    without forcing a cross-version trait yet.
   - Compressed split extraction feeds a chained fragment reader into Unpack50
     instead of concatenating the packed stream first. Stored split entries
     stream fragments directly to the caller's writer while checking size,
@@ -393,6 +397,14 @@ Keep this section short. Detailed behavioural claims belong in tests.
   RAR5 facade tests exercise `Rar50Writer` or `Rar50VolumeWriter` directly
   rather than preserving private compatibility shims; keep new RAR5 writer
   tests grouped by behaviour rather than by helper method names.
+- Keep the filter abstraction at the semantic transform layer. `rars-codec`
+  shares the byte transforms for E8, E8E9, and DELTA through one internal
+  `FilterOp` path. Version-specific wire records remain separate: RAR29 emits
+  RARVM standard-filter records and keeps ITANIUM/RGB/AUDIO as RAR29-only
+  operations, while RAR5 emits filter-control records and keeps ARM as a
+  RAR5-only operation. Auto-filter policy is still per writer for now; any
+  future shared policy should lower into these version-specific record formats
+  rather than trying to unify the records themselves.
 - Continue enriching library errors with block type and broader operation
   context before treating the public API as stable. RAR 5 block parse errors
   already carry archive-relative offsets, and RAR 5 extraction errors carry
@@ -403,11 +415,12 @@ Keep this section short. Detailed behavioural claims belong in tests.
 - Consider deprecating Vec-returning extraction APIs once integration tests and
   examples primarily use streaming APIs.
 - Keep archive equality undefined unless a clear value semantics is needed.
-- The per-family `ExtractedEntry` and `ExtractedEntryMeta` types remain
-  duplicated for now because they are not driving the writer/API combinatorics,
-  but the duplication is real. Revisit a shared entry/meta model after writer
-  and reader option convergence, with version-specific metadata represented
-  deliberately rather than as a loose catch-all bucket.
+- The per-family `ExtractedEntry` and `ExtractedEntryMeta` types remain for
+  extraction compatibility, but the facade now exposes `Archive::members()` as
+  the common inspection view. It returns shared member metadata plus a typed
+  per-family detail enum, avoiding a loose catch-all bucket while keeping
+  common fields like size, attributes, encryption, storage, and split state in
+  one place.
 
 ### 5. Fixture And Coverage Work
 

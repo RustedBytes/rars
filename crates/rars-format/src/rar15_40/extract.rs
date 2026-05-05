@@ -1,4 +1,5 @@
 use super::*;
+use crate::volume_extract::{ChainedReader, SplitVolumeState, SplitVolumeStep};
 use std::cell::RefCell;
 use std::io::{Read, Write};
 use std::rc::Rc;
@@ -328,7 +329,7 @@ where
         return Err(Error::InvalidHeader("RAR 1.5 volume set is empty"));
     }
 
-    let mut pending: Option<PendingSplitRefs> = None;
+    let mut split = SplitVolumeState::new();
     let mut session = DecoderSession::new_with_password(
         volumes
             .first()
@@ -337,12 +338,8 @@ where
     );
     for (volume_index, archive) in volumes.iter().enumerate() {
         for (file_index, file) in archive.files().enumerate() {
-            match (
-                pending.is_some(),
-                file.is_split_before(),
-                file.is_split_after(),
-            ) {
-                (false, false, false) => {
+            match split.advance(file.is_split_before(), file.is_split_after()) {
+                SplitVolumeStep::Regular => {
                     let meta = file.metadata();
                     if meta.is_directory {
                         let _ = open(&meta)?;
@@ -358,27 +355,25 @@ where
                         }
                     }
                 }
-                (false, false, true) => {
+                SplitVolumeStep::Start => {
                     validate_split_fragment(file, password)?;
-                    pending = Some(PendingSplitRefs::new(file, volume_index, file_index));
+                    split.begin(PendingSplitRefs::new(file, volume_index, file_index));
                 }
-                (true, true, true) => {
-                    let current = pending.as_mut().expect("pending split");
+                SplitVolumeStep::Continue(current) => {
                     validate_split_continuation_refs(current, file, password)?;
                     current.append(file, volume_index, file_index);
                 }
-                (true, true, false) => {
-                    let mut completed = pending.take().expect("pending split");
+                SplitVolumeStep::Finish(mut completed) => {
                     validate_split_continuation_refs(&completed, file, password)?;
                     completed.append(file, volume_index, file_index);
                     completed.write_to(volumes, file, password, &mut session, &mut open)?;
                 }
-                (false, true, _) => {
+                SplitVolumeStep::MissingFirst => {
                     return Err(Error::InvalidHeader(
                         "RAR 1.5 split entry is missing its first part",
                     ));
                 }
-                (true, false, _) => {
+                SplitVolumeStep::Interrupted => {
                     return Err(Error::InvalidHeader(
                         "RAR 1.5 split entry is interrupted by a regular entry",
                     ));
@@ -387,7 +382,7 @@ where
         }
     }
 
-    if pending.is_some() {
+    if split.is_pending() {
         return Err(Error::InvalidHeader("RAR 1.5 split entry is incomplete"));
     }
 
@@ -565,7 +560,7 @@ impl PendingSplitRefs {
                 .ok_or(Error::InvalidHeader("RAR 1.5 split entry is missing"))?;
             readers.push(archive.range_reader(file.packed_range.clone())?);
         }
-        let reader = ChainedReader { readers, index: 0 };
+        let reader = ChainedReader::new(readers);
         if !self.encrypted {
             return Ok(Box::new(reader));
         }
@@ -579,24 +574,6 @@ impl PendingSplitRefs {
             password,
             self.salt,
         )?))
-    }
-}
-
-struct ChainedReader<'a> {
-    readers: Vec<Box<dyn Read + 'a>>,
-    index: usize,
-}
-
-impl Read for ChainedReader<'_> {
-    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
-        while let Some(reader) = self.readers.get_mut(self.index) {
-            let read = reader.read(out)?;
-            if read != 0 {
-                return Ok(read);
-            }
-            self.index += 1;
-        }
-        Ok(0)
     }
 }
 

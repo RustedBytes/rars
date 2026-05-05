@@ -29,12 +29,78 @@ pub struct ExtractedEntryMeta {
     pub is_directory: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ArchiveMember {
+    pub meta: ArchiveMemberMeta,
+    pub detail: ArchiveMemberDetail,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ArchiveMemberMeta {
+    pub family: ArchiveFamily,
+    pub name: Vec<u8>,
+    pub packed_size: u64,
+    pub unpacked_size: u64,
+    pub file_time: Option<u32>,
+    pub file_attr: u64,
+    pub host_os: Option<u64>,
+    pub is_directory: bool,
+    pub is_encrypted: bool,
+    pub is_stored: bool,
+    pub is_split_before: bool,
+    pub is_split_after: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ArchiveMemberDetail {
+    #[non_exhaustive]
+    Rar13 {
+        method: u8,
+        unpack_version: u8,
+        file_checksum: u16,
+        has_file_comment: bool,
+    },
+    #[non_exhaustive]
+    Rar15To40 {
+        method: u8,
+        unpack_version: u8,
+        crc32: u32,
+        solid: bool,
+        salt: Option<[u8; 8]>,
+        has_file_comment: bool,
+    },
+    #[non_exhaustive]
+    Rar50Plus {
+        compression_info: u64,
+        crc32: Option<u32>,
+        hash: Option<ArchiveMemberHash>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ArchiveMemberHash {
+    Blake2sp([u8; 32]),
+    Other { hash_type: u64, data: Vec<u8> },
+}
+
 impl Archive {
     pub fn family(&self) -> ArchiveFamily {
         match self {
             Self::Rar13(_) => ArchiveFamily::Rar13,
             Self::Rar15To40(_) => ArchiveFamily::Rar15To40,
             Self::Rar50Plus(_) => ArchiveFamily::Rar50Plus,
+        }
+    }
+
+    pub fn members(&self) -> Box<dyn Iterator<Item = ArchiveMember> + '_> {
+        match self {
+            Self::Rar13(archive) => Box::new(archive.entries.iter().map(rar13_member)),
+            Self::Rar15To40(archive) => Box::new(archive.files().map(rar15_40_member)),
+            Self::Rar50Plus(archive) => Box::new(archive.files().map(rar50_member)),
         }
     }
 
@@ -93,6 +159,96 @@ impl Archive {
             Self::Rar13(_) | Self::Rar15To40(_) => None,
             Self::Rar50Plus(archive) => Some(archive),
         }
+    }
+}
+
+fn rar13_member(entry: &rar13::Entry) -> ArchiveMember {
+    ArchiveMember {
+        meta: ArchiveMemberMeta {
+            family: ArchiveFamily::Rar13,
+            name: entry.name.clone(),
+            packed_size: u64::from(entry.header.pack_size),
+            unpacked_size: u64::from(entry.header.unp_size),
+            file_time: Some(entry.header.file_time),
+            file_attr: u64::from(entry.header.file_attr),
+            host_os: None,
+            is_directory: entry.is_directory(),
+            is_encrypted: entry.is_encrypted(),
+            is_stored: entry.is_stored(),
+            is_split_before: entry.is_split_before(),
+            is_split_after: entry.is_split_after(),
+        },
+        detail: ArchiveMemberDetail::Rar13 {
+            method: entry.header.method,
+            unpack_version: entry.header.unp_ver,
+            file_checksum: entry.header.file_crc,
+            has_file_comment: entry.has_file_comment(),
+        },
+    }
+}
+
+fn rar15_40_member(file: &rar15_40::FileHeader) -> ArchiveMember {
+    ArchiveMember {
+        meta: ArchiveMemberMeta {
+            family: ArchiveFamily::Rar15To40,
+            name: file.name.clone(),
+            packed_size: file.pack_size,
+            unpacked_size: file.unp_size,
+            file_time: Some(file.file_time),
+            file_attr: u64::from(file.attr),
+            host_os: Some(u64::from(file.host_os)),
+            is_directory: file.is_directory(),
+            is_encrypted: file.is_encrypted(),
+            is_stored: file.is_stored(),
+            is_split_before: file.is_split_before(),
+            is_split_after: file.is_split_after(),
+        },
+        detail: ArchiveMemberDetail::Rar15To40 {
+            method: file.method,
+            unpack_version: file.unp_ver,
+            crc32: file.file_crc,
+            solid: file.is_solid(),
+            salt: file.salt,
+            has_file_comment: file.has_file_comment(),
+        },
+    }
+}
+
+fn rar50_member(file: &rar50::FileHeader) -> ArchiveMember {
+    ArchiveMember {
+        meta: ArchiveMemberMeta {
+            family: ArchiveFamily::Rar50Plus,
+            name: file.name.clone(),
+            packed_size: file.packed_size(),
+            unpacked_size: file.unpacked_size,
+            file_time: file.mtime,
+            file_attr: file.attributes,
+            host_os: Some(file.host_os),
+            is_directory: file.is_directory(),
+            is_encrypted: file.encrypted,
+            is_stored: file.is_stored(),
+            is_split_before: file.is_split_before(),
+            is_split_after: file.is_split_after(),
+        },
+        detail: ArchiveMemberDetail::Rar50Plus {
+            compression_info: file.compression_info,
+            crc32: file.data_crc32,
+            hash: file.hash.as_ref().map(rar50_member_hash),
+        },
+    }
+}
+
+fn rar50_member_hash(hash: &rar50::FileHash) -> ArchiveMemberHash {
+    match hash.hash_type {
+        0 if hash.data.len() == 32 => {
+            let mut data = [0; 32];
+            data.copy_from_slice(&hash.data);
+            ArchiveMemberHash::Blake2sp(data)
+        }
+        _ => ArchiveMemberHash::Other {
+            hash_type: hash.hash_type,
+            data: hash.data.clone(),
+        },
     }
 }
 
@@ -549,6 +705,140 @@ mod tests {
         assert!(matches!(
             err,
             Error::UnsupportedVersion(ArchiveVersion::Rar15)
+        ));
+    }
+
+    #[test]
+    fn archive_members_exposes_rar13_common_metadata_and_typed_detail() {
+        let bytes = ArchiveWriter::new(ArchiveVersion::Rar14)
+            .unwrap()
+            .write_stored(&[rar13::StoredEntry {
+                name: b"old.txt",
+                data: b"old rar member",
+                file_time: 0x1234_5678,
+                file_attr: 0x20,
+                password: None,
+                file_comment: Some(b"note"),
+            }])
+            .unwrap();
+
+        let archive = ArchiveReader::read(&bytes).unwrap();
+        let members: Vec<_> = archive.members().collect();
+
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].meta.family, ArchiveFamily::Rar13);
+        assert_eq!(members[0].meta.name, b"old.txt");
+        assert_eq!(members[0].meta.packed_size, b"old rar member".len() as u64);
+        assert_eq!(
+            members[0].meta.unpacked_size,
+            b"old rar member".len() as u64
+        );
+        assert_eq!(members[0].meta.file_time, Some(0x1234_5678));
+        assert_eq!(members[0].meta.file_attr, 0x20);
+        assert_eq!(members[0].meta.host_os, None);
+        assert!(members[0].meta.is_stored);
+        assert!(!members[0].meta.is_encrypted);
+        assert!(!members[0].meta.is_split_before);
+        assert!(!members[0].meta.is_split_after);
+        assert!(matches!(
+            members[0].detail,
+            ArchiveMemberDetail::Rar13 {
+                method: 0,
+                unpack_version: _,
+                file_checksum: _,
+                has_file_comment: true,
+            }
+        ));
+    }
+
+    #[test]
+    fn archive_members_exposes_rar15_40_common_metadata_and_typed_detail() {
+        let mut features = FeatureSet::store_only();
+        features.file_comment = true;
+        let bytes = ArchiveWriter::new(ArchiveVersion::Rar29)
+            .unwrap()
+            .with_features(features)
+            .write_rar15_compressed(&[rar15_40::FileEntry {
+                name: b"newer.txt",
+                data: b"rar 2.9 member metadata",
+                file_time: 0x0102_0304,
+                file_attr: 0x20,
+                host_os: 2,
+                password: None,
+                file_comment: Some(b"rar29 note"),
+            }])
+            .unwrap();
+
+        let archive = ArchiveReader::read(&bytes).unwrap();
+        let members: Vec<_> = archive.members().collect();
+
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].meta.family, ArchiveFamily::Rar15To40);
+        assert_eq!(members[0].meta.name, b"newer.txt");
+        assert_eq!(
+            members[0].meta.unpacked_size,
+            b"rar 2.9 member metadata".len() as u64
+        );
+        assert_eq!(members[0].meta.file_time, Some(0x0102_0304));
+        assert_eq!(members[0].meta.file_attr, 0x20);
+        assert_eq!(members[0].meta.host_os, Some(2));
+        assert!(!members[0].meta.is_stored);
+        assert!(!members[0].meta.is_encrypted);
+        assert!(matches!(
+            members[0].detail,
+            ArchiveMemberDetail::Rar15To40 {
+                method: 0x33,
+                unpack_version: 29,
+                crc32: _,
+                solid: false,
+                salt: None,
+                has_file_comment: true,
+            }
+        ));
+    }
+
+    #[test]
+    fn archive_members_exposes_rar50_common_metadata_and_typed_detail() {
+        let bytes = ArchiveWriter::new(ArchiveVersion::Rar50)
+            .unwrap()
+            .rar50_writer()
+            .unwrap()
+            .stored_entries(&[rar50::StoredEntry {
+                name: b"five.txt",
+                data: b"rar 5 member metadata",
+                mtime: Some(0x1111_2222),
+                attributes: 0x1_0000_0020,
+                host_os: 3,
+            }])
+            .finish()
+            .unwrap();
+
+        let archive = ArchiveReader::read(&bytes).unwrap();
+        let members: Vec<_> = archive.members().collect();
+
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].meta.family, ArchiveFamily::Rar50Plus);
+        assert_eq!(members[0].meta.name, b"five.txt");
+        assert_eq!(
+            members[0].meta.packed_size,
+            b"rar 5 member metadata".len() as u64
+        );
+        assert_eq!(
+            members[0].meta.unpacked_size,
+            b"rar 5 member metadata".len() as u64
+        );
+        assert_eq!(members[0].meta.file_time, Some(0x1111_2222));
+        assert_eq!(members[0].meta.file_attr, 0x1_0000_0020);
+        assert_eq!(members[0].meta.host_os, Some(3));
+        assert!(members[0].meta.is_stored);
+        assert!(!members[0].meta.is_encrypted);
+        assert!(matches!(
+            members[0].detail,
+            ArchiveMemberDetail::Rar50Plus {
+                compression_info: _,
+                crc32: _,
+                hash: _,
+            }
         ));
     }
 

@@ -6,6 +6,8 @@ pub mod rar15_40;
 pub mod rar50;
 pub mod version;
 
+mod volume_extract;
+
 pub use detect::{detect_archive_family, find_archive_start, ArchiveSignature};
 pub use error::{Error, Result};
 pub use features::FeatureSet;
