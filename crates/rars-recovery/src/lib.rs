@@ -17,9 +17,11 @@ pub mod rar5 {
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum Error {
+        BadRecoveryChunk,
         OddShardSize,
         PlanOverflow,
         PrefixExceedsPlan,
+        TooManyDamagedShards,
         ShardSizeMismatch,
         TooManyShards,
         SingularElement,
@@ -225,6 +227,241 @@ pub mod rar5 {
     }
 
     #[derive(Debug, Clone)]
+    struct InlineRecoveryChunk {
+        plan: InlineRecoveryPlan,
+        protected_size: u64,
+        shard_index: usize,
+        data_shard_states: Vec<u64>,
+        parity: Vec<u8>,
+    }
+
+    pub fn repair_inline_recovery_prefix(
+        archive_prefix: &[u8],
+        recovery_data: &[u8],
+    ) -> Result<Vec<u8>> {
+        let chunks = parse_inline_recovery_chunks(recovery_data)?;
+        let first = chunks.first().ok_or(Error::BadRecoveryChunk)?;
+        let plan = first.plan;
+        if first.protected_size != archive_prefix.len() as u64 {
+            return Err(Error::BadRecoveryChunk);
+        }
+        if chunks.iter().any(|chunk| {
+            chunk.plan != plan
+                || chunk.protected_size != first.protected_size
+                || chunk.data_shard_states != first.data_shard_states
+        }) {
+            return Err(Error::BadRecoveryChunk);
+        }
+
+        let mut data_shards = split_prefix_shards(archive_prefix, plan)?;
+        let shard_ranges = split_prefix_shard_ranges(archive_prefix.len(), plan)?;
+        let damaged: Vec<usize> = shard_ranges
+            .iter()
+            .enumerate()
+            .filter_map(|(index, range)| {
+                (crc64_rar_state(&archive_prefix[range.clone()]) != first.data_shard_states[index])
+                    .then_some(index)
+            })
+            .collect();
+        if damaged.is_empty() {
+            return Ok(archive_prefix.to_vec());
+        }
+        if damaged.len() > chunks.len() {
+            return Err(Error::TooManyDamagedShards);
+        }
+
+        recover_damaged_shards(&mut data_shards, &damaged, &chunks[..damaged.len()])?;
+
+        let mut repaired = Vec::with_capacity(archive_prefix.len());
+        for (shard, range) in data_shards.iter().zip(shard_ranges) {
+            repaired.extend_from_slice(&shard[..range.len()]);
+        }
+        debug_assert_eq!(repaired.len(), archive_prefix.len());
+        Ok(repaired)
+    }
+
+    fn parse_inline_recovery_chunks(recovery_data: &[u8]) -> Result<Vec<InlineRecoveryChunk>> {
+        let mut chunks = Vec::new();
+        let mut offset = 0usize;
+        while offset < recovery_data.len() {
+            let chunk = parse_inline_recovery_chunk(&recovery_data[offset..])?;
+            let shard_size =
+                usize::try_from(chunk.plan.shard_size).map_err(|_| Error::PlanOverflow)?;
+            if shard_size == 0 {
+                return Err(Error::BadRecoveryChunk);
+            }
+            chunks.push(chunk);
+            offset = offset.checked_add(shard_size).ok_or(Error::PlanOverflow)?;
+        }
+        Ok(chunks)
+    }
+
+    fn parse_inline_recovery_chunk(input: &[u8]) -> Result<InlineRecoveryChunk> {
+        if input.len() < 0x48 || &input[..4] != b"{RB}" {
+            return Err(Error::BadRecoveryChunk);
+        }
+        let total_size = read_u32(input, 0x0c)? as u64;
+        let header_size = read_u32(input, 0x10)? as u64;
+        if header_size < RAR5_RECOVERY_CHUNK_FIXED_HEADER_SIZE || header_size > total_size {
+            return Err(Error::BadRecoveryChunk);
+        }
+        let total_size_usize = usize::try_from(total_size).map_err(|_| Error::PlanOverflow)?;
+        let header_size_usize = usize::try_from(header_size).map_err(|_| Error::PlanOverflow)?;
+        if input.len() < total_size_usize {
+            return Err(Error::BadRecoveryChunk);
+        }
+        let expected_crc = read_u64(input, 0x04)?;
+        let actual_crc = crc64_xz(&input[0x0c..total_size_usize]);
+        if actual_crc != expected_crc {
+            return Err(Error::BadRecoveryChunk);
+        }
+        if input[0x14] != 1 || input[0x15] != 1 {
+            return Err(Error::BadRecoveryChunk);
+        }
+
+        let protected_size = read_u64(input, 0x22)?;
+        let group_count = read_u64(input, 0x2a)?;
+        let shard_size = read_u64(input, 0x32)?;
+        let data_shards = u16::from_le_bytes(input[0x3a..0x3c].try_into().unwrap()) as u64;
+        let recovery_shards = u16::from_le_bytes(input[0x3c..0x3e].try_into().unwrap()) as u64;
+        let shard_index = u16::from_le_bytes(input[0x3e..0x40].try_into().unwrap()) as usize;
+        let plan = InlineRecoveryPlan {
+            data_shards,
+            recovery_shards,
+            group_count,
+            header_size,
+            shard_size,
+        };
+        if plan.payload_size()?
+            != recovery_shards
+                .checked_mul(shard_size)
+                .ok_or(Error::PlanOverflow)?
+            || shard_size != total_size
+            || shard_index >= recovery_shards as usize
+            || header_size_usize != 0x48 + data_shards as usize * 8
+            || total_size_usize < header_size_usize
+        {
+            return Err(Error::BadRecoveryChunk);
+        }
+
+        let mut data_shard_states = Vec::with_capacity(data_shards as usize);
+        let mut pos = 0x40;
+        for _ in 0..data_shards {
+            data_shard_states.push(read_u64(input, pos)?);
+            pos += 8;
+        }
+        let _final_state = read_u64(input, pos)?;
+        let parity = input[header_size_usize..total_size_usize].to_vec();
+        if parity.len() as u64 != group_count {
+            return Err(Error::BadRecoveryChunk);
+        }
+        Ok(InlineRecoveryChunk {
+            plan,
+            protected_size,
+            shard_index,
+            data_shard_states,
+            parity,
+        })
+    }
+
+    fn recover_damaged_shards(
+        data_shards: &mut [Vec<u8>],
+        damaged: &[usize],
+        chunks: &[InlineRecoveryChunk],
+    ) -> Result<()> {
+        let data_count = data_shards.len();
+        let matrix = make_encoder_matrix(data_count, chunks[0].plan.recovery_shards as usize)?;
+        let equations: Vec<Vec<u16>> = chunks
+            .iter()
+            .map(|chunk| {
+                damaged
+                    .iter()
+                    .map(|&data_index| matrix[chunk.shard_index][data_index])
+                    .collect()
+            })
+            .collect();
+
+        let shard_len = data_shards.first().ok_or(Error::TooManyShards)?.len();
+        let gf = Gf16::new();
+        for word_offset in (0..shard_len).step_by(2) {
+            let mut rhs = Vec::with_capacity(chunks.len());
+            for chunk in chunks {
+                let mut value =
+                    u16::from_le_bytes([chunk.parity[word_offset], chunk.parity[word_offset + 1]]);
+                for (data_index, shard) in data_shards.iter().enumerate() {
+                    if damaged.contains(&data_index) {
+                        continue;
+                    }
+                    let data_symbol =
+                        u16::from_le_bytes([shard[word_offset], shard[word_offset + 1]]);
+                    value ^= gf.mul(matrix[chunk.shard_index][data_index], data_symbol);
+                }
+                rhs.push(value);
+            }
+            let solved = solve_linear_system(&gf, equations.clone(), rhs)?;
+            for (&data_index, &symbol) in damaged.iter().zip(&solved) {
+                data_shards[data_index][word_offset..word_offset + 2]
+                    .copy_from_slice(&symbol.to_le_bytes());
+            }
+        }
+        Ok(())
+    }
+
+    fn solve_linear_system(
+        gf: &Gf16,
+        mut matrix: Vec<Vec<u16>>,
+        mut rhs: Vec<u16>,
+    ) -> Result<Vec<u16>> {
+        let n = rhs.len();
+        if matrix.len() != n || matrix.iter().any(|row| row.len() != n) {
+            return Err(Error::BadRecoveryChunk);
+        }
+        for col in 0..n {
+            let pivot = (col..n)
+                .find(|&row| matrix[row][col] != 0)
+                .ok_or(Error::SingularElement)?;
+            matrix.swap(col, pivot);
+            rhs.swap(col, pivot);
+            let inv = gf.inv(matrix[col][col])?;
+            for value in &mut matrix[col][col..] {
+                *value = gf.mul(*value, inv);
+            }
+            rhs[col] = gf.mul(rhs[col], inv);
+
+            for row in 0..n {
+                if row == col {
+                    continue;
+                }
+                let factor = matrix[row][col];
+                if factor == 0 {
+                    continue;
+                }
+                for c in col..n {
+                    matrix[row][c] ^= gf.mul(factor, matrix[col][c]);
+                }
+                rhs[row] ^= gf.mul(factor, rhs[col]);
+            }
+        }
+        Ok(rhs)
+    }
+
+    fn read_u32(input: &[u8], offset: usize) -> Result<u32> {
+        input
+            .get(offset..offset + 4)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u32::from_le_bytes)
+            .ok_or(Error::BadRecoveryChunk)
+    }
+
+    fn read_u64(input: &[u8], offset: usize) -> Result<u64> {
+        input
+            .get(offset..offset + 8)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u64::from_le_bytes)
+            .ok_or(Error::BadRecoveryChunk)
+    }
+
+    #[derive(Debug, Clone)]
     pub struct Gf16 {
         exp: Box<[u16]>,
         log: Box<[u32]>,
@@ -331,8 +568,8 @@ pub mod rar5 {
         use super::{
             build_structural_inline_recovery_data, crc64_rar_state, crc64_xz,
             encode_inline_recovery_parity, encode_parity_shards, make_encoder_matrix,
-            plan_inline_recovery, split_prefix_shard_ranges, split_prefix_shards, Error, Gf16,
-            InlineRecoveryPlan,
+            plan_inline_recovery, repair_inline_recovery_prefix, split_prefix_shard_ranges,
+            split_prefix_shards, Error, Gf16, InlineRecoveryPlan,
         };
 
         #[test]
@@ -607,6 +844,46 @@ pub mod rar5 {
             assert_eq!(
                 encode_parity_shards(&[&[1, 2], &[3, 4, 5, 6]], 1),
                 Err(Error::ShardSizeMismatch)
+            );
+        }
+
+        #[test]
+        fn rar5_inline_recovery_repairs_single_damaged_data_shard() {
+            let prefix: Vec<u8> = (0..32_000).map(|index| (index * 17) as u8).collect();
+            let recovery_data = build_structural_inline_recovery_data(&prefix, 20).unwrap();
+            let mut damaged = prefix.clone();
+            damaged[1500..1537].fill(0xa5);
+
+            let repaired = repair_inline_recovery_prefix(&damaged, &recovery_data).unwrap();
+
+            assert_eq!(repaired, prefix);
+        }
+
+        #[test]
+        fn rar5_inline_recovery_repairs_multiple_damaged_data_shards() {
+            let prefix: Vec<u8> = (0..128_000).map(|index| (index * 31) as u8).collect();
+            let recovery_data = build_structural_inline_recovery_data(&prefix, 20).unwrap();
+            let mut damaged = prefix.clone();
+            damaged[100..500].fill(0x11);
+            damaged[4_000..4_400].fill(0x22);
+            damaged[9_000..9_400].fill(0x33);
+
+            let repaired = repair_inline_recovery_prefix(&damaged, &recovery_data).unwrap();
+
+            assert_eq!(repaired, prefix);
+        }
+
+        #[test]
+        fn rar5_inline_recovery_rejects_unrepairable_damage_count() {
+            let prefix = b"small prefix with only one parity shard".repeat(100);
+            let recovery_data = build_structural_inline_recovery_data(&prefix, 1).unwrap();
+            let mut damaged = prefix.clone();
+            damaged[0] ^= 0xff;
+            damaged[1024] ^= 0xff;
+
+            assert_eq!(
+                repair_inline_recovery_prefix(&damaged, &recovery_data),
+                Err(Error::TooManyDamagedShards)
             );
         }
     }

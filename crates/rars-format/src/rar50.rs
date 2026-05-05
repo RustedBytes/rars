@@ -506,6 +506,13 @@ impl Archive {
         }
     }
 
+    fn source_bytes(&self) -> Result<Vec<u8>> {
+        match &self.source {
+            ArchiveSource::Memory(data) => Ok(data.to_vec()),
+            ArchiveSource::File(path) => Ok(std::fs::read(path.as_ref())?),
+        }
+    }
+
     fn range_reader(&self, range: Range<usize>) -> Result<Box<dyn Read + '_>> {
         match &self.source {
             ArchiveSource::Memory(data) => {
@@ -532,6 +539,44 @@ impl Archive {
             Block::Service(service) => Some(service),
             _ => None,
         })
+    }
+
+    pub fn repair_inline_recovery(&self) -> Result<Vec<u8>> {
+        let recovery = self
+            .services()
+            .find(|service| matches!(service.recovery_record(), Ok(Some(_))))
+            .ok_or(Error::InvalidHeader(
+                "RAR 5 archive does not contain an inline recovery record",
+            ))?;
+        let source = self.source_bytes()?;
+        let prefix_start = self.sfx_offset;
+        let prefix_end = recovery
+            .block
+            .offset
+            .checked_sub(prefix_start)
+            .and_then(|relative| prefix_start.checked_add(relative))
+            .ok_or(Error::InvalidHeader(
+                "RAR 5 recovery prefix range overflows archive bounds",
+            ))?;
+        let prefix = source
+            .get(prefix_start..prefix_end)
+            .ok_or(Error::InvalidHeader(
+                "RAR 5 recovery prefix is out of bounds",
+            ))?;
+        let recovery_data = recovery
+            .extract(self)
+            .map_err(|error| error.at_entry(recovery.name.clone(), "reading recovery data"))?
+            .data;
+        let repaired_prefix =
+            rars_recovery::rar5::repair_inline_recovery_prefix(prefix, &recovery_data)?;
+        let mut repaired = source;
+        repaired
+            .get_mut(prefix_start..prefix_end)
+            .ok_or(Error::InvalidHeader(
+                "RAR 5 recovery prefix is out of bounds",
+            ))?
+            .copy_from_slice(&repaired_prefix);
+        Ok(repaired)
     }
 }
 

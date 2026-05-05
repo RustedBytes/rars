@@ -41,6 +41,7 @@ fn run() -> CliResult<()> {
         "info" => cmd_info(&rest),
         "test" => cmd_test(&rest),
         "x" => cmd_extract(&rest),
+        "repair" => cmd_repair(&rest),
         "a" => cmd_add(&rest),
         "-h" | "--help" | "help" => {
             usage();
@@ -300,6 +301,28 @@ fn cmd_extract(args: &[String]) -> CliResult<()> {
             println!("x {}", String::from_utf8_lossy(name));
         }
     }
+    Ok(())
+}
+
+fn cmd_repair(args: &[String]) -> CliResult<()> {
+    let (password, paths) = parse_password(args)?;
+    if paths.len() != 2 {
+        return Err(
+            "usage: rars repair [--password <password>] <archive> <repaired-archive>".into(),
+        );
+    }
+    let archive = ArchiveReader::read_path_with_options(
+        &paths[0],
+        ArchiveReadOptions {
+            password: password.as_deref(),
+        },
+    )
+    .map_err(|err| read_archive_error(&paths[0], err))?;
+    let repaired = archive
+        .repair_inline_recovery()
+        .map_err(|err| format!("failed to repair archive '{}': {err}", paths[0]))?;
+    fs::write(&paths[1], repaired)?;
+    println!("repaired {}", paths[1]);
     Ok(())
 }
 
@@ -1341,6 +1364,7 @@ fn usage() {
   rars info <archive>...
   rars test [--password <password>] <archive> [parts...]
   rars x [--password <password>] <archive> [parts...] <outdir>
+  rars repair [--password <password>] <archive> <repaired-archive>
   {ADD_USAGE}"
     );
 }

@@ -85,7 +85,9 @@ Keep this section short. Detailed behavioural claims belong in tests.
   service records, Quick Open, metadata extras, and RAR7 shared-format metadata.
   Writers cover stored and baseline compressed RAR5/RAR7 archives, encryption,
   header encryption, services, Quick Open, fixed filters, solid archives,
-  split volumes, and inline recovery records.
+  split volumes, and inline recovery records. RAR5 inline recovery repair can
+  reconstruct stored and encrypted stored payload damage through the public API
+  and CLI when the service header and recovery chunks are intact.
 - Normal archive extraction is reader-backed and streaming-first. Split-volume
   extraction uses shared split-state and chained-reader primitives. RAR 1.5-4.x
   and RAR5 both have named decoder sessions for stateful solid extraction.
@@ -111,8 +113,8 @@ Keep this section short. Detailed behavioural claims belong in tests.
 
 - True Unpack70 remains fixture-blocked. Commit this only when a practical
   >4 GiB dictionary fixture is worth carrying.
-- Add public reader-side recovery/repair APIs for RAR5 inline `RR` and `.rev`
-  recovery data. Metadata parsing exists; reconstruction does not.
+- Extend reader-side recovery repair beyond intact inline `RR` records:
+  `.rev` reconstruction, damaged service/header cases, and multivolume repair.
 
 ### 3. Writer Work
 

@@ -129,6 +129,9 @@ impl From<rars_codec::Error> for Error {
 impl From<rars_recovery::rar5::Error> for Error {
     fn from(error: rars_recovery::rar5::Error) -> Self {
         match error {
+            rars_recovery::rar5::Error::BadRecoveryChunk => {
+                Self::InvalidHeader("RAR 5 recovery chunk is invalid")
+            }
             rars_recovery::rar5::Error::OddShardSize => {
                 Self::InvalidHeader("RAR 5 recovery shard size is odd")
             }
@@ -137,6 +140,9 @@ impl From<rars_recovery::rar5::Error> for Error {
             }
             rars_recovery::rar5::Error::PrefixExceedsPlan => {
                 Self::InvalidHeader("RAR 5 recovery prefix exceeds planned shard capacity")
+            }
+            rars_recovery::rar5::Error::TooManyDamagedShards => {
+                Self::InvalidHeader("RAR 5 recovery data cannot repair this many damaged shards")
             }
             rars_recovery::rar5::Error::ShardSizeMismatch => {
                 Self::InvalidHeader("RAR 5 recovery shard sizes differ")

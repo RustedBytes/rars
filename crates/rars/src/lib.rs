@@ -138,6 +138,16 @@ impl Archive {
         }
     }
 
+    pub fn repair_inline_recovery(&self) -> Result<Vec<u8>> {
+        match self {
+            Self::Rar50Plus(archive) => archive.repair_inline_recovery(),
+            Self::Rar13(_) | Self::Rar15To40(_) => Err(Error::UnsupportedFeature {
+                version: ArchiveVersion::Rar50,
+                feature: "inline recovery repair for pre-RAR5 archives",
+            }),
+        }
+    }
+
     pub fn as_rar13(&self) -> Option<&rar13::Archive> {
         match self {
             Self::Rar13(archive) => Some(archive),
@@ -2559,6 +2569,48 @@ mod tests {
         assert_eq!(recovery.percent, 9);
         let extracted = archive.extract(None).unwrap();
         assert_eq!(extracted[0].data, b"facade rar5 recovery payload\n");
+    }
+
+    #[test]
+    fn archive_facade_repairs_rar50_inline_recovery_damage() {
+        let mut features = FeatureSet::store_only();
+        features.recovery_record = true;
+        let payload = b"facade rar5 repair payload\n".repeat(64);
+        let bytes = ArchiveWriter::new(ArchiveVersion::Rar50)
+            .unwrap()
+            .with_features(features)
+            .rar50_writer()
+            .unwrap()
+            .stored_entries(&[rar50::StoredEntry {
+                name: b"rar5-repair.txt",
+                data: &payload,
+                mtime: None,
+                attributes: 0x20,
+                host_os: 3,
+            }])
+            .recovery_percent(Some(20))
+            .finish()
+            .unwrap();
+        let archive = ArchiveReader::read(&bytes).unwrap();
+        let data_range = archive
+            .as_rar50()
+            .unwrap()
+            .files()
+            .next()
+            .unwrap()
+            .block
+            .data_range
+            .clone();
+        let mut damaged = bytes.clone();
+        damaged[data_range.start + 4..data_range.start + 80].fill(0xa5);
+        let damaged_archive = ArchiveReader::read(&damaged).unwrap();
+        assert!(damaged_archive.extract(None).is_err());
+
+        let repaired = damaged_archive.repair_inline_recovery().unwrap();
+
+        assert_eq!(repaired, bytes);
+        let repaired_archive = ArchiveReader::read(&repaired).unwrap();
+        assert_eq!(repaired_archive.extract(None).unwrap()[0].data, payload);
     }
 
     #[test]

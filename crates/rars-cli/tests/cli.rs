@@ -3037,6 +3037,55 @@ fn creates_rar50_stored_recovery_multivolume_archive_that_can_be_tested_and_list
 }
 
 #[test]
+fn repairs_rar50_stored_archive_with_inline_recovery_record() {
+    let dir = scratch("repair-rar50-inline-recovery");
+    let source = dir.join("payload.txt");
+    let archive = dir.join("recoverable.rar");
+    let repaired = dir.join("repaired.rar");
+    let payload = b"rar50 repair cli payload with enough bytes for shard damage\n".repeat(64);
+    fs::write(&source, &payload).unwrap();
+
+    let create = rars()
+        .args([
+            "a",
+            "--format",
+            "rar50",
+            "--store",
+            "--recovery-percent",
+            "20",
+        ])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(create.status.success(), "stderr: {}", stderr(&create));
+
+    let mut damaged = fs::read(&archive).unwrap();
+    let payload_at = damaged
+        .windows(32)
+        .position(|window| window == &payload[..32])
+        .expect("stored payload is visible in archive");
+    damaged[payload_at + 10..payload_at + 90].fill(0xa5);
+    fs::write(&archive, damaged).unwrap();
+
+    let broken = rars().arg("test").arg(&archive).output().unwrap();
+    assert!(!broken.status.success());
+
+    let repair = rars()
+        .arg("repair")
+        .arg(&archive)
+        .arg(&repaired)
+        .output()
+        .unwrap();
+    assert!(repair.status.success(), "stderr: {}", stderr(&repair));
+    assert!(stdout(&repair).contains("repaired"));
+
+    let test = rars().arg("test").arg(&repaired).output().unwrap();
+    assert!(test.status.success(), "stderr: {}", stderr(&test));
+    assert!(stdout(&test).contains("OK payload.txt"));
+}
+
+#[test]
 fn creates_rar50_compressed_archive_that_can_be_tested() {
     let dir = scratch("create-rar50-compressed");
     let source = dir.join("payload.txt");

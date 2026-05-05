@@ -1486,6 +1486,87 @@ fn writes_rar50_recovery_service_record() {
 }
 
 #[test]
+fn repairs_rar50_inline_recovery_payload_damage() {
+    let payload = b"payload with structural recovery service\n".repeat(64);
+    let entries = [rar50::StoredEntry {
+        name: b"recoverable.txt",
+        data: &payload,
+        mtime: Some(0x5a21_0000),
+        attributes: 0x20,
+        host_os: 3,
+    }];
+    let mut features = FeatureSet::store_only();
+    features.recovery_record = true;
+    let bytes = write_stored_archive_with_recovery(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        20,
+    )
+    .unwrap();
+    let clean = Archive::parse(&bytes).unwrap();
+    let data_range = clean.files().next().unwrap().block.data_range.clone();
+    let mut damaged = bytes.clone();
+    damaged[data_range.start + 10..data_range.start + 80].fill(0xa5);
+
+    let damaged_archive = Archive::parse(&damaged).unwrap();
+    assert!(damaged_archive.extract().is_err());
+
+    let repaired = damaged_archive.repair_inline_recovery().unwrap();
+
+    assert_eq!(repaired, bytes);
+    let repaired_archive = Archive::parse(&repaired).unwrap();
+    let extracted = repaired_archive.extract().unwrap();
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+fn repairs_encrypted_rar50_inline_recovery_payload_damage_with_password() {
+    let payload = b"encrypted payload with structural recovery service\n".repeat(64);
+    let entries = [EncryptedStoredEntry {
+        name: b"secret-recoverable.txt",
+        data: &payload,
+        mtime: Some(0x5a21_0000),
+        attributes: 0x20,
+        host_os: 3,
+        password: b"password",
+    }];
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    features.recovery_record = true;
+    let bytes = write_encrypted_stored_archive_with_recovery(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        20,
+        b"password",
+    )
+    .unwrap();
+    let clean = Archive::parse_with_password(&bytes, Some(b"password")).unwrap();
+    let data_range = clean.files().next().unwrap().block.data_range.clone();
+    let mut damaged = bytes.clone();
+    damaged[data_range.start + 16..data_range.start + 96].fill(0xa5);
+
+    let damaged_archive = Archive::parse_with_password(&damaged, Some(b"password")).unwrap();
+    assert!(damaged_archive
+        .extract_with_password(Some(b"password"))
+        .is_err());
+
+    let repaired = damaged_archive.repair_inline_recovery().unwrap();
+
+    assert_eq!(repaired, bytes);
+    let repaired_archive = Archive::parse_with_password(&repaired, Some(b"password")).unwrap();
+    let extracted = repaired_archive
+        .extract_with_password(Some(b"password"))
+        .unwrap();
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
 fn writes_compressed_rar50_recovery_service_record() {
     let payload = b"compressed recovery payload with repeated phrase. ".repeat(32);
     let entries = [rar50::CompressedEntry {
