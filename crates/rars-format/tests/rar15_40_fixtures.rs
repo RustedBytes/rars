@@ -3353,11 +3353,8 @@ fn extracts_rar4_sharpcompress_encrypted_files_only_archive() {
 }
 
 #[test]
-fn parses_rar4_mixed_visible_names_unknown_password_fixture() {
-    let bytes = std::fs::read(fixture(
-        "encrypted/rar4_mixed_visible_names_unknown_password.rar",
-    ))
-    .unwrap();
+fn extracts_rar4_mixed_visible_names_known_password_fixture() {
+    let bytes = std::fs::read(fixture("encrypted/rar4_mixed_visible_names_password.rar")).unwrap();
     let archive = Archive::parse(&bytes).unwrap();
     let files: Vec<_> = archive.files().collect();
 
@@ -3378,6 +3375,17 @@ fn parses_rar4_mixed_visible_names_unknown_password_fixture() {
         archive.extract_with_password(Some(b"wrong-password")),
         Err(Error::WrongPasswordOrCorruptData)
     );
+
+    let extracted = archive.extract_with_password(Some(b"known-pass")).unwrap();
+    assert_eq!(extracted.len(), 3);
+    assert_eq!(extracted[0].name, b"1File.txt");
+    assert_eq!(extracted[0].data, b"1File");
+    assert_eq!(extracted[1].name, "2中文.txt".as_bytes());
+    assert_eq!(extracted[1].data, b"known encrypted unicode payload\n");
+    assert_eq!(crc32(&extracted[1].data), 0x1e180200);
+    assert_eq!(extracted[2].name, b"3Sec.txt");
+    assert_eq!(extracted[2].data, b"known encrypted ascii payload\n");
+    assert_eq!(crc32(&extracted[2].data), 0xbef64217);
 }
 
 #[test]
