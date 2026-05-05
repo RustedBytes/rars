@@ -423,62 +423,6 @@ pub fn encode_lz_member(data: &[u8], algorithm_version: u8) -> Result<Vec<u8>> {
     encode_lz_member_with_history(data, &[], algorithm_version)
 }
 
-pub fn encode_lz_member_with_delta_filter(
-    data: &[u8],
-    channels: usize,
-    algorithm_version: u8,
-) -> Result<Vec<u8>> {
-    let filtered = delta_encode(data, channels)?;
-    encode_lz_member_with_filter(
-        &filtered,
-        &[],
-        algorithm_version,
-        EncodeFilter {
-            length: data.len(),
-            filter_type: FilterType::Delta,
-            channels,
-        },
-    )
-}
-
-pub fn encode_lz_member_with_e8_filter(
-    data: &[u8],
-    include_e9: bool,
-    algorithm_version: u8,
-) -> Result<Vec<u8>> {
-    let mut filtered = data.to_vec();
-    e8e9_encode(&mut filtered, 0, include_e9);
-    encode_lz_member_with_filter(
-        &filtered,
-        &[],
-        algorithm_version,
-        EncodeFilter {
-            length: data.len(),
-            filter_type: if include_e9 {
-                FilterType::E8E9
-            } else {
-                FilterType::E8
-            },
-            channels: 0,
-        },
-    )
-}
-
-pub fn encode_lz_member_with_arm_filter(data: &[u8], algorithm_version: u8) -> Result<Vec<u8>> {
-    let mut filtered = data.to_vec();
-    arm_encode(&mut filtered, 0);
-    encode_lz_member_with_filter(
-        &filtered,
-        &[],
-        algorithm_version,
-        EncodeFilter {
-            length: data.len(),
-            filter_type: FilterType::Arm,
-            channels: 0,
-        },
-    )
-}
-
 pub fn encode_lz_member_with_history(
     data: &[u8],
     history: &[u8],
@@ -487,13 +431,54 @@ pub fn encode_lz_member_with_history(
     encode_lz_member_inner(data, history, algorithm_version, None)
 }
 
-fn encode_lz_member_with_filter(
-    data: &[u8],
-    history: &[u8],
-    algorithm_version: u8,
-    filter: EncodeFilter,
-) -> Result<Vec<u8>> {
-    encode_lz_member_inner(data, history, algorithm_version, Some(filter))
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rar50FilterKind {
+    Delta { channels: usize },
+    E8,
+    E8E9,
+    Arm,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rar50FilterSpec {
+    pub kind: Rar50FilterKind,
+}
+
+impl Rar50FilterSpec {
+    pub fn new(kind: Rar50FilterKind) -> Self {
+        Self { kind }
+    }
+}
+
+fn filtered_lz_member(data: &[u8], filter: Rar50FilterSpec) -> Result<(Vec<u8>, EncodeFilter)> {
+    let (filtered, filter_type, channels) = match filter.kind {
+        Rar50FilterKind::Delta { channels } => {
+            (delta_encode(data, channels)?, FilterType::Delta, channels)
+        }
+        Rar50FilterKind::E8 => {
+            let mut filtered = data.to_vec();
+            e8e9_encode(&mut filtered, 0, false);
+            (filtered, FilterType::E8, 0)
+        }
+        Rar50FilterKind::E8E9 => {
+            let mut filtered = data.to_vec();
+            e8e9_encode(&mut filtered, 0, true);
+            (filtered, FilterType::E8E9, 0)
+        }
+        Rar50FilterKind::Arm => {
+            let mut filtered = data.to_vec();
+            arm_encode(&mut filtered, 0);
+            (filtered, FilterType::Arm, 0)
+        }
+    };
+    Ok((
+        filtered,
+        EncodeFilter {
+            length: data.len(),
+            filter_type,
+            channels,
+        },
+    ))
 }
 
 fn encode_lz_member_inner(
@@ -670,6 +655,19 @@ impl Unpack50Encoder {
 
     pub fn encode_member(&mut self, input: &[u8], algorithm_version: u8) -> Result<Vec<u8>> {
         let packed = encode_lz_member_with_history(input, &self.history, algorithm_version)?;
+        self.remember(input);
+        Ok(packed)
+    }
+
+    pub fn encode_member_with_filter(
+        &mut self,
+        input: &[u8],
+        algorithm_version: u8,
+        filter: Rar50FilterSpec,
+    ) -> Result<Vec<u8>> {
+        let (filtered, record) = filtered_lz_member(input, filter)?;
+        let packed =
+            encode_lz_member_inner(&filtered, &self.history, algorithm_version, Some(record))?;
         self.remember(input);
         Ok(packed)
     }
@@ -2031,10 +2029,15 @@ mod tests {
             .any(|token| matches!(token, EncodeToken::Match { .. })));
     }
 
+    fn encode_lz_member_with_filter(data: &[u8], kind: Rar50FilterKind) -> Result<Vec<u8>> {
+        Unpack50Encoder::new().encode_member_with_filter(data, 0, Rar50FilterSpec::new(kind))
+    }
+
     #[test]
     fn encodes_lz_member_with_delta_filter_record() {
         let data: Vec<u8> = (0..96).map(|index| (index * 7 + index / 3) as u8).collect();
-        let input = encode_lz_member_with_delta_filter(&data, 3, 0).unwrap();
+        let input =
+            encode_lz_member_with_filter(&data, Rar50FilterKind::Delta { channels: 3 }).unwrap();
         let block = parse_compressed_block(&input).unwrap();
         let (lengths, _) = read_table_lengths(&input[block.payload], 0).unwrap();
 
@@ -2047,13 +2050,13 @@ mod tests {
     #[test]
     fn rejects_invalid_delta_filter_channel_count() {
         assert_eq!(
-            encode_lz_member_with_delta_filter(b"abc", 0, 0),
+            encode_lz_member_with_filter(b"abc", Rar50FilterKind::Delta { channels: 0 }),
             Err(Error::InvalidData(
                 "RAR 5 DELTA filter channel count is invalid"
             ))
         );
         assert_eq!(
-            encode_lz_member_with_delta_filter(b"abc", 33, 0),
+            encode_lz_member_with_filter(b"abc", Rar50FilterKind::Delta { channels: 33 }),
             Err(Error::InvalidData(
                 "RAR 5 DELTA filter channel count is invalid"
             ))
@@ -2064,7 +2067,7 @@ mod tests {
     fn encodes_lz_member_with_e8_filter_record() {
         let mut data = b"\xe8\0\0\0\0plain text after call".to_vec();
         data.extend_from_slice(&[0xe8, 3, 0, 0, 0, b'X']);
-        let input = encode_lz_member_with_e8_filter(&data, false, 0).unwrap();
+        let input = encode_lz_member_with_filter(&data, Rar50FilterKind::E8).unwrap();
         let block = parse_compressed_block(&input).unwrap();
         let (lengths, _) = read_table_lengths(&input[block.payload], 0).unwrap();
 
@@ -2077,7 +2080,7 @@ mod tests {
     #[test]
     fn encodes_lz_member_with_e8e9_filter_record() {
         let data = b"\xe9\0\0\0\0jump target through e9".to_vec();
-        let input = encode_lz_member_with_e8_filter(&data, true, 0).unwrap();
+        let input = encode_lz_member_with_filter(&data, Rar50FilterKind::E8E9).unwrap();
         let block = parse_compressed_block(&input).unwrap();
         let (lengths, _) = read_table_lengths(&input[block.payload], 0).unwrap();
 
@@ -2090,7 +2093,7 @@ mod tests {
     #[test]
     fn encodes_lz_member_with_arm_filter_record() {
         let data = [0x04, 0x00, 0x00, 0xeb, b'A', b'R', b'M', b'!'];
-        let input = encode_lz_member_with_arm_filter(&data, 0).unwrap();
+        let input = encode_lz_member_with_filter(&data, Rar50FilterKind::Arm).unwrap();
         let block = parse_compressed_block(&input).unwrap();
         let (lengths, _) = read_table_lengths(&input[block.payload], 0).unwrap();
 

@@ -1,15 +1,8 @@
 use super::*;
 use rars_codec::rar13::{unpack15_encode, Unpack15Encoder};
 use rars_codec::rar20::{unpack20_encode_literals, Unpack20Encoder};
-use rars_codec::rar29::{
-    unpack29_encode_literals, unpack29_encode_with_audio_filter,
-    unpack29_encode_with_audio_filter_range, unpack29_encode_with_delta_filter,
-    unpack29_encode_with_delta_filter_range, unpack29_encode_with_e8_filter,
-    unpack29_encode_with_e8_filter_range, unpack29_encode_with_e8e9_filter,
-    unpack29_encode_with_e8e9_filter_range, unpack29_encode_with_itanium_filter,
-    unpack29_encode_with_itanium_filter_range, unpack29_encode_with_rgb_filter,
-    unpack29_encode_with_rgb_filter_range, Unpack29Encoder,
-};
+use rars_codec::rar29::{unpack29_encode_literals, Unpack29Encoder};
+pub use rars_codec::rar29::{Rar29FilterKind as FilterKind, Rar29FilterSpec as FilterSpec};
 use std::ops::Range;
 
 const AUTO_X86_CLUSTER_GAP: usize = 4096;
@@ -92,217 +85,102 @@ pub fn write_compressed_archive_with_comment(
     Ok(out)
 }
 
-pub fn write_rar29_e8_filtered_compressed_archive(
-    entries: &[FileEntry<'_>],
-    options: WriterOptions,
-) -> Result<Vec<u8>> {
-    write_rar29_x86_filtered_compressed_archive(entries, options, false)
+#[derive(Debug, Clone)]
+pub enum FilterPolicy {
+    Auto,
+    Explicit(FilterSpec),
 }
 
-pub fn write_rar29_e8e9_filtered_compressed_archive(
+pub fn write_rar29_compressed_archive_with_filter_policy(
     entries: &[FileEntry<'_>],
     options: WriterOptions,
+    policy: FilterPolicy,
 ) -> Result<Vec<u8>> {
-    write_rar29_x86_filtered_compressed_archive(entries, options, true)
-}
-
-pub fn write_rar29_auto_filtered_compressed_archive(
-    entries: &[FileEntry<'_>],
-    options: WriterOptions,
-) -> Result<Vec<u8>> {
+    validate_rar29_filter_policy(&policy)?;
     write_rar29_filtered_archive(entries, options, |entry| {
-        encode_rar29_auto_filtered_member(entry.data)
+        encode_rar29_policy_filtered_member(entry.data, &policy)
     })
 }
 
-pub fn write_rar29_e8_range_filtered_compressed_archive(
-    entries: &[FileEntry<'_>],
-    options: WriterOptions,
-    range: Range<usize>,
-) -> Result<Vec<u8>> {
-    write_rar29_x86_range_filtered_compressed_archive(entries, options, range, false)
-}
-
-pub fn write_rar29_e8e9_range_filtered_compressed_archive(
-    entries: &[FileEntry<'_>],
-    options: WriterOptions,
-    range: Range<usize>,
-) -> Result<Vec<u8>> {
-    write_rar29_x86_range_filtered_compressed_archive(entries, options, range, true)
-}
-
-pub fn write_rar29_delta_filtered_compressed_archive(
-    entries: &[FileEntry<'_>],
-    options: WriterOptions,
-    channels: usize,
-) -> Result<Vec<u8>> {
-    if channels == 0 || channels > 32 {
-        return Err(Error::InvalidHeader(
-            "RAR 2.9 DELTA filter channel count is invalid",
-        ));
+fn encode_rar29_policy_filtered_member(data: &[u8], policy: &FilterPolicy) -> Result<Vec<u8>> {
+    match policy {
+        FilterPolicy::Auto => encode_rar29_auto_filtered_member(data),
+        FilterPolicy::Explicit(filter) => encode_rar29_filtered_member(data, filter.clone()),
     }
-
-    write_rar29_filtered_archive(entries, options, |entry| {
-        unpack29_encode_with_delta_filter(entry.data, channels).map_err(Error::from)
-    })
 }
 
-pub fn write_rar29_delta_range_filtered_compressed_archive(
-    entries: &[FileEntry<'_>],
-    options: WriterOptions,
-    range: Range<usize>,
-    channels: usize,
-) -> Result<Vec<u8>> {
-    if channels == 0 || channels > 32 {
-        return Err(Error::InvalidHeader(
-            "RAR 2.9 DELTA filter channel count is invalid",
-        ));
-    }
-
-    write_rar29_filtered_archive(entries, options, |entry| {
-        unpack29_encode_with_delta_filter_range(entry.data, range.clone(), channels)
-            .map_err(Error::from)
-    })
-}
-
-pub fn write_rar29_itanium_filtered_compressed_archive(
-    entries: &[FileEntry<'_>],
-    options: WriterOptions,
-) -> Result<Vec<u8>> {
-    write_rar29_filtered_archive(entries, options, |entry| {
-        unpack29_encode_with_itanium_filter(entry.data).map_err(Error::from)
-    })
-}
-
-pub fn write_rar29_itanium_range_filtered_compressed_archive(
-    entries: &[FileEntry<'_>],
-    options: WriterOptions,
-    range: Range<usize>,
-) -> Result<Vec<u8>> {
-    write_rar29_filtered_archive(entries, options, |entry| {
-        unpack29_encode_with_itanium_filter_range(entry.data, range.clone()).map_err(Error::from)
-    })
-}
-
-pub fn write_rar29_rgb_filtered_compressed_archive(
-    entries: &[FileEntry<'_>],
-    options: WriterOptions,
-    width: usize,
-    pos_r: usize,
-) -> Result<Vec<u8>> {
-    if width == 0 || !width.is_multiple_of(3) || pos_r > 2 {
-        return Err(Error::InvalidHeader(
-            "RAR 2.9 RGB filter parameters are invalid",
-        ));
-    }
-
-    write_rar29_filtered_archive(entries, options, |entry| {
-        unpack29_encode_with_rgb_filter(entry.data, width, pos_r).map_err(Error::from)
-    })
-}
-
-pub fn write_rar29_rgb_range_filtered_compressed_archive(
-    entries: &[FileEntry<'_>],
-    options: WriterOptions,
-    range: Range<usize>,
-    width: usize,
-    pos_r: usize,
-) -> Result<Vec<u8>> {
-    if width == 0 || !width.is_multiple_of(3) || pos_r > 2 {
-        return Err(Error::InvalidHeader(
-            "RAR 2.9 RGB filter parameters are invalid",
-        ));
-    }
-
-    write_rar29_filtered_archive(entries, options, |entry| {
-        unpack29_encode_with_rgb_filter_range(entry.data, range.clone(), width, pos_r)
-            .map_err(Error::from)
-    })
-}
-
-pub fn write_rar29_audio_filtered_compressed_archive(
-    entries: &[FileEntry<'_>],
-    options: WriterOptions,
-    channels: usize,
-) -> Result<Vec<u8>> {
-    if channels == 0 || channels > 32 {
-        return Err(Error::InvalidHeader(
-            "RAR 2.9 AUDIO filter channel count is invalid",
-        ));
-    }
-
-    write_rar29_filtered_archive(entries, options, |entry| {
-        unpack29_encode_with_audio_filter(entry.data, channels).map_err(Error::from)
-    })
-}
-
-pub fn write_rar29_audio_range_filtered_compressed_archive(
-    entries: &[FileEntry<'_>],
-    options: WriterOptions,
-    range: Range<usize>,
-    channels: usize,
-) -> Result<Vec<u8>> {
-    if channels == 0 || channels > 32 {
-        return Err(Error::InvalidHeader(
-            "RAR 2.9 AUDIO filter channel count is invalid",
-        ));
-    }
-
-    write_rar29_filtered_archive(entries, options, |entry| {
-        unpack29_encode_with_audio_filter_range(entry.data, range.clone(), channels)
-            .map_err(Error::from)
-    })
-}
-
-fn write_rar29_x86_filtered_compressed_archive(
-    entries: &[FileEntry<'_>],
-    options: WriterOptions,
-    include_e9: bool,
-) -> Result<Vec<u8>> {
-    write_rar29_filtered_archive(entries, options, |entry| {
-        if include_e9 {
-            unpack29_encode_with_e8e9_filter(entry.data).map_err(Error::from)
-        } else {
-            unpack29_encode_with_e8_filter(entry.data).map_err(Error::from)
+fn validate_rar29_filter_policy(policy: &FilterPolicy) -> Result<()> {
+    let FilterPolicy::Explicit(filter) = policy else {
+        return Ok(());
+    };
+    match filter.kind {
+        FilterKind::Delta { channels } => {
+            if channels == 0 || channels > 32 {
+                return Err(Error::InvalidHeader(
+                    "RAR 2.9 DELTA filter channel count is invalid",
+                ));
+            }
         }
-    })
+        FilterKind::Audio { channels } => {
+            if channels == 0 || channels > 32 {
+                return Err(Error::InvalidHeader(
+                    "RAR 2.9 AUDIO filter channel count is invalid",
+                ));
+            }
+        }
+        FilterKind::Rgb { width, pos_r } => {
+            if width == 0 || !width.is_multiple_of(3) || pos_r > 2 {
+                return Err(Error::InvalidHeader(
+                    "RAR 2.9 RGB filter parameters are invalid",
+                ));
+            }
+        }
+        FilterKind::E8 | FilterKind::E8E9 | FilterKind::Itanium => {}
+    }
+    Ok(())
 }
 
-fn write_rar29_x86_range_filtered_compressed_archive(
-    entries: &[FileEntry<'_>],
-    options: WriterOptions,
-    range: Range<usize>,
-    include_e9: bool,
-) -> Result<Vec<u8>> {
-    write_rar29_filtered_archive(entries, options, |entry| {
-        if include_e9 {
-            unpack29_encode_with_e8e9_filter_range(entry.data, range.clone()).map_err(Error::from)
-        } else {
-            unpack29_encode_with_e8_filter_range(entry.data, range.clone()).map_err(Error::from)
-        }
-    })
+fn encode_rar29_filtered_member(data: &[u8], filter: FilterSpec) -> Result<Vec<u8>> {
+    Unpack29Encoder::new()
+        .encode_member_with_filter(data, filter)
+        .map_err(Error::from)
 }
 
 fn encode_rar29_auto_filtered_member(data: &[u8]) -> Result<Vec<u8>> {
     let mut best = unpack29_encode_literals(data).map_err(Error::from)?;
     let mut candidates = vec![
-        unpack29_encode_with_e8_filter(data).map_err(Error::from)?,
-        unpack29_encode_with_e8e9_filter(data).map_err(Error::from)?,
-        unpack29_encode_with_itanium_filter(data).map_err(Error::from)?,
+        encode_rar29_filtered_member(data, FilterSpec::whole(FilterKind::E8))?,
+        encode_rar29_filtered_member(data, FilterSpec::whole(FilterKind::E8E9))?,
+        encode_rar29_filtered_member(data, FilterSpec::whole(FilterKind::Itanium))?,
     ];
     for range in auto_x86_filter_ranges(data, false) {
-        candidates.push(unpack29_encode_with_e8_filter_range(data, range).map_err(Error::from)?);
+        candidates.push(encode_rar29_filtered_member(
+            data,
+            FilterSpec::range(FilterKind::E8, range),
+        )?);
     }
     for range in auto_x86_filter_ranges(data, true) {
-        candidates.push(unpack29_encode_with_e8e9_filter_range(data, range).map_err(Error::from)?);
+        candidates.push(encode_rar29_filtered_member(
+            data,
+            FilterSpec::range(FilterKind::E8E9, range),
+        )?);
     }
     for channels in 1..=4 {
-        candidates.push(unpack29_encode_with_delta_filter(data, channels).map_err(Error::from)?);
-        candidates.push(unpack29_encode_with_audio_filter(data, channels).map_err(Error::from)?);
+        candidates.push(encode_rar29_filtered_member(
+            data,
+            FilterSpec::whole(FilterKind::Delta { channels }),
+        )?);
+        candidates.push(encode_rar29_filtered_member(
+            data,
+            FilterSpec::whole(FilterKind::Audio { channels }),
+        )?);
     }
     for width in AUTO_RGB_WIDTHS {
         if data.len() >= width {
-            candidates.push(unpack29_encode_with_rgb_filter(data, width, 0).map_err(Error::from)?);
+            candidates.push(encode_rar29_filtered_member(
+                data,
+                FilterSpec::whole(FilterKind::Rgb { width, pos_r: 0 }),
+            )?);
         }
     }
 

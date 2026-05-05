@@ -1,17 +1,8 @@
 use rars_format::rar15_40::{
     crc32, extract_volumes, write_compressed_archive, write_compressed_archive_with_comment,
-    write_compressed_volumes, write_rar29_audio_filtered_compressed_archive,
-    write_rar29_audio_range_filtered_compressed_archive,
-    write_rar29_auto_filtered_compressed_archive, write_rar29_delta_filtered_compressed_archive,
-    write_rar29_delta_range_filtered_compressed_archive,
-    write_rar29_e8_filtered_compressed_archive, write_rar29_e8_range_filtered_compressed_archive,
-    write_rar29_e8e9_filtered_compressed_archive,
-    write_rar29_e8e9_range_filtered_compressed_archive,
-    write_rar29_itanium_filtered_compressed_archive,
-    write_rar29_itanium_range_filtered_compressed_archive,
-    write_rar29_rgb_filtered_compressed_archive, write_rar29_rgb_range_filtered_compressed_archive,
+    write_compressed_volumes, write_rar29_compressed_archive_with_filter_policy,
     write_stored_archive, write_stored_archive_with_comment, write_stored_volumes, Archive, Block,
-    FileEntry, NewSubKind, StoredEntry, WriterOptions,
+    FileEntry, FilterKind, FilterPolicy, FilterSpec, NewSubKind, StoredEntry, WriterOptions,
 };
 use rars_format::{detect_archive_family, ArchiveFamily, ArchiveVersion, Error, FeatureSet};
 use std::io::Write;
@@ -41,6 +32,37 @@ const RARS_GENERATED_FIXTURE_BYTES: &[(&str, usize, u32)] = &[
     ("stored.rar", 84, 0x470d_272b),
 ];
 
+fn write_rar29_auto(entries: &[FileEntry<'_>], options: WriterOptions) -> Vec<u8> {
+    write_rar29_compressed_archive_with_filter_policy(entries, options, FilterPolicy::Auto).unwrap()
+}
+
+fn write_rar29_filter(
+    entries: &[FileEntry<'_>],
+    options: WriterOptions,
+    kind: FilterKind,
+) -> Vec<u8> {
+    write_rar29_compressed_archive_with_filter_policy(
+        entries,
+        options,
+        FilterPolicy::Explicit(FilterSpec::whole(kind)),
+    )
+    .unwrap()
+}
+
+fn write_rar29_filter_range(
+    entries: &[FileEntry<'_>],
+    options: WriterOptions,
+    kind: FilterKind,
+    range: std::ops::Range<usize>,
+) -> Vec<u8> {
+    write_rar29_compressed_archive_with_filter_policy(
+        entries,
+        options,
+        FilterPolicy::Explicit(FilterSpec::range(kind, range)),
+    )
+    .unwrap()
+}
+
 #[test]
 fn detects_rar15_40_signature_family() {
     let bytes = std::fs::read(fixture("rar300/with_comment_rar300.rar")).unwrap();
@@ -64,14 +86,14 @@ fn generated_rar29_e8_filtered_archive_round_trips() {
         file_comment: None,
     }];
 
-    let bytes = write_rar29_e8_filtered_compressed_archive(
+    let bytes = write_rar29_filter(
         &entries,
         WriterOptions {
             target: ArchiveVersion::Rar29,
             features: FeatureSet::store_only(),
         },
-    )
-    .unwrap();
+        FilterKind::E8,
+    );
     let archive = Archive::parse(&bytes).unwrap();
     let file = archive.files().next().unwrap();
 
@@ -96,14 +118,13 @@ fn generated_rar29_auto_filtered_archive_round_trips() {
         file_comment: None,
     }];
 
-    let bytes = write_rar29_auto_filtered_compressed_archive(
+    let bytes = write_rar29_auto(
         &entries,
         WriterOptions {
             target: ArchiveVersion::Rar29,
             features: FeatureSet::store_only(),
         },
-    )
-    .unwrap();
+    );
     let archive = Archive::parse(&bytes).unwrap();
     let file = archive.files().next().unwrap();
 
@@ -142,8 +163,8 @@ fn generated_rar29_auto_filtered_archive_considers_delta_candidates() {
         features: FeatureSet::store_only(),
     };
 
-    let auto = write_rar29_auto_filtered_compressed_archive(&entries, options).unwrap();
-    let explicit = write_rar29_delta_filtered_compressed_archive(&entries, options, 3).unwrap();
+    let auto = write_rar29_auto(&entries, options);
+    let explicit = write_rar29_filter(&entries, options, FilterKind::Delta { channels: 3 });
     let auto_archive = Archive::parse(&auto).unwrap();
     let explicit_archive = Archive::parse(&explicit).unwrap();
     let auto_file = auto_archive.files().next().unwrap();
@@ -174,8 +195,8 @@ fn generated_rar29_auto_filtered_archive_considers_audio_candidates() {
         features: FeatureSet::store_only(),
     };
 
-    let auto = write_rar29_auto_filtered_compressed_archive(&entries, options).unwrap();
-    let explicit = write_rar29_audio_filtered_compressed_archive(&entries, options, 2).unwrap();
+    let auto = write_rar29_auto(&entries, options);
+    let explicit = write_rar29_filter(&entries, options, FilterKind::Audio { channels: 2 });
     let auto_archive = Archive::parse(&auto).unwrap();
     let explicit_archive = Archive::parse(&explicit).unwrap();
     let auto_file = auto_archive.files().next().unwrap();
@@ -214,9 +235,8 @@ fn generated_rar29_auto_filtered_archive_considers_rgb_candidates() {
         features: FeatureSet::store_only(),
     };
 
-    let auto = write_rar29_auto_filtered_compressed_archive(&entries, options).unwrap();
-    let explicit =
-        write_rar29_rgb_filtered_compressed_archive(&entries, options, width, 0).unwrap();
+    let auto = write_rar29_auto(&entries, options);
+    let explicit = write_rar29_filter(&entries, options, FilterKind::Rgb { width, pos_r: 0 });
     let auto_archive = Archive::parse(&auto).unwrap();
     let explicit_archive = Archive::parse(&explicit).unwrap();
     let auto_file = auto_archive.files().next().unwrap();
@@ -245,8 +265,8 @@ fn generated_rar29_auto_filtered_archive_considers_itanium_candidates() {
         features: FeatureSet::store_only(),
     };
 
-    let auto = write_rar29_auto_filtered_compressed_archive(&entries, options).unwrap();
-    let explicit = write_rar29_itanium_filtered_compressed_archive(&entries, options).unwrap();
+    let auto = write_rar29_auto(&entries, options);
+    let explicit = write_rar29_filter(&entries, options, FilterKind::Itanium);
     let auto_archive = Archive::parse(&auto).unwrap();
     let explicit_archive = Archive::parse(&explicit).unwrap();
     let auto_file = auto_archive.files().next().unwrap();
@@ -289,15 +309,15 @@ fn generated_rar29_segmented_e8_filtered_archive_round_trips() {
         file_comment: None,
     }];
 
-    let bytes = write_rar29_e8_range_filtered_compressed_archive(
+    let bytes = write_rar29_filter_range(
         &entries,
         WriterOptions {
             target: ArchiveVersion::Rar29,
             features: FeatureSet::store_only(),
         },
+        FilterKind::E8,
         filter_start..filter_end,
-    )
-    .unwrap();
+    );
     let archive = Archive::parse(&bytes).unwrap();
     let file = archive.files().next().unwrap();
 
@@ -335,14 +355,14 @@ fn generated_rar29_solid_e8_filtered_archive_round_trips() {
     let mut features = FeatureSet::store_only();
     features.solid = true;
 
-    let bytes = write_rar29_e8_filtered_compressed_archive(
+    let bytes = write_rar29_filter(
         &entries,
         WriterOptions {
             target: ArchiveVersion::Rar29,
             features,
         },
-    )
-    .unwrap();
+        FilterKind::E8,
+    );
     let archive = Archive::parse(&bytes).unwrap();
     let files: Vec<_> = archive.files().collect();
 
@@ -371,14 +391,14 @@ fn generated_rar29_encrypted_e8_filtered_archive_round_trips() {
     let mut features = FeatureSet::store_only();
     features.file_encryption = true;
 
-    let bytes = write_rar29_e8_filtered_compressed_archive(
+    let bytes = write_rar29_filter(
         &entries,
         WriterOptions {
             target: ArchiveVersion::Rar29,
             features,
         },
-    )
-    .unwrap();
+        FilterKind::E8,
+    );
     let archive = Archive::parse(&bytes).unwrap();
     let file = archive.files().next().unwrap();
 
@@ -409,14 +429,14 @@ fn generated_rar30_header_encrypted_e8_filtered_archive_round_trips() {
     features.file_encryption = true;
     features.header_encryption = true;
 
-    let bytes = write_rar29_e8_filtered_compressed_archive(
+    let bytes = write_rar29_filter(
         &entries,
         WriterOptions {
             target: ArchiveVersion::Rar30,
             features,
         },
-    )
-    .unwrap();
+        FilterKind::E8,
+    );
 
     assert!(matches!(Archive::parse(&bytes), Err(Error::NeedPassword)));
     let archive = Archive::parse_with_password(&bytes, Some(b"password")).unwrap();
@@ -472,14 +492,14 @@ fn reference_unrar_accepts_rar29_solid_e8_filter_record() {
     ];
     let mut features = FeatureSet::store_only();
     features.solid = true;
-    let bytes = write_rar29_e8_filtered_compressed_archive(
+    let bytes = write_rar29_filter(
         &entries,
         WriterOptions {
             target: ArchiveVersion::Rar29,
             features,
         },
-    )
-    .unwrap();
+        FilterKind::E8,
+    );
     std::fs::write(&archive_path, bytes).unwrap();
 
     for (wineprefix, unrar) in [(UNRAR300_PREFIX, UNRAR300), (UNRAR420_PREFIX, UNRAR420)] {
@@ -534,15 +554,15 @@ fn reference_unrar_accepts_rar29_segmented_e8_filter_record() {
         password: None,
         file_comment: None,
     }];
-    let bytes = write_rar29_e8_range_filtered_compressed_archive(
+    let bytes = write_rar29_filter_range(
         &entries,
         WriterOptions {
             target: ArchiveVersion::Rar29,
             features: FeatureSet::store_only(),
         },
+        FilterKind::E8,
         filter_start..filter_end,
-    )
-    .unwrap();
+    );
     std::fs::write(&archive_path, bytes).unwrap();
 
     let wine_archive = format!("Z:{}", archive_path.to_string_lossy().replace('/', "\\"));
@@ -595,15 +615,15 @@ fn reference_unrar_accepts_rar29_segmented_e8e9_filter_record() {
         password: None,
         file_comment: None,
     }];
-    let bytes = write_rar29_e8e9_range_filtered_compressed_archive(
+    let bytes = write_rar29_filter_range(
         &entries,
         WriterOptions {
             target: ArchiveVersion::Rar29,
             features: FeatureSet::store_only(),
         },
+        FilterKind::E8E9,
         filter_start..filter_end,
-    )
-    .unwrap();
+    );
     std::fs::write(&archive_path, bytes).unwrap();
 
     let wine_archive = format!("Z:{}", archive_path.to_string_lossy().replace('/', "\\"));
@@ -638,14 +658,14 @@ fn generated_rar29_e8e9_filtered_archive_round_trips() {
         file_comment: None,
     }];
 
-    let bytes = write_rar29_e8e9_filtered_compressed_archive(
+    let bytes = write_rar29_filter(
         &entries,
         WriterOptions {
             target: ArchiveVersion::Rar29,
             features: FeatureSet::store_only(),
         },
-    )
-    .unwrap();
+        FilterKind::E8E9,
+    );
     let archive = Archive::parse(&bytes).unwrap();
     let file = archive.files().next().unwrap();
 
@@ -670,15 +690,14 @@ fn generated_rar29_delta_filtered_archive_round_trips() {
         file_comment: None,
     }];
 
-    let bytes = write_rar29_delta_filtered_compressed_archive(
+    let bytes = write_rar29_filter(
         &entries,
         WriterOptions {
             target: ArchiveVersion::Rar29,
             features: FeatureSet::store_only(),
         },
-        3,
-    )
-    .unwrap();
+        FilterKind::Delta { channels: 3 },
+    );
     let archive = Archive::parse(&bytes).unwrap();
     let file = archive.files().next().unwrap();
 
@@ -706,16 +725,15 @@ fn generated_rar29_segmented_delta_filtered_archive_round_trips() {
         file_comment: None,
     }];
 
-    let bytes = write_rar29_delta_range_filtered_compressed_archive(
+    let bytes = write_rar29_filter_range(
         &entries,
         WriterOptions {
             target: ArchiveVersion::Rar29,
             features: FeatureSet::store_only(),
         },
+        FilterKind::Delta { channels: 3 },
         filter_start..filter_end,
-        3,
-    )
-    .unwrap();
+    );
     let archive = Archive::parse(&bytes).unwrap();
     let file = archive.files().next().unwrap();
 
@@ -757,16 +775,15 @@ fn reference_unrar_accepts_rar29_segmented_delta_filter_record() {
         password: None,
         file_comment: None,
     }];
-    let bytes = write_rar29_delta_range_filtered_compressed_archive(
+    let bytes = write_rar29_filter_range(
         &entries,
         WriterOptions {
             target: ArchiveVersion::Rar29,
             features: FeatureSet::store_only(),
         },
+        FilterKind::Delta { channels: 3 },
         filter_start..filter_end,
-        3,
-    )
-    .unwrap();
+    );
     std::fs::write(&archive_path, bytes).unwrap();
 
     let wine_archive = format!("Z:{}", archive_path.to_string_lossy().replace('/', "\\"));
@@ -804,14 +821,14 @@ fn generated_rar29_itanium_filtered_archive_round_trips() {
         file_comment: None,
     }];
 
-    let bytes = write_rar29_itanium_filtered_compressed_archive(
+    let bytes = write_rar29_filter(
         &entries,
         WriterOptions {
             target: ArchiveVersion::Rar29,
             features: FeatureSet::store_only(),
         },
-    )
-    .unwrap();
+        FilterKind::Itanium,
+    );
     let archive = Archive::parse(&bytes).unwrap();
     let file = archive.files().next().unwrap();
 
@@ -842,15 +859,15 @@ fn generated_rar29_segmented_itanium_filtered_archive_round_trips() {
         file_comment: None,
     }];
 
-    let bytes = write_rar29_itanium_range_filtered_compressed_archive(
+    let bytes = write_rar29_filter_range(
         &entries,
         WriterOptions {
             target: ArchiveVersion::Rar29,
             features: FeatureSet::store_only(),
         },
+        FilterKind::Itanium,
         filter_start..filter_end,
-    )
-    .unwrap();
+    );
     let archive = Archive::parse(&bytes).unwrap();
     let file = archive.files().next().unwrap();
 
@@ -895,15 +912,15 @@ fn reference_unrar_accepts_rar29_segmented_itanium_filter_record() {
         password: None,
         file_comment: None,
     }];
-    let bytes = write_rar29_itanium_range_filtered_compressed_archive(
+    let bytes = write_rar29_filter_range(
         &entries,
         WriterOptions {
             target: ArchiveVersion::Rar29,
             features: FeatureSet::store_only(),
         },
+        FilterKind::Itanium,
         filter_start..filter_end,
-    )
-    .unwrap();
+    );
     std::fs::write(&archive_path, bytes).unwrap();
 
     let wine_archive = format!("Z:{}", archive_path.to_string_lossy().replace('/', "\\"));
@@ -939,16 +956,14 @@ fn generated_rar29_rgb_filtered_archive_round_trips() {
         file_comment: None,
     }];
 
-    let bytes = write_rar29_rgb_filtered_compressed_archive(
+    let bytes = write_rar29_filter(
         &entries,
         WriterOptions {
             target: ArchiveVersion::Rar29,
             features: FeatureSet::store_only(),
         },
-        width,
-        0,
-    )
-    .unwrap();
+        FilterKind::Rgb { width, pos_r: 0 },
+    );
     let archive = Archive::parse(&bytes).unwrap();
     let file = archive.files().next().unwrap();
 
@@ -977,17 +992,15 @@ fn generated_rar29_segmented_rgb_filtered_archive_round_trips() {
         file_comment: None,
     }];
 
-    let bytes = write_rar29_rgb_range_filtered_compressed_archive(
+    let bytes = write_rar29_filter_range(
         &entries,
         WriterOptions {
             target: ArchiveVersion::Rar29,
             features: FeatureSet::store_only(),
         },
+        FilterKind::Rgb { width, pos_r: 0 },
         filter_start..filter_end,
-        width,
-        0,
-    )
-    .unwrap();
+    );
     let archive = Archive::parse(&bytes).unwrap();
     let file = archive.files().next().unwrap();
 
@@ -1030,17 +1043,15 @@ fn reference_unrar_accepts_rar29_segmented_rgb_filter_record() {
         password: None,
         file_comment: None,
     }];
-    let bytes = write_rar29_rgb_range_filtered_compressed_archive(
+    let bytes = write_rar29_filter_range(
         &entries,
         WriterOptions {
             target: ArchiveVersion::Rar29,
             features: FeatureSet::store_only(),
         },
+        FilterKind::Rgb { width, pos_r: 0 },
         filter_start..filter_end,
-        width,
-        0,
-    )
-    .unwrap();
+    );
     std::fs::write(&archive_path, bytes).unwrap();
 
     let wine_archive = format!("Z:{}", archive_path.to_string_lossy().replace('/', "\\"));
@@ -1077,15 +1088,14 @@ fn generated_rar29_audio_filtered_archive_round_trips() {
         file_comment: None,
     }];
 
-    let bytes = write_rar29_audio_filtered_compressed_archive(
+    let bytes = write_rar29_filter(
         &entries,
         WriterOptions {
             target: ArchiveVersion::Rar29,
             features: FeatureSet::store_only(),
         },
-        2,
-    )
-    .unwrap();
+        FilterKind::Audio { channels: 2 },
+    );
     let archive = Archive::parse(&bytes).unwrap();
     let file = archive.files().next().unwrap();
 
@@ -1113,16 +1123,15 @@ fn generated_rar29_segmented_audio_filtered_archive_round_trips() {
         file_comment: None,
     }];
 
-    let bytes = write_rar29_audio_range_filtered_compressed_archive(
+    let bytes = write_rar29_filter_range(
         &entries,
         WriterOptions {
             target: ArchiveVersion::Rar29,
             features: FeatureSet::store_only(),
         },
+        FilterKind::Audio { channels: 2 },
         filter_start..filter_end,
-        2,
-    )
-    .unwrap();
+    );
     let archive = Archive::parse(&bytes).unwrap();
     let file = archive.files().next().unwrap();
 
@@ -1160,10 +1169,10 @@ fn reference_unrar300_accepts_rar29_segmented_filter_records() {
         b"segmented-e8.bin",
         &e8,
         |entries| {
-            write_rar29_e8_range_filtered_compressed_archive(
+            write_rar29_compressed_archive_with_filter_policy(
                 entries,
                 reference_rar29_options(),
-                e8_start..e8_end,
+                FilterPolicy::Explicit(FilterSpec::range(FilterKind::E8, e8_start..e8_end)),
             )
         },
     );
@@ -1178,10 +1187,10 @@ fn reference_unrar300_accepts_rar29_segmented_filter_records() {
         b"segmented-e8e9.bin",
         &e8e9,
         |entries| {
-            write_rar29_e8e9_range_filtered_compressed_archive(
+            write_rar29_compressed_archive_with_filter_policy(
                 entries,
                 reference_rar29_options(),
-                e8e9_start..e8e9_end,
+                FilterPolicy::Explicit(FilterSpec::range(FilterKind::E8E9, e8e9_start..e8e9_end)),
             )
         },
     );
@@ -1196,11 +1205,13 @@ fn reference_unrar300_accepts_rar29_segmented_filter_records() {
         b"segmented-delta.bin",
         &delta,
         |entries| {
-            write_rar29_delta_range_filtered_compressed_archive(
+            write_rar29_compressed_archive_with_filter_policy(
                 entries,
                 reference_rar29_options(),
-                delta_start..delta_end,
-                3,
+                FilterPolicy::Explicit(FilterSpec::range(
+                    FilterKind::Delta { channels: 3 },
+                    delta_start..delta_end,
+                )),
             )
         },
     );
@@ -1218,10 +1229,13 @@ fn reference_unrar300_accepts_rar29_segmented_filter_records() {
         b"segmented-itanium.bin",
         &itanium,
         |entries| {
-            write_rar29_itanium_range_filtered_compressed_archive(
+            write_rar29_compressed_archive_with_filter_policy(
                 entries,
                 reference_rar29_options(),
-                itanium_start..itanium_end,
+                FilterPolicy::Explicit(FilterSpec::range(
+                    FilterKind::Itanium,
+                    itanium_start..itanium_end,
+                )),
             )
         },
     );
@@ -1236,12 +1250,16 @@ fn reference_unrar300_accepts_rar29_segmented_filter_records() {
         b"segmented-rgb.bin",
         &rgb,
         |entries| {
-            write_rar29_rgb_range_filtered_compressed_archive(
+            write_rar29_compressed_archive_with_filter_policy(
                 entries,
                 reference_rar29_options(),
-                rgb_start..rgb_end,
-                12,
-                0,
+                FilterPolicy::Explicit(FilterSpec::range(
+                    FilterKind::Rgb {
+                        width: 12,
+                        pos_r: 0,
+                    },
+                    rgb_start..rgb_end,
+                )),
             )
         },
     );
@@ -1256,11 +1274,13 @@ fn reference_unrar300_accepts_rar29_segmented_filter_records() {
         b"segmented-audio.bin",
         &audio,
         |entries| {
-            write_rar29_audio_range_filtered_compressed_archive(
+            write_rar29_compressed_archive_with_filter_policy(
                 entries,
                 reference_rar29_options(),
-                audio_start..audio_end,
-                2,
+                FilterPolicy::Explicit(FilterSpec::range(
+                    FilterKind::Audio { channels: 2 },
+                    audio_start..audio_end,
+                )),
             )
         },
     );
@@ -1352,16 +1372,15 @@ fn reference_unrar_accepts_rar29_segmented_audio_filter_record() {
         password: None,
         file_comment: None,
     }];
-    let bytes = write_rar29_audio_range_filtered_compressed_archive(
+    let bytes = write_rar29_filter_range(
         &entries,
         WriterOptions {
             target: ArchiveVersion::Rar29,
             features: FeatureSet::store_only(),
         },
+        FilterKind::Audio { channels: 2 },
         filter_start..filter_end,
-        2,
-    )
-    .unwrap();
+    );
     std::fs::write(&archive_path, bytes).unwrap();
 
     let wine_archive = format!("Z:{}", archive_path.to_string_lossy().replace('/', "\\"));

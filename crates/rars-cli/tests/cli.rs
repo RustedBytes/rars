@@ -565,13 +565,17 @@ fn rejects_multivolume_with_multiple_inputs() {
 }
 
 #[test]
-fn rejects_rar50_header_encrypted_recovery_volumes() {
-    let dir = scratch("rar50-header-encrypted-recovery-volume-reject");
+fn creates_rar50_header_encrypted_recovery_volumes() {
+    let dir = scratch("rar50-header-encrypted-recovery-volume");
     let source = dir.join("payload.txt");
-    let archive = dir.join("bad.rar");
-    fs::write(&source, b"payload").unwrap();
+    let archive = dir.join("split.rar");
+    fs::write(
+        &source,
+        b"rar50 header encrypted recovery volume cli payload\n".repeat(10),
+    )
+    .unwrap();
 
-    let output = rars()
+    let create = rars()
         .args([
             "a",
             "--format",
@@ -588,8 +592,29 @@ fn rejects_rar50_header_encrypted_recovery_volumes() {
         .arg(&source)
         .output()
         .unwrap();
-    assert!(!output.status.success());
-    assert!(stderr(&output).contains("header-encrypted recovery writer on volumes"));
+    assert!(create.status.success(), "stderr: {}", stderr(&create));
+
+    let mut parts = Vec::new();
+    for index in 1.. {
+        let path = dir.join(format!("split.part{index}.rar"));
+        if !path.exists() {
+            break;
+        }
+        parts.push(path);
+    }
+    assert!(parts.len() >= 2);
+
+    let missing = rars().arg("test").args(&parts).output().unwrap();
+    assert!(!missing.status.success());
+    assert!(stderr(&missing).contains("password is required"));
+
+    let test = rars()
+        .args(["test", "--password", "pass"])
+        .args(&parts)
+        .output()
+        .unwrap();
+    assert!(test.status.success(), "stderr: {}", stderr(&test));
+    assert!(stdout(&test).contains("OK payload.txt"));
 }
 
 #[test]

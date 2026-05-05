@@ -1,27 +1,9 @@
 use rars_codec::rar50::{decode_lz, parse_compressed_block, read_table_lengths, DecodeTables};
 use rars_format::rar50::{
-    extract_volumes, write_arm_filtered_compressed_archive, write_compressed_archive,
-    write_compressed_archive_with_comment_and_metadata,
-    write_compressed_archive_with_filter_policy, write_compressed_archive_with_metadata,
-    write_compressed_archive_with_recovery, write_compressed_volume_set,
-    write_compressed_volume_set_with_recovery, write_compressed_volumes,
-    write_delta_filtered_compressed_archive, write_e8_filtered_compressed_archive,
-    write_encrypted_compressed_archive,
-    write_encrypted_compressed_archive_with_comment_and_metadata,
-    write_encrypted_compressed_archive_with_metadata,
-    write_encrypted_compressed_archive_with_recovery, write_encrypted_compressed_volume_set,
-    write_encrypted_compressed_volume_set_with_recovery, write_encrypted_compressed_volumes,
-    write_encrypted_stored_archive, write_encrypted_stored_archive_with_comment,
-    write_encrypted_stored_archive_with_comment_and_metadata,
-    write_encrypted_stored_archive_with_file_services,
-    write_encrypted_stored_archive_with_recovery, write_encrypted_stored_volumes,
-    write_encrypted_stored_volumes_with_recovery, write_stored_archive,
-    write_stored_archive_with_comment, write_stored_archive_with_comment_and_metadata,
-    write_stored_archive_with_file_services, write_stored_archive_with_recovery,
-    write_stored_volumes, write_stored_volumes_with_recovery, Archive, ArchiveMetadataEntry,
-    EncryptedArchiveCommentEntry, EncryptedCompressedEntry, EncryptedStoredEntry,
-    EncryptedStoredEntryWithServices, EncryptedStoredServiceEntry, FilterPolicy, Rev5Volume,
-    StoredEntryWithServices, StoredServiceEntry,
+    extract_volumes, Archive, ArchiveMetadataEntry, EncryptedArchiveCommentEntry,
+    EncryptedCompressedEntry, EncryptedStoredEntry, EncryptedStoredEntryWithServices,
+    EncryptedStoredServiceEntry, FilterKind, FilterPolicy, Rev5Volume, StoredEntryWithServices,
+    StoredServiceEntry,
 };
 use rars_format::{detect_archive_family, rar50, ArchiveFamily, ArchiveVersion, Error, FeatureSet};
 use rars_recovery::rar5::crc64_xz;
@@ -41,6 +23,331 @@ fn service_names(archive: &Archive) -> Vec<String> {
         .services()
         .map(|service| service.name_lossy())
         .collect()
+}
+
+fn write_stored_archive(
+    entries: &[rar50::StoredEntry<'_>],
+    options: rar50::WriterOptions,
+) -> Result<Vec<u8>, Error> {
+    rar50::Rar50Writer::new(options)
+        .stored_entries(entries)
+        .finish()
+}
+
+fn write_stored_archive_with_comment(
+    entries: &[rar50::StoredEntry<'_>],
+    options: rar50::WriterOptions,
+    archive_comment: Option<&[u8]>,
+) -> Result<Vec<u8>, Error> {
+    rar50::Rar50Writer::new(options)
+        .stored_entries(entries)
+        .archive_comment(archive_comment)
+        .finish()
+}
+
+fn write_stored_archive_with_comment_and_metadata(
+    entries: &[rar50::StoredEntry<'_>],
+    options: rar50::WriterOptions,
+    archive_comment: Option<&[u8]>,
+    archive_metadata: Option<ArchiveMetadataEntry<'_>>,
+) -> Result<Vec<u8>, Error> {
+    rar50::Rar50Writer::new(options)
+        .stored_entries(entries)
+        .archive_comment(archive_comment)
+        .archive_metadata(archive_metadata)
+        .finish()
+}
+
+fn write_stored_archive_with_recovery(
+    entries: &[rar50::StoredEntry<'_>],
+    options: rar50::WriterOptions,
+    recovery_percent: u64,
+) -> Result<Vec<u8>, Error> {
+    rar50::Rar50Writer::new(options)
+        .stored_entries(entries)
+        .recovery_percent(Some(recovery_percent))
+        .finish()
+}
+
+fn write_stored_archive_with_file_services(
+    entries: &[StoredEntryWithServices<'_>],
+    options: rar50::WriterOptions,
+) -> Result<Vec<u8>, Error> {
+    rar50::Rar50Writer::new(options)
+        .stored_entries_with_services(entries)
+        .finish()
+}
+
+fn write_compressed_archive(
+    entries: &[rar50::CompressedEntry<'_>],
+    options: rar50::WriterOptions,
+) -> Result<Vec<u8>, Error> {
+    rar50::Rar50Writer::new(options)
+        .compressed_entries(entries)
+        .finish()
+}
+
+fn write_compressed_archive_with_metadata(
+    entries: &[rar50::CompressedEntry<'_>],
+    options: rar50::WriterOptions,
+    archive_metadata: Option<ArchiveMetadataEntry<'_>>,
+) -> Result<Vec<u8>, Error> {
+    rar50::Rar50Writer::new(options)
+        .compressed_entries(entries)
+        .archive_metadata(archive_metadata)
+        .finish()
+}
+
+fn write_compressed_archive_with_comment_and_metadata(
+    entries: &[rar50::CompressedEntry<'_>],
+    options: rar50::WriterOptions,
+    archive_comment: Option<&[u8]>,
+    archive_metadata: Option<ArchiveMetadataEntry<'_>>,
+) -> Result<Vec<u8>, Error> {
+    rar50::Rar50Writer::new(options)
+        .compressed_entries(entries)
+        .archive_comment(archive_comment)
+        .archive_metadata(archive_metadata)
+        .finish()
+}
+
+fn write_compressed_archive_with_recovery(
+    entries: &[rar50::CompressedEntry<'_>],
+    options: rar50::WriterOptions,
+    recovery_percent: u64,
+) -> Result<Vec<u8>, Error> {
+    rar50::Rar50Writer::new(options)
+        .compressed_entries(entries)
+        .recovery_percent(Some(recovery_percent))
+        .finish()
+}
+
+fn write_compressed_archive_with_filter_policy(
+    entries: &[rar50::CompressedEntry<'_>],
+    options: rar50::WriterOptions,
+    policy: FilterPolicy,
+) -> Result<Vec<u8>, Error> {
+    rar50::Rar50Writer::new(options)
+        .compressed_entries(entries)
+        .filter_policy(policy)
+        .finish()
+}
+
+fn write_encrypted_stored_archive(
+    entries: &[EncryptedStoredEntry<'_>],
+    options: rar50::WriterOptions,
+) -> Result<Vec<u8>, Error> {
+    rar50::Rar50Writer::new(options)
+        .encrypted_stored_entries(entries)
+        .finish()
+}
+
+fn write_encrypted_stored_archive_with_comment(
+    entries: &[EncryptedStoredEntry<'_>],
+    options: rar50::WriterOptions,
+    archive_comment: Option<EncryptedArchiveCommentEntry<'_>>,
+) -> Result<Vec<u8>, Error> {
+    rar50::Rar50Writer::new(options)
+        .encrypted_stored_entries(entries)
+        .encrypted_archive_comment(archive_comment)
+        .finish()
+}
+
+fn write_encrypted_stored_archive_with_comment_and_metadata(
+    entries: &[EncryptedStoredEntry<'_>],
+    options: rar50::WriterOptions,
+    archive_comment: Option<EncryptedArchiveCommentEntry<'_>>,
+    archive_metadata: Option<ArchiveMetadataEntry<'_>>,
+) -> Result<Vec<u8>, Error> {
+    rar50::Rar50Writer::new(options)
+        .encrypted_stored_entries(entries)
+        .encrypted_archive_comment(archive_comment)
+        .archive_metadata(archive_metadata)
+        .finish()
+}
+
+fn write_encrypted_stored_archive_with_file_services(
+    entries: &[EncryptedStoredEntryWithServices<'_>],
+    options: rar50::WriterOptions,
+) -> Result<Vec<u8>, Error> {
+    rar50::Rar50Writer::new(options)
+        .encrypted_stored_entries_with_services(entries)
+        .finish()
+}
+
+fn write_encrypted_stored_archive_with_recovery(
+    entries: &[EncryptedStoredEntry<'_>],
+    options: rar50::WriterOptions,
+    recovery_percent: u64,
+    recovery_password: &[u8],
+) -> Result<Vec<u8>, Error> {
+    rar50::Rar50Writer::new(options)
+        .encrypted_stored_entries(entries)
+        .recovery_percent(Some(recovery_percent))
+        .recovery_password(Some(recovery_password))
+        .finish()
+}
+
+fn write_encrypted_compressed_archive(
+    entries: &[EncryptedCompressedEntry<'_>],
+    options: rar50::WriterOptions,
+) -> Result<Vec<u8>, Error> {
+    rar50::Rar50Writer::new(options)
+        .encrypted_compressed_entries(entries)
+        .finish()
+}
+
+fn write_encrypted_compressed_archive_with_metadata(
+    entries: &[EncryptedCompressedEntry<'_>],
+    options: rar50::WriterOptions,
+    archive_metadata: Option<ArchiveMetadataEntry<'_>>,
+) -> Result<Vec<u8>, Error> {
+    rar50::Rar50Writer::new(options)
+        .encrypted_compressed_entries(entries)
+        .archive_metadata(archive_metadata)
+        .finish()
+}
+
+fn write_encrypted_compressed_archive_with_comment_and_metadata(
+    entries: &[EncryptedCompressedEntry<'_>],
+    options: rar50::WriterOptions,
+    archive_comment: Option<EncryptedArchiveCommentEntry<'_>>,
+    archive_metadata: Option<ArchiveMetadataEntry<'_>>,
+) -> Result<Vec<u8>, Error> {
+    rar50::Rar50Writer::new(options)
+        .encrypted_compressed_entries(entries)
+        .encrypted_archive_comment(archive_comment)
+        .archive_metadata(archive_metadata)
+        .finish()
+}
+
+fn write_encrypted_compressed_archive_with_recovery(
+    entries: &[EncryptedCompressedEntry<'_>],
+    options: rar50::WriterOptions,
+    recovery_percent: u64,
+) -> Result<Vec<u8>, Error> {
+    rar50::Rar50Writer::new(options)
+        .encrypted_compressed_entries(entries)
+        .recovery_percent(Some(recovery_percent))
+        .finish()
+}
+
+fn write_stored_volumes(
+    entry: rar50::StoredEntry<'_>,
+    options: rar50::WriterOptions,
+    max_data_per_volume: usize,
+) -> Result<Vec<Vec<u8>>, Error> {
+    rar50::Rar50VolumeWriter::new(options)
+        .stored_entry(entry)
+        .max_payload_per_volume(max_data_per_volume)
+        .finish()
+}
+
+fn write_stored_volumes_with_recovery(
+    entry: rar50::StoredEntry<'_>,
+    options: rar50::WriterOptions,
+    max_data_per_volume: usize,
+    recovery_percent: u64,
+) -> Result<Vec<Vec<u8>>, Error> {
+    rar50::Rar50VolumeWriter::new(options)
+        .stored_entry(entry)
+        .max_payload_per_volume(max_data_per_volume)
+        .recovery_percent(Some(recovery_percent))
+        .finish()
+}
+
+fn write_compressed_volumes(
+    entry: rar50::CompressedEntry<'_>,
+    options: rar50::WriterOptions,
+    max_packed_per_volume: usize,
+) -> Result<Vec<Vec<u8>>, Error> {
+    rar50::Rar50VolumeWriter::new(options)
+        .compressed_entries(std::slice::from_ref(&entry))
+        .max_payload_per_volume(max_packed_per_volume)
+        .finish()
+}
+
+fn write_compressed_volume_set(
+    entries: &[rar50::CompressedEntry<'_>],
+    options: rar50::WriterOptions,
+    max_packed_per_volume: usize,
+) -> Result<Vec<Vec<u8>>, Error> {
+    rar50::Rar50VolumeWriter::new(options)
+        .compressed_entries(entries)
+        .max_payload_per_volume(max_packed_per_volume)
+        .finish()
+}
+
+fn write_compressed_volume_set_with_recovery(
+    entries: &[rar50::CompressedEntry<'_>],
+    options: rar50::WriterOptions,
+    max_packed_per_volume: usize,
+    recovery_percent: u64,
+) -> Result<Vec<Vec<u8>>, Error> {
+    rar50::Rar50VolumeWriter::new(options)
+        .compressed_entries(entries)
+        .max_payload_per_volume(max_packed_per_volume)
+        .recovery_percent(Some(recovery_percent))
+        .finish()
+}
+
+fn write_encrypted_stored_volumes(
+    entry: EncryptedStoredEntry<'_>,
+    options: rar50::WriterOptions,
+    max_encrypted_per_volume: usize,
+) -> Result<Vec<Vec<u8>>, Error> {
+    rar50::Rar50VolumeWriter::new(options)
+        .encrypted_stored_entry(entry)
+        .max_payload_per_volume(max_encrypted_per_volume)
+        .finish()
+}
+
+fn write_encrypted_stored_volumes_with_recovery(
+    entry: EncryptedStoredEntry<'_>,
+    options: rar50::WriterOptions,
+    max_encrypted_per_volume: usize,
+    recovery_percent: u64,
+) -> Result<Vec<Vec<u8>>, Error> {
+    rar50::Rar50VolumeWriter::new(options)
+        .encrypted_stored_entry(entry)
+        .max_payload_per_volume(max_encrypted_per_volume)
+        .recovery_percent(Some(recovery_percent))
+        .finish()
+}
+
+fn write_encrypted_compressed_volumes(
+    entry: EncryptedCompressedEntry<'_>,
+    options: rar50::WriterOptions,
+    max_encrypted_per_volume: usize,
+) -> Result<Vec<Vec<u8>>, Error> {
+    rar50::Rar50VolumeWriter::new(options)
+        .encrypted_compressed_entries(std::slice::from_ref(&entry))
+        .max_payload_per_volume(max_encrypted_per_volume)
+        .finish()
+}
+
+fn write_encrypted_compressed_volume_set(
+    entries: &[EncryptedCompressedEntry<'_>],
+    options: rar50::WriterOptions,
+    max_encrypted_per_volume: usize,
+) -> Result<Vec<Vec<u8>>, Error> {
+    rar50::Rar50VolumeWriter::new(options)
+        .encrypted_compressed_entries(entries)
+        .max_payload_per_volume(max_encrypted_per_volume)
+        .finish()
+}
+
+fn write_encrypted_compressed_volume_set_with_recovery(
+    entries: &[EncryptedCompressedEntry<'_>],
+    options: rar50::WriterOptions,
+    max_encrypted_per_volume: usize,
+    recovery_percent: u64,
+) -> Result<Vec<Vec<u8>>, Error> {
+    rar50::Rar50VolumeWriter::new(options)
+        .encrypted_compressed_entries(entries)
+        .max_payload_per_volume(max_encrypted_per_volume)
+        .recovery_percent(Some(recovery_percent))
+        .finish()
 }
 
 fn assert_rar5_inline_recovery_chunks(data: &[u8]) {
@@ -243,6 +550,46 @@ fn writes_store_only_rar50_archive_that_reader_extracts() {
 }
 
 #[test]
+fn rar50_writer_builder_writes_stored_archive_with_comment_and_metadata() {
+    let entries = [rar50::StoredEntry {
+        name: b"builder-stored.txt",
+        data: b"stored through the resolved writer builder\n",
+        mtime: None,
+        attributes: 0x20,
+        host_os: 3,
+    }];
+    let bytes = rar50::Rar50Writer::new(rar50::WriterOptions {
+        target: ArchiveVersion::Rar70,
+        features: FeatureSet {
+            archive_comment: true,
+            ..FeatureSet::store_only()
+        },
+    })
+    .stored_entries(&entries)
+    .archive_comment(Some(b"builder archive comment"))
+    .archive_metadata(Some(ArchiveMetadataEntry {
+        name: Some(b"builder-metadata.rar"),
+        creation_time: Some(0x01dcd60e_662d7a32),
+    }))
+    .finish()
+    .unwrap();
+
+    let archive = Archive::parse(&bytes).unwrap();
+    let services: Vec<_> = archive.services().collect();
+    assert_eq!(services.len(), 1);
+    assert_eq!(services[0].name, b"CMT");
+    assert_eq!(
+        services[0].extract(&archive).unwrap().data,
+        b"builder archive comment"
+    );
+    assert_eq!(
+        archive.main.archive_metadata().unwrap().name.as_deref(),
+        Some(b"builder-metadata.rar".as_slice())
+    );
+    assert_eq!(archive.extract().unwrap()[0].data, entries[0].data);
+}
+
+#[test]
 fn writes_compressed_rar50_archive_that_reader_extracts() {
     let entries = [
         rar50::CompressedEntry {
@@ -286,6 +633,29 @@ fn writes_compressed_rar50_archive_that_reader_extracts() {
     assert_eq!(extracted[0].file_time, 0x5a21_0001);
     assert_eq!(extracted[1].name, entries[1].name);
     assert_eq!(extracted[1].data, entries[1].data);
+}
+
+#[test]
+fn rar50_writer_builder_writes_filtered_compressed_archive() {
+    let payload = b"\xe8\0\0\0\0builder filtered payload\n".repeat(8);
+    let entries = [rar50::CompressedEntry {
+        name: b"builder-filtered.bin",
+        data: &payload,
+        mtime: None,
+        attributes: 0x20,
+        host_os: 3,
+    }];
+    let bytes = rar50::Rar50Writer::new(rar50::WriterOptions {
+        target: ArchiveVersion::Rar50,
+        features: FeatureSet::store_only(),
+    })
+    .compressed_entries(&entries)
+    .filter_policy(FilterPolicy::Explicit(rar50::FilterKind::E8))
+    .finish()
+    .unwrap();
+
+    let archive = Archive::parse(&bytes).unwrap();
+    assert_eq!(archive.extract().unwrap()[0].data, entries[0].data);
 }
 
 #[test]
@@ -359,13 +729,13 @@ fn writes_delta_filtered_compressed_rar50_archive_that_reader_extracts() {
         attributes: 0x20,
         host_os: 3,
     }];
-    let bytes = write_delta_filtered_compressed_archive(
+    let bytes = write_compressed_archive_with_filter_policy(
         &entries,
         rar50::WriterOptions {
             target: ArchiveVersion::Rar50,
             features: FeatureSet::store_only(),
         },
-        3,
+        FilterPolicy::Explicit(FilterKind::Delta { channels: 3 }),
     )
     .unwrap();
 
@@ -393,13 +763,13 @@ fn writes_e8_filtered_compressed_rar50_archive_that_reader_extracts() {
         attributes: 0x20,
         host_os: 3,
     }];
-    let bytes = write_e8_filtered_compressed_archive(
+    let bytes = write_compressed_archive_with_filter_policy(
         &entries,
         rar50::WriterOptions {
             target: ArchiveVersion::Rar50,
             features: FeatureSet::store_only(),
         },
-        false,
+        FilterPolicy::Explicit(FilterKind::E8),
     )
     .unwrap();
 
@@ -426,13 +796,13 @@ fn writes_e8e9_filtered_compressed_rar50_archive_that_reader_extracts() {
         attributes: 0x20,
         host_os: 3,
     }];
-    let bytes = write_e8_filtered_compressed_archive(
+    let bytes = write_compressed_archive_with_filter_policy(
         &entries,
         rar50::WriterOptions {
             target: ArchiveVersion::Rar50,
             features: FeatureSet::store_only(),
         },
-        true,
+        FilterPolicy::Explicit(FilterKind::E8E9),
     )
     .unwrap();
 
@@ -453,12 +823,13 @@ fn writes_arm_filtered_compressed_rar50_archive_that_reader_extracts() {
         attributes: 0x20,
         host_os: 3,
     }];
-    let bytes = write_arm_filtered_compressed_archive(
+    let bytes = write_compressed_archive_with_filter_policy(
         &entries,
         rar50::WriterOptions {
             target: ArchiveVersion::Rar50,
             features: FeatureSet::store_only(),
         },
+        FilterPolicy::Explicit(FilterKind::Arm),
     )
     .unwrap();
 

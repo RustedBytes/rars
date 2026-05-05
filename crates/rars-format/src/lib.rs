@@ -10,3 +10,20 @@ pub use detect::{detect_archive_family, find_archive_start, ArchiveSignature};
 pub use error::{Error, Result};
 pub use features::FeatureSet;
 pub use version::{ArchiveFamily, ArchiveVersion};
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ArchiveReadOptions<'a> {
+    pub password: Option<&'a [u8]>,
+}
+
+impl<'a> ArchiveReadOptions<'a> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_password(password: &'a [u8]) -> Self {
+        Self {
+            password: Some(password),
+        }
+    }
+}

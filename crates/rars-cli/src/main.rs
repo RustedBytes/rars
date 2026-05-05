@@ -6,8 +6,8 @@ use rars::rar15_40::{
     WriterOptions as Rar15WriterOptions,
 };
 use rars::{
-    extract_volumes_to, Archive as DetectedArchive, ArchiveReader, ArchiveVersion, Error,
-    ExtractedEntryMeta, FeatureSet,
+    extract_volumes_to, Archive as DetectedArchive, ArchiveReadOptions, ArchiveReader,
+    ArchiveVersion, Error, ExtractedEntryMeta, FeatureSet,
 };
 use std::env;
 use std::fs;
@@ -57,8 +57,13 @@ fn cmd_info(args: &[String]) -> CliResult<()> {
     }
 
     for path in paths {
-        let archive = ArchiveReader::read_path_with_password(&path, password.as_deref())
-            .map_err(|err| read_archive_error(&path, err))?;
+        let archive = ArchiveReader::read_path_with_options(
+            &path,
+            ArchiveReadOptions {
+                password: password.as_deref(),
+            },
+        )
+        .map_err(|err| read_archive_error(&path, err))?;
         println!(
             "{path}: {:?} at offset {}",
             archive.family(),
@@ -221,8 +226,13 @@ fn cmd_test(args: &[String]) -> CliResult<()> {
     }
 
     if paths.len() == 1 {
-        let archive = ArchiveReader::read_path_with_password(&paths[0], password.as_deref())
-            .map_err(|err| read_archive_error(&paths[0], err))?;
+        let archive = ArchiveReader::read_path_with_options(
+            &paths[0],
+            ArchiveReadOptions {
+                password: password.as_deref(),
+            },
+        )
+        .map_err(|err| read_archive_error(&paths[0], err))?;
         let mut entries = Vec::new();
         archive
             .extract_to(password.as_deref(), |meta| {
@@ -256,8 +266,13 @@ fn cmd_extract(args: &[String]) -> CliResult<()> {
     let out_dir = PathBuf::from(paths.pop().expect("outdir"));
 
     if paths.len() == 1 {
-        let archive = ArchiveReader::read_path_with_password(&paths[0], password.as_deref())
-            .map_err(|err| read_archive_error(&paths[0], err))?;
+        let archive = ArchiveReader::read_path_with_options(
+            &paths[0],
+            ArchiveReadOptions {
+                password: password.as_deref(),
+            },
+        )
+        .map_err(|err| read_archive_error(&paths[0], err))?;
         let mut names = Vec::new();
         archive
             .extract_to(password.as_deref(), |meta| {
@@ -584,11 +599,6 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                     .into(),
             );
         }
-        if recovery_percent.is_some() && volume_size.is_some() && header_encryption {
-            return Err(
-                "RAR 5 header-encrypted recovery writer on volumes is not implemented yet".into(),
-            );
-        }
         let entries: Vec<_> = owned
             .iter()
             .map(|entry| {
@@ -604,16 +614,20 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                 })
             })
             .collect::<std::result::Result<_, _>>()?;
+        let mut features = FeatureSet::store_only();
+        features.archive_comment = archive_comment.is_some();
+        features.file_comment = file_comment.is_some();
+        features.file_encryption = password.is_some();
+        features.header_encryption = header_encryption;
+        features.quick_open = quick_open;
+        features.recovery_record = recovery_percent.is_some();
+        features.solid = solid;
+        let options = rars::rar50::WriterOptions { target, features };
         if let Some(volume_size) = volume_size {
             if archive_comment.is_some() {
                 return Err("RAR 5 writer does not support comments on volumes yet".into());
             }
-            let mut features = FeatureSet::store_only();
-            features.solid = solid;
-            features.recovery_record = recovery_percent.is_some();
             let parts = if let Some(password) = password.as_deref() {
-                features.file_encryption = true;
-                features.header_encryption = header_encryption;
                 if store {
                     let entry = owned.first().expect("stored volume input checked above");
                     let entry = rars::rar50::EncryptedStoredEntry {
@@ -624,20 +638,11 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                         host_os: 3,
                         password,
                     };
-                    if let Some(recovery_percent) = recovery_percent {
-                        rars::rar50::write_encrypted_stored_volumes_with_recovery(
-                            entry,
-                            rars::rar50::WriterOptions { target, features },
-                            volume_size,
-                            recovery_percent,
-                        )?
-                    } else {
-                        rars::rar50::write_encrypted_stored_volumes(
-                            entry,
-                            rars::rar50::WriterOptions { target, features },
-                            volume_size,
-                        )?
-                    }
+                    rars::rar50::Rar50VolumeWriter::new(options)
+                        .encrypted_stored_entry(entry)
+                        .max_payload_per_volume(volume_size)
+                        .recovery_percent(recovery_percent)
+                        .finish()?
                 } else {
                     let compressed_entries: Vec<_> = owned
                         .iter()
@@ -650,38 +655,20 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                             password,
                         })
                         .collect();
-                    if let Some(recovery_percent) = recovery_percent {
-                        rars::rar50::write_encrypted_compressed_volume_set_with_recovery(
-                            &compressed_entries,
-                            rars::rar50::WriterOptions { target, features },
-                            volume_size,
-                            recovery_percent,
-                        )?
-                    } else {
-                        rars::rar50::write_encrypted_compressed_volume_set(
-                            &compressed_entries,
-                            rars::rar50::WriterOptions { target, features },
-                            volume_size,
-                        )?
-                    }
+                    rars::rar50::Rar50VolumeWriter::new(options)
+                        .encrypted_compressed_entries(&compressed_entries)
+                        .max_payload_per_volume(volume_size)
+                        .recovery_percent(recovery_percent)
+                        .finish()?
                 }
             } else {
                 let entry = entries.first().expect("one input checked above");
                 if store {
-                    if let Some(recovery_percent) = recovery_percent {
-                        rars::rar50::write_stored_volumes_with_recovery(
-                            *entry,
-                            rars::rar50::WriterOptions { target, features },
-                            volume_size,
-                            recovery_percent,
-                        )?
-                    } else {
-                        rars::rar50::write_stored_volumes(
-                            *entry,
-                            rars::rar50::WriterOptions { target, features },
-                            volume_size,
-                        )?
-                    }
+                    rars::rar50::Rar50VolumeWriter::new(options)
+                        .stored_entry(*entry)
+                        .max_payload_per_volume(volume_size)
+                        .recovery_percent(recovery_percent)
+                        .finish()?
                 } else {
                     let compressed_entries: Vec<_> = owned
                         .iter()
@@ -693,20 +680,11 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                             host_os: 3,
                         })
                         .collect();
-                    if let Some(recovery_percent) = recovery_percent {
-                        rars::rar50::write_compressed_volume_set_with_recovery(
-                            &compressed_entries,
-                            rars::rar50::WriterOptions { target, features },
-                            volume_size,
-                            recovery_percent,
-                        )?
-                    } else {
-                        rars::rar50::write_compressed_volume_set(
-                            &compressed_entries,
-                            rars::rar50::WriterOptions { target, features },
-                            volume_size,
-                        )?
-                    }
+                    rars::rar50::Rar50VolumeWriter::new(options)
+                        .compressed_entries(&compressed_entries)
+                        .max_payload_per_volume(volume_size)
+                        .recovery_percent(recovery_percent)
+                        .finish()?
                 }
             };
             write_rar50_volume_parts(&archive_path, &parts).map_err(|err| {
@@ -721,15 +699,7 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
             println!("created {} volumes", parts.len());
             return Ok(());
         }
-        let mut features = FeatureSet::store_only();
-        features.archive_comment = archive_comment.is_some();
-        features.file_comment = file_comment.is_some();
-        features.header_encryption = header_encryption;
-        features.quick_open = quick_open;
-        features.recovery_record = recovery_percent.is_some();
-        features.solid = solid;
         let bytes = if let Some(password) = password.as_deref() {
-            features.file_encryption = true;
             let archive_metadata =
                 archive_name
                     .as_deref()
@@ -752,12 +722,11 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                 .as_deref()
                 .map(|data| rars::rar50::EncryptedArchiveCommentEntry { data, password });
             if let Some(recovery_percent) = recovery_percent.filter(|_| store) {
-                rars::rar50::write_encrypted_stored_archive_with_recovery(
-                    &entries,
-                    rars::rar50::WriterOptions { target, features },
-                    recovery_percent,
-                    password,
-                )?
+                rars::rar50::Rar50Writer::new(options)
+                    .encrypted_stored_entries(&entries)
+                    .recovery_percent(Some(recovery_percent))
+                    .recovery_password(Some(password))
+                    .finish()?
             } else if let Some(file_comment) = file_comment.as_deref().filter(|_| store) {
                 let services: Vec<_> = owned
                     .iter()
@@ -779,17 +748,15 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                         },
                     )
                     .collect();
-                rars::rar50::write_encrypted_stored_archive_with_file_services(
-                    &entries_with_services,
-                    rars::rar50::WriterOptions { target, features },
-                )?
+                rars::rar50::Rar50Writer::new(options)
+                    .encrypted_stored_entries_with_services(&entries_with_services)
+                    .finish()?
             } else if store {
-                rars::rar50::write_encrypted_stored_archive_with_comment_and_metadata(
-                    &entries,
-                    rars::rar50::WriterOptions { target, features },
-                    archive_comment,
-                    archive_metadata,
-                )?
+                rars::rar50::Rar50Writer::new(options)
+                    .encrypted_stored_entries(&entries)
+                    .encrypted_archive_comment(archive_comment)
+                    .archive_metadata(archive_metadata)
+                    .finish()?
             } else {
                 let compressed_entries: Vec<_> = owned
                     .iter()
@@ -803,18 +770,16 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                     })
                     .collect();
                 if let Some(recovery_percent) = recovery_percent {
-                    rars::rar50::write_encrypted_compressed_archive_with_recovery(
-                        &compressed_entries,
-                        rars::rar50::WriterOptions { target, features },
-                        recovery_percent,
-                    )?
+                    rars::rar50::Rar50Writer::new(options)
+                        .encrypted_compressed_entries(&compressed_entries)
+                        .recovery_percent(Some(recovery_percent))
+                        .finish()?
                 } else {
-                    rars::rar50::write_encrypted_compressed_archive_with_comment_and_metadata(
-                        &compressed_entries,
-                        rars::rar50::WriterOptions { target, features },
-                        archive_comment,
-                        archive_metadata,
-                    )?
+                    rars::rar50::Rar50Writer::new(options)
+                        .encrypted_compressed_entries(&compressed_entries)
+                        .encrypted_archive_comment(archive_comment)
+                        .archive_metadata(archive_metadata)
+                        .finish()?
                 }
             }
         } else {
@@ -826,11 +791,10 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                         creation_time: Some(current_filetime()),
                     });
             if let Some(recovery_percent) = recovery_percent.filter(|_| store) {
-                rars::rar50::write_stored_archive_with_recovery(
-                    &entries,
-                    rars::rar50::WriterOptions { target, features },
-                    recovery_percent,
-                )?
+                rars::rar50::Rar50Writer::new(options)
+                    .stored_entries(&entries)
+                    .recovery_percent(Some(recovery_percent))
+                    .finish()?
             } else if let Some(file_comment) = file_comment.as_deref().filter(|_| store) {
                 let services: Vec<_> = owned
                     .iter()
@@ -849,17 +813,15 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                         services,
                     })
                     .collect();
-                rars::rar50::write_stored_archive_with_file_services(
-                    &entries_with_services,
-                    rars::rar50::WriterOptions { target, features },
-                )?
+                rars::rar50::Rar50Writer::new(options)
+                    .stored_entries_with_services(&entries_with_services)
+                    .finish()?
             } else if store {
-                rars::rar50::write_stored_archive_with_comment_and_metadata(
-                    &entries,
-                    rars::rar50::WriterOptions { target, features },
-                    archive_comment.as_deref(),
-                    archive_metadata,
-                )?
+                rars::rar50::Rar50Writer::new(options)
+                    .stored_entries(&entries)
+                    .archive_comment(archive_comment.as_deref())
+                    .archive_metadata(archive_metadata)
+                    .finish()?
             } else {
                 let compressed_entries: Vec<_> = owned
                     .iter()
@@ -872,41 +834,45 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                     })
                     .collect();
                 if let Some(recovery_percent) = recovery_percent {
-                    rars::rar50::write_compressed_archive_with_recovery(
-                        &compressed_entries,
-                        rars::rar50::WriterOptions { target, features },
-                        recovery_percent,
-                    )?
+                    rars::rar50::Rar50Writer::new(options)
+                        .compressed_entries(&compressed_entries)
+                        .recovery_percent(Some(recovery_percent))
+                        .finish()?
                 } else if let Some(channels) = delta_filter {
-                    rars::rar50::write_delta_filtered_compressed_archive(
-                        &compressed_entries,
-                        rars::rar50::WriterOptions { target, features },
-                        channels,
-                    )?
+                    rars::rar50::Rar50Writer::new(options)
+                        .compressed_entries(&compressed_entries)
+                        .filter_policy(rars::rar50::FilterPolicy::Explicit(
+                            rars::rar50::FilterKind::Delta { channels },
+                        ))
+                        .finish()?
                 } else if let Some(include_e9) = e8_filter {
-                    rars::rar50::write_e8_filtered_compressed_archive(
-                        &compressed_entries,
-                        rars::rar50::WriterOptions { target, features },
-                        include_e9,
-                    )?
+                    let filter = if include_e9 {
+                        rars::rar50::FilterKind::E8E9
+                    } else {
+                        rars::rar50::FilterKind::E8
+                    };
+                    rars::rar50::Rar50Writer::new(options)
+                        .compressed_entries(&compressed_entries)
+                        .filter_policy(rars::rar50::FilterPolicy::Explicit(filter))
+                        .finish()?
                 } else if arm_filter {
-                    rars::rar50::write_arm_filtered_compressed_archive(
-                        &compressed_entries,
-                        rars::rar50::WriterOptions { target, features },
-                    )?
+                    rars::rar50::Rar50Writer::new(options)
+                        .compressed_entries(&compressed_entries)
+                        .filter_policy(rars::rar50::FilterPolicy::Explicit(
+                            rars::rar50::FilterKind::Arm,
+                        ))
+                        .finish()?
                 } else if auto_filter {
-                    rars::rar50::write_compressed_archive_with_filter_policy(
-                        &compressed_entries,
-                        rars::rar50::WriterOptions { target, features },
-                        rars::rar50::FilterPolicy::AutoSize,
-                    )?
+                    rars::rar50::Rar50Writer::new(options)
+                        .compressed_entries(&compressed_entries)
+                        .filter_policy(rars::rar50::FilterPolicy::AutoSize)
+                        .finish()?
                 } else {
-                    rars::rar50::write_compressed_archive_with_comment_and_metadata(
-                        &compressed_entries,
-                        rars::rar50::WriterOptions { target, features },
-                        archive_comment.as_deref(),
-                        archive_metadata,
-                    )?
+                    rars::rar50::Rar50Writer::new(options)
+                        .compressed_entries(&compressed_entries)
+                        .archive_comment(archive_comment.as_deref())
+                        .archive_metadata(archive_metadata)
+                        .finish()?
                 }
             }
         };
@@ -1024,27 +990,36 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                     file_comment: None,
                 });
             }
-            if auto_filter {
-                rars::rar15_40::write_rar29_auto_filtered_compressed_archive(&entries, options)?
+            let policy = if auto_filter {
+                rars::rar15_40::FilterPolicy::Auto
             } else if let Some(channels) = delta_filter {
-                rars::rar15_40::write_rar29_delta_filtered_compressed_archive(
-                    &entries, options, channels,
-                )?
+                rars::rar15_40::FilterPolicy::Explicit(rars::rar15_40::FilterSpec::whole(
+                    rars::rar15_40::FilterKind::Delta { channels },
+                ))
             } else if e8_filter == Some(true) {
-                rars::rar15_40::write_rar29_e8e9_filtered_compressed_archive(&entries, options)?
+                rars::rar15_40::FilterPolicy::Explicit(rars::rar15_40::FilterSpec::whole(
+                    rars::rar15_40::FilterKind::E8E9,
+                ))
             } else if itanium_filter {
-                rars::rar15_40::write_rar29_itanium_filtered_compressed_archive(&entries, options)?
+                rars::rar15_40::FilterPolicy::Explicit(rars::rar15_40::FilterSpec::whole(
+                    rars::rar15_40::FilterKind::Itanium,
+                ))
             } else if let Some(width) = rgb_filter {
-                rars::rar15_40::write_rar29_rgb_filtered_compressed_archive(
-                    &entries, options, width, 0,
-                )?
+                rars::rar15_40::FilterPolicy::Explicit(rars::rar15_40::FilterSpec::whole(
+                    rars::rar15_40::FilterKind::Rgb { width, pos_r: 0 },
+                ))
             } else if let Some(channels) = audio_filter {
-                rars::rar15_40::write_rar29_audio_filtered_compressed_archive(
-                    &entries, options, channels,
-                )?
+                rars::rar15_40::FilterPolicy::Explicit(rars::rar15_40::FilterSpec::whole(
+                    rars::rar15_40::FilterKind::Audio { channels },
+                ))
             } else {
-                rars::rar15_40::write_rar29_e8_filtered_compressed_archive(&entries, options)?
-            }
+                rars::rar15_40::FilterPolicy::Explicit(rars::rar15_40::FilterSpec::whole(
+                    rars::rar15_40::FilterKind::E8,
+                ))
+            };
+            rars::rar15_40::write_rar29_compressed_archive_with_filter_policy(
+                &entries, options, policy,
+            )?
         } else {
             let mut entries = Vec::with_capacity(owned.len());
             for entry in &owned {
@@ -1255,7 +1230,7 @@ fn parse_archives(paths: &[String], password: Option<&[u8]>) -> CliResult<Vec<De
     let mut archives = Vec::new();
     for path in paths {
         archives.push(
-            ArchiveReader::read_path_with_password(path, password)
+            ArchiveReader::read_path_with_options(path, ArchiveReadOptions { password })
                 .map_err(|err| read_archive_error(path, err))?,
         );
     }

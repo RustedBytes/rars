@@ -249,7 +249,14 @@ impl<'a> DecoderSession<'a> {
 /// Convenience multivolume extraction API that buffers each extracted entry in
 /// memory. Prefer [`extract_volumes_to`] for large archives.
 pub fn extract_volumes(volumes: &[Archive]) -> Result<Vec<ExtractedEntry>> {
-    extract_volumes_with_password(volumes, None)
+    extract_volumes_with_options(volumes, crate::ArchiveReadOptions::default())
+}
+
+pub fn extract_volumes_with_options(
+    volumes: &[Archive],
+    options: crate::ArchiveReadOptions<'_>,
+) -> Result<Vec<ExtractedEntry>> {
+    extract_volumes_with_password(volumes, options.password)
 }
 
 pub fn extract_volumes_with_password(
@@ -295,7 +302,18 @@ pub fn extract_volumes_to<F>(volumes: &[Archive], open: F) -> Result<()>
 where
     F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
 {
-    extract_volumes_to_with_password(volumes, None, open)
+    extract_volumes_to_with_options(volumes, crate::ArchiveReadOptions::default(), open)
+}
+
+pub fn extract_volumes_to_with_options<F>(
+    volumes: &[Archive],
+    options: crate::ArchiveReadOptions<'_>,
+    open: F,
+) -> Result<()>
+where
+    F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
+{
+    extract_volumes_to_with_password(volumes, options.password, open)
 }
 
 pub fn extract_volumes_to_with_password<F>(

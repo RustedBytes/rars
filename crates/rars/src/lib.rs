@@ -1,9 +1,8 @@
 pub use rars_format::{
     detect_archive_family, find_archive_start, rar13, rar15_40, rar50, ArchiveFamily,
-    ArchiveSignature, ArchiveVersion, Error, FeatureSet, Result,
+    ArchiveReadOptions, ArchiveSignature, ArchiveVersion, Error, FeatureSet, Result,
 };
 use std::io::{Read, Write};
-use std::ops::Range;
 use std::path::Path;
 
 #[derive(Debug, Clone)]
@@ -63,31 +62,13 @@ impl Archive {
         F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
     {
         match self {
-            Self::Rar13(archive) => archive.extract_to(password, |meta| {
-                open(&ExtractedEntryMeta {
-                    name: meta.name.clone(),
-                    file_time: meta.file_time,
-                    file_attr: meta.file_attr as u32,
-                    is_directory: meta.is_directory,
-                })
-            }),
-            Self::Rar15To40(archive) => archive.extract_to_with_password(password, |meta| {
-                open(&ExtractedEntryMeta {
-                    name: meta.name.clone(),
-                    file_time: meta.file_time,
-                    file_attr: meta.attr,
-                    is_directory: meta.is_directory,
-                })
-            }),
-            Self::Rar50Plus(archive) => archive.extract_to_with_password(password, |meta| {
-                open(&ExtractedEntryMeta {
-                    name: meta.name.clone(),
-                    file_time: meta.file_time,
-                    file_attr: u32::try_from(meta.attr)
-                        .map_err(|_| Error::InvalidHeader("RAR 5 file attributes overflow u32"))?,
-                    is_directory: meta.is_directory,
-                })
-            }),
+            Self::Rar13(archive) => archive.extract_to(password, |meta| open(&rar13_meta(meta))),
+            Self::Rar15To40(archive) => {
+                archive.extract_to_with_password(password, |meta| open(&rar15_40_meta(meta)))
+            }
+            Self::Rar50Plus(archive) => {
+                archive.extract_to_with_password(password, |meta| open(&rar50_meta(meta)?))
+            }
         }
     }
 
@@ -154,23 +135,6 @@ impl From<rar50::ExtractedEntry> for ExtractedEntry {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ArchiveReader;
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ArchiveReadOptions<'a> {
-    pub password: Option<&'a [u8]>,
-}
-
-impl<'a> ArchiveReadOptions<'a> {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_password(password: &'a [u8]) -> Self {
-        Self {
-            password: Some(password),
-        }
-    }
-}
-
 impl ArchiveReader {
     pub fn detect(input: &[u8]) -> Result<ArchiveSignature> {
         detect_archive_family(input).ok_or(Error::UnsupportedSignature)
@@ -180,32 +144,21 @@ impl ArchiveReader {
         Self::read_with_options(input, ArchiveReadOptions::default())
     }
 
-    pub fn read_with_password(input: &[u8], password: Option<&[u8]>) -> Result<Archive> {
-        Self::read_with_options(input, ArchiveReadOptions { password })
-    }
-
     pub fn read_with_options(input: &[u8], options: ArchiveReadOptions<'_>) -> Result<Archive> {
         let signature = find_archive_start(input, 128 * 1024).ok_or(Error::UnsupportedSignature)?;
         match signature.family {
             ArchiveFamily::Rar13 => Ok(Archive::Rar13(rar13::Archive::parse(input)?)),
             ArchiveFamily::Rar15To40 => Ok(Archive::Rar15To40(
-                rar15_40::Archive::parse_with_password(input, options.password)?,
+                rar15_40::Archive::parse_with_options(input, options)?,
             )),
-            ArchiveFamily::Rar50Plus => Ok(Archive::Rar50Plus(
-                rar50::Archive::parse_with_password(input, options.password)?,
-            )),
+            ArchiveFamily::Rar50Plus => Ok(Archive::Rar50Plus(rar50::Archive::parse_with_options(
+                input, options,
+            )?)),
         }
     }
 
     pub fn read_path(path: impl AsRef<Path>) -> Result<Archive> {
         Self::read_path_with_options(path, ArchiveReadOptions::default())
-    }
-
-    pub fn read_path_with_password(
-        path: impl AsRef<Path>,
-        password: Option<&[u8]>,
-    ) -> Result<Archive> {
-        Self::read_path_with_options(path, ArchiveReadOptions { password })
     }
 
     pub fn read_path_with_options(
@@ -221,10 +174,10 @@ impl ArchiveReader {
         match signature.family {
             ArchiveFamily::Rar13 => Ok(Archive::Rar13(rar13::Archive::parse_path(path)?)),
             ArchiveFamily::Rar15To40 => Ok(Archive::Rar15To40(
-                rar15_40::Archive::parse_path_with_password(path, options.password)?,
+                rar15_40::Archive::parse_path_with_options(path, options)?,
             )),
             ArchiveFamily::Rar50Plus => Ok(Archive::Rar50Plus(
-                rar50::Archive::parse_path_with_password(path, options.password)?,
+                rar50::Archive::parse_path_with_options(path, options)?,
             )),
         }
     }
@@ -242,42 +195,18 @@ pub fn extract_volumes(
 
     match first.family() {
         ArchiveFamily::Rar13 => {
-            let mut typed = Vec::with_capacity(archives.len());
-            for archive in archives {
-                match archive {
-                    Archive::Rar13(archive) => typed.push(archive.clone()),
-                    Archive::Rar15To40(_) | Archive::Rar50Plus(_) => {
-                        return Err(Error::InvalidHeader("mixed archive families in volume set"));
-                    }
-                }
-            }
+            let typed = rar13_volumes(archives)?;
             rar13::extract_volumes(&typed, password)
                 .map(|entries| entries.into_iter().map(Into::into).collect())
         }
         ArchiveFamily::Rar15To40 => {
-            let mut typed = Vec::with_capacity(archives.len());
-            for archive in archives {
-                match archive {
-                    Archive::Rar15To40(archive) => typed.push(archive.clone()),
-                    Archive::Rar13(_) | Archive::Rar50Plus(_) => {
-                        return Err(Error::InvalidHeader("mixed archive families in volume set"));
-                    }
-                }
-            }
-            rar15_40::extract_volumes_with_password(&typed, password)
+            let typed = rar15_40_volumes(archives)?;
+            rar15_40::extract_volumes_with_options(&typed, ArchiveReadOptions { password })
                 .map(|entries| entries.into_iter().map(Into::into).collect())
         }
         ArchiveFamily::Rar50Plus => {
-            let mut typed = Vec::with_capacity(archives.len());
-            for archive in archives {
-                match archive {
-                    Archive::Rar50Plus(archive) => typed.push(archive.clone()),
-                    Archive::Rar13(_) | Archive::Rar15To40(_) => {
-                        return Err(Error::InvalidHeader("mixed archive families in volume set"));
-                    }
-                }
-            }
-            rar50::extract_volumes_with_password(&typed, password)
+            let typed = rar50_volumes(archives)?;
+            rar50::extract_volumes_with_options(&typed, ArchiveReadOptions { password })
                 .map(|entries| entries.into_iter().map(Into::into).collect())
         }
     }
@@ -298,63 +227,90 @@ where
 
     match first.family() {
         ArchiveFamily::Rar13 => {
-            let mut typed = Vec::with_capacity(archives.len());
-            for archive in archives {
-                match archive {
-                    Archive::Rar13(archive) => typed.push(archive.clone()),
-                    Archive::Rar15To40(_) | Archive::Rar50Plus(_) => {
-                        return Err(Error::InvalidHeader("mixed archive families in volume set"));
-                    }
-                }
-            }
-            rar13::extract_volumes_to(&typed, password, |meta| {
-                open(&ExtractedEntryMeta {
-                    name: meta.name.clone(),
-                    file_time: meta.file_time,
-                    file_attr: meta.file_attr as u32,
-                    is_directory: meta.is_directory,
-                })
-            })
+            let typed = rar13_volumes(archives)?;
+            rar13::extract_volumes_to(&typed, password, |meta| open(&rar13_meta(meta)))
         }
         ArchiveFamily::Rar15To40 => {
-            let mut typed = Vec::with_capacity(archives.len());
-            for archive in archives {
-                match archive {
-                    Archive::Rar15To40(archive) => typed.push(archive.clone()),
-                    Archive::Rar13(_) | Archive::Rar50Plus(_) => {
-                        return Err(Error::InvalidHeader("mixed archive families in volume set"));
-                    }
-                }
-            }
-            rar15_40::extract_volumes_to_with_password(&typed, password, |meta| {
-                open(&ExtractedEntryMeta {
-                    name: meta.name.clone(),
-                    file_time: meta.file_time,
-                    file_attr: meta.attr,
-                    is_directory: meta.is_directory,
-                })
-            })
+            let typed = rar15_40_volumes(archives)?;
+            rar15_40::extract_volumes_to_with_options(
+                &typed,
+                ArchiveReadOptions { password },
+                |meta| open(&rar15_40_meta(meta)),
+            )
         }
         ArchiveFamily::Rar50Plus => {
-            let mut typed = Vec::with_capacity(archives.len());
-            for archive in archives {
-                match archive {
-                    Archive::Rar50Plus(archive) => typed.push(archive.clone()),
-                    Archive::Rar13(_) | Archive::Rar15To40(_) => {
-                        return Err(Error::InvalidHeader("mixed archive families in volume set"));
-                    }
-                }
-            }
-            rar50::extract_volumes_to_with_password(&typed, password, |meta| {
-                open(&ExtractedEntryMeta {
-                    name: meta.name.clone(),
-                    file_time: meta.file_time,
-                    file_attr: meta.attr as u32,
-                    is_directory: meta.is_directory,
-                })
-            })
+            let typed = rar50_volumes(archives)?;
+            rar50::extract_volumes_to_with_options(
+                &typed,
+                ArchiveReadOptions { password },
+                |meta| open(&rar50_meta(meta)?),
+            )
         }
     }
+}
+
+fn rar13_meta(meta: &rar13::ExtractedEntryMeta) -> ExtractedEntryMeta {
+    ExtractedEntryMeta {
+        name: meta.name.clone(),
+        file_time: meta.file_time,
+        file_attr: u32::from(meta.file_attr),
+        is_directory: meta.is_directory,
+    }
+}
+
+fn rar15_40_meta(meta: &rar15_40::ExtractedEntryMeta) -> ExtractedEntryMeta {
+    ExtractedEntryMeta {
+        name: meta.name.clone(),
+        file_time: meta.file_time,
+        file_attr: meta.attr,
+        is_directory: meta.is_directory,
+    }
+}
+
+fn rar50_meta(meta: &rar50::ExtractedEntryMeta) -> Result<ExtractedEntryMeta> {
+    Ok(ExtractedEntryMeta {
+        name: meta.name.clone(),
+        file_time: meta.file_time,
+        file_attr: u32::try_from(meta.attr)
+            .map_err(|_| Error::InvalidHeader("RAR 5 file attributes overflow u32"))?,
+        is_directory: meta.is_directory,
+    })
+}
+
+fn rar13_volumes(archives: &[Archive]) -> Result<Vec<rar13::Archive>> {
+    archives
+        .iter()
+        .map(|archive| match archive {
+            Archive::Rar13(archive) => Ok(archive.clone()),
+            Archive::Rar15To40(_) | Archive::Rar50Plus(_) => {
+                Err(Error::InvalidHeader("mixed archive families in volume set"))
+            }
+        })
+        .collect()
+}
+
+fn rar15_40_volumes(archives: &[Archive]) -> Result<Vec<rar15_40::Archive>> {
+    archives
+        .iter()
+        .map(|archive| match archive {
+            Archive::Rar15To40(archive) => Ok(archive.clone()),
+            Archive::Rar13(_) | Archive::Rar50Plus(_) => {
+                Err(Error::InvalidHeader("mixed archive families in volume set"))
+            }
+        })
+        .collect()
+}
+
+fn rar50_volumes(archives: &[Archive]) -> Result<Vec<rar50::Archive>> {
+    archives
+        .iter()
+        .map(|archive| match archive {
+            Archive::Rar50Plus(archive) => Ok(archive.clone()),
+            Archive::Rar13(_) | Archive::Rar15To40(_) => {
+                Err(Error::InvalidHeader("mixed archive families in volume set"))
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -441,200 +397,18 @@ impl ArchiveWriter {
         )
     }
 
-    pub fn write_rar29_e8_filtered_compressed(
+    pub fn write_rar29_compressed_with_filter_policy(
         self,
         entries: &[rar15_40::FileEntry<'_>],
+        policy: rar15_40::FilterPolicy,
     ) -> Result<Vec<u8>> {
-        rar15_40::write_rar29_e8_filtered_compressed_archive(
+        rar15_40::write_rar29_compressed_archive_with_filter_policy(
             entries,
             rar15_40::WriterOptions {
                 target: self.target,
                 features: self.features,
             },
-        )
-    }
-
-    pub fn write_rar29_e8e9_filtered_compressed(
-        self,
-        entries: &[rar15_40::FileEntry<'_>],
-    ) -> Result<Vec<u8>> {
-        rar15_40::write_rar29_e8e9_filtered_compressed_archive(
-            entries,
-            rar15_40::WriterOptions {
-                target: self.target,
-                features: self.features,
-            },
-        )
-    }
-
-    pub fn write_rar29_auto_filtered_compressed(
-        self,
-        entries: &[rar15_40::FileEntry<'_>],
-    ) -> Result<Vec<u8>> {
-        rar15_40::write_rar29_auto_filtered_compressed_archive(
-            entries,
-            rar15_40::WriterOptions {
-                target: self.target,
-                features: self.features,
-            },
-        )
-    }
-
-    pub fn write_rar29_e8_range_filtered_compressed(
-        self,
-        entries: &[rar15_40::FileEntry<'_>],
-        range: Range<usize>,
-    ) -> Result<Vec<u8>> {
-        rar15_40::write_rar29_e8_range_filtered_compressed_archive(
-            entries,
-            rar15_40::WriterOptions {
-                target: self.target,
-                features: self.features,
-            },
-            range,
-        )
-    }
-
-    pub fn write_rar29_e8e9_range_filtered_compressed(
-        self,
-        entries: &[rar15_40::FileEntry<'_>],
-        range: Range<usize>,
-    ) -> Result<Vec<u8>> {
-        rar15_40::write_rar29_e8e9_range_filtered_compressed_archive(
-            entries,
-            rar15_40::WriterOptions {
-                target: self.target,
-                features: self.features,
-            },
-            range,
-        )
-    }
-
-    pub fn write_rar29_delta_filtered_compressed(
-        self,
-        entries: &[rar15_40::FileEntry<'_>],
-        channels: usize,
-    ) -> Result<Vec<u8>> {
-        rar15_40::write_rar29_delta_filtered_compressed_archive(
-            entries,
-            rar15_40::WriterOptions {
-                target: self.target,
-                features: self.features,
-            },
-            channels,
-        )
-    }
-
-    pub fn write_rar29_delta_range_filtered_compressed(
-        self,
-        entries: &[rar15_40::FileEntry<'_>],
-        range: Range<usize>,
-        channels: usize,
-    ) -> Result<Vec<u8>> {
-        rar15_40::write_rar29_delta_range_filtered_compressed_archive(
-            entries,
-            rar15_40::WriterOptions {
-                target: self.target,
-                features: self.features,
-            },
-            range,
-            channels,
-        )
-    }
-
-    pub fn write_rar29_itanium_filtered_compressed(
-        self,
-        entries: &[rar15_40::FileEntry<'_>],
-    ) -> Result<Vec<u8>> {
-        rar15_40::write_rar29_itanium_filtered_compressed_archive(
-            entries,
-            rar15_40::WriterOptions {
-                target: self.target,
-                features: self.features,
-            },
-        )
-    }
-
-    pub fn write_rar29_itanium_range_filtered_compressed(
-        self,
-        entries: &[rar15_40::FileEntry<'_>],
-        range: Range<usize>,
-    ) -> Result<Vec<u8>> {
-        rar15_40::write_rar29_itanium_range_filtered_compressed_archive(
-            entries,
-            rar15_40::WriterOptions {
-                target: self.target,
-                features: self.features,
-            },
-            range,
-        )
-    }
-
-    pub fn write_rar29_rgb_filtered_compressed(
-        self,
-        entries: &[rar15_40::FileEntry<'_>],
-        width: usize,
-        pos_r: usize,
-    ) -> Result<Vec<u8>> {
-        rar15_40::write_rar29_rgb_filtered_compressed_archive(
-            entries,
-            rar15_40::WriterOptions {
-                target: self.target,
-                features: self.features,
-            },
-            width,
-            pos_r,
-        )
-    }
-
-    pub fn write_rar29_rgb_range_filtered_compressed(
-        self,
-        entries: &[rar15_40::FileEntry<'_>],
-        range: Range<usize>,
-        width: usize,
-        pos_r: usize,
-    ) -> Result<Vec<u8>> {
-        rar15_40::write_rar29_rgb_range_filtered_compressed_archive(
-            entries,
-            rar15_40::WriterOptions {
-                target: self.target,
-                features: self.features,
-            },
-            range,
-            width,
-            pos_r,
-        )
-    }
-
-    pub fn write_rar29_audio_filtered_compressed(
-        self,
-        entries: &[rar15_40::FileEntry<'_>],
-        channels: usize,
-    ) -> Result<Vec<u8>> {
-        rar15_40::write_rar29_audio_filtered_compressed_archive(
-            entries,
-            rar15_40::WriterOptions {
-                target: self.target,
-                features: self.features,
-            },
-            channels,
-        )
-    }
-
-    pub fn write_rar29_audio_range_filtered_compressed(
-        self,
-        entries: &[rar15_40::FileEntry<'_>],
-        range: Range<usize>,
-        channels: usize,
-    ) -> Result<Vec<u8>> {
-        rar15_40::write_rar29_audio_range_filtered_compressed_archive(
-            entries,
-            rar15_40::WriterOptions {
-                target: self.target,
-                features: self.features,
-            },
-            range,
-            channels,
+            policy,
         )
     }
 
@@ -683,446 +457,47 @@ impl ArchiveWriter {
         )
     }
 
-    pub fn write_rar50_stored(self, entries: &[rar50::StoredEntry<'_>]) -> Result<Vec<u8>> {
-        self.write_rar50_stored_with_comment(entries, None)
+    pub fn rar50_options(self) -> Result<rar50::WriterOptions> {
+        if self.target.family() != ArchiveFamily::Rar50Plus {
+            return Err(Error::UnsupportedVersion(self.target));
+        }
+        Ok(rar50::WriterOptions {
+            target: self.target,
+            features: self.features,
+        })
     }
 
-    pub fn write_rar50_compressed(self, entries: &[rar50::CompressedEntry<'_>]) -> Result<Vec<u8>> {
-        rar50::write_compressed_archive(
-            entries,
-            rar50::WriterOptions {
-                target: self.target,
-                features: self.features,
-            },
-        )
-    }
-
-    pub fn write_rar50_compressed_with_recovery(
-        self,
-        entries: &[rar50::CompressedEntry<'_>],
-        recovery_percent: u64,
-    ) -> Result<Vec<u8>> {
-        rar50::write_compressed_archive_with_recovery(
-            entries,
-            rar50::WriterOptions {
-                target: self.target,
-                features: self.features,
-            },
-            recovery_percent,
-        )
-    }
-
-    pub fn write_rar50_delta_filtered_compressed(
-        self,
-        entries: &[rar50::CompressedEntry<'_>],
-        channels: usize,
-    ) -> Result<Vec<u8>> {
-        rar50::write_delta_filtered_compressed_archive(
-            entries,
-            rar50::WriterOptions {
-                target: self.target,
-                features: self.features,
-            },
-            channels,
-        )
-    }
-
-    pub fn write_rar50_e8_filtered_compressed(
-        self,
-        entries: &[rar50::CompressedEntry<'_>],
-        include_e9: bool,
-    ) -> Result<Vec<u8>> {
-        rar50::write_e8_filtered_compressed_archive(
-            entries,
-            rar50::WriterOptions {
-                target: self.target,
-                features: self.features,
-            },
-            include_e9,
-        )
-    }
-
-    pub fn write_rar50_arm_filtered_compressed(
-        self,
-        entries: &[rar50::CompressedEntry<'_>],
-    ) -> Result<Vec<u8>> {
-        rar50::write_arm_filtered_compressed_archive(
-            entries,
-            rar50::WriterOptions {
-                target: self.target,
-                features: self.features,
-            },
-        )
-    }
-
-    pub fn write_rar50_compressed_with_filter_policy(
-        self,
-        entries: &[rar50::CompressedEntry<'_>],
-        policy: rar50::FilterPolicy,
-    ) -> Result<Vec<u8>> {
-        rar50::write_compressed_archive_with_filter_policy(
-            entries,
-            rar50::WriterOptions {
-                target: self.target,
-                features: self.features,
-            },
-            policy,
-        )
-    }
-
-    pub fn write_rar50_compressed_with_metadata(
-        self,
-        entries: &[rar50::CompressedEntry<'_>],
-        archive_metadata: Option<rar50::ArchiveMetadataEntry<'_>>,
-    ) -> Result<Vec<u8>> {
-        self.write_rar50_compressed_with_comment_and_metadata(entries, None, archive_metadata)
-    }
-
-    pub fn write_rar50_compressed_with_comment_and_metadata(
-        self,
-        entries: &[rar50::CompressedEntry<'_>],
-        archive_comment: Option<&[u8]>,
-        archive_metadata: Option<rar50::ArchiveMetadataEntry<'_>>,
-    ) -> Result<Vec<u8>> {
-        rar50::write_compressed_archive_with_comment_and_metadata(
-            entries,
-            rar50::WriterOptions {
-                target: self.target,
-                features: self.features,
-            },
-            archive_comment,
-            archive_metadata,
-        )
-    }
-
-    pub fn write_rar50_stored_with_comment(
-        self,
-        entries: &[rar50::StoredEntry<'_>],
-        archive_comment: Option<&[u8]>,
-    ) -> Result<Vec<u8>> {
-        self.write_rar50_stored_with_comment_and_metadata(entries, archive_comment, None)
-    }
-
-    pub fn write_rar50_stored_with_comment_and_metadata(
-        self,
-        entries: &[rar50::StoredEntry<'_>],
-        archive_comment: Option<&[u8]>,
-        archive_metadata: Option<rar50::ArchiveMetadataEntry<'_>>,
-    ) -> Result<Vec<u8>> {
-        rar50::write_stored_archive_with_comment_and_metadata(
-            entries,
-            rar50::WriterOptions {
-                target: self.target,
-                features: self.features,
-            },
-            archive_comment,
-            archive_metadata,
-        )
-    }
-
-    pub fn write_rar50_stored_with_file_services(
-        self,
-        entries: &[rar50::StoredEntryWithServices<'_>],
-    ) -> Result<Vec<u8>> {
-        rar50::write_stored_archive_with_file_services(
-            entries,
-            rar50::WriterOptions {
-                target: self.target,
-                features: self.features,
-            },
-        )
-    }
-
-    pub fn write_rar50_encrypted_stored_with_file_services(
-        self,
-        entries: &[rar50::EncryptedStoredEntryWithServices<'_>],
-    ) -> Result<Vec<u8>> {
-        rar50::write_encrypted_stored_archive_with_file_services(
-            entries,
-            rar50::WriterOptions {
-                target: self.target,
-                features: self.features,
-            },
-        )
-    }
-
-    pub fn write_rar50_stored_with_recovery(
-        self,
-        entries: &[rar50::StoredEntry<'_>],
-        recovery_percent: u64,
-    ) -> Result<Vec<u8>> {
-        rar50::write_stored_archive_with_recovery(
-            entries,
-            rar50::WriterOptions {
-                target: self.target,
-                features: self.features,
-            },
-            recovery_percent,
-        )
-    }
-
-    pub fn write_rar50_encrypted_stored(
-        self,
-        entries: &[rar50::EncryptedStoredEntry<'_>],
-    ) -> Result<Vec<u8>> {
-        self.write_rar50_encrypted_stored_with_comment(entries, None)
-    }
-
-    pub fn write_rar50_encrypted_compressed(
-        self,
-        entries: &[rar50::EncryptedCompressedEntry<'_>],
-    ) -> Result<Vec<u8>> {
-        self.write_rar50_encrypted_compressed_with_metadata(entries, None)
-    }
-
-    pub fn write_rar50_encrypted_compressed_with_metadata(
-        self,
-        entries: &[rar50::EncryptedCompressedEntry<'_>],
-        archive_metadata: Option<rar50::ArchiveMetadataEntry<'_>>,
-    ) -> Result<Vec<u8>> {
-        self.write_rar50_encrypted_compressed_with_comment_and_metadata(
-            entries,
-            None,
-            archive_metadata,
-        )
-    }
-
-    pub fn write_rar50_encrypted_compressed_with_comment_and_metadata(
-        self,
-        entries: &[rar50::EncryptedCompressedEntry<'_>],
-        archive_comment: Option<rar50::EncryptedArchiveCommentEntry<'_>>,
-        archive_metadata: Option<rar50::ArchiveMetadataEntry<'_>>,
-    ) -> Result<Vec<u8>> {
-        rar50::write_encrypted_compressed_archive_with_comment_and_metadata(
-            entries,
-            rar50::WriterOptions {
-                target: self.target,
-                features: self.features,
-            },
-            archive_comment,
-            archive_metadata,
-        )
-    }
-
-    pub fn write_rar50_encrypted_compressed_with_recovery(
-        self,
-        entries: &[rar50::EncryptedCompressedEntry<'_>],
-        recovery_percent: u64,
-    ) -> Result<Vec<u8>> {
-        rar50::write_encrypted_compressed_archive_with_recovery(
-            entries,
-            rar50::WriterOptions {
-                target: self.target,
-                features: self.features,
-            },
-            recovery_percent,
-        )
-    }
-
-    pub fn write_rar50_encrypted_stored_with_comment(
-        self,
-        entries: &[rar50::EncryptedStoredEntry<'_>],
-        archive_comment: Option<rar50::EncryptedArchiveCommentEntry<'_>>,
-    ) -> Result<Vec<u8>> {
-        self.write_rar50_encrypted_stored_with_comment_and_metadata(entries, archive_comment, None)
-    }
-
-    pub fn write_rar50_encrypted_stored_with_comment_and_metadata(
-        self,
-        entries: &[rar50::EncryptedStoredEntry<'_>],
-        archive_comment: Option<rar50::EncryptedArchiveCommentEntry<'_>>,
-        archive_metadata: Option<rar50::ArchiveMetadataEntry<'_>>,
-    ) -> Result<Vec<u8>> {
-        rar50::write_encrypted_stored_archive_with_comment_and_metadata(
-            entries,
-            rar50::WriterOptions {
-                target: self.target,
-                features: self.features,
-            },
-            archive_comment,
-            archive_metadata,
-        )
-    }
-
-    pub fn write_rar50_encrypted_stored_with_recovery(
-        self,
-        entries: &[rar50::EncryptedStoredEntry<'_>],
-        recovery_percent: u64,
-        recovery_password: &[u8],
-    ) -> Result<Vec<u8>> {
-        rar50::write_encrypted_stored_archive_with_recovery(
-            entries,
-            rar50::WriterOptions {
-                target: self.target,
-                features: self.features,
-            },
-            recovery_percent,
-            recovery_password,
-        )
-    }
-
-    pub fn write_rar50_stored_volumes(
-        self,
-        entry: rar50::StoredEntry<'_>,
-        max_data_per_volume: usize,
-    ) -> Result<Vec<Vec<u8>>> {
-        rar50::write_stored_volumes(
-            entry,
-            rar50::WriterOptions {
-                target: self.target,
-                features: self.features,
-            },
-            max_data_per_volume,
-        )
-    }
-
-    pub fn write_rar50_stored_volumes_with_recovery(
-        self,
-        entry: rar50::StoredEntry<'_>,
-        max_data_per_volume: usize,
-        recovery_percent: u64,
-    ) -> Result<Vec<Vec<u8>>> {
-        rar50::write_stored_volumes_with_recovery(
-            entry,
-            rar50::WriterOptions {
-                target: self.target,
-                features: self.features,
-            },
-            max_data_per_volume,
-            recovery_percent,
-        )
-    }
-
-    pub fn write_rar50_compressed_volumes(
-        self,
-        entry: rar50::CompressedEntry<'_>,
-        max_packed_per_volume: usize,
-    ) -> Result<Vec<Vec<u8>>> {
-        rar50::write_compressed_volumes(
-            entry,
-            rar50::WriterOptions {
-                target: self.target,
-                features: self.features,
-            },
-            max_packed_per_volume,
-        )
-    }
-
-    pub fn write_rar50_compressed_volume_set(
-        self,
-        entries: &[rar50::CompressedEntry<'_>],
-        max_packed_per_volume: usize,
-    ) -> Result<Vec<Vec<u8>>> {
-        rar50::write_compressed_volume_set(
-            entries,
-            rar50::WriterOptions {
-                target: self.target,
-                features: self.features,
-            },
-            max_packed_per_volume,
-        )
-    }
-
-    pub fn write_rar50_compressed_volume_set_with_recovery(
-        self,
-        entries: &[rar50::CompressedEntry<'_>],
-        max_packed_per_volume: usize,
-        recovery_percent: u64,
-    ) -> Result<Vec<Vec<u8>>> {
-        rar50::write_compressed_volume_set_with_recovery(
-            entries,
-            rar50::WriterOptions {
-                target: self.target,
-                features: self.features,
-            },
-            max_packed_per_volume,
-            recovery_percent,
-        )
-    }
-
-    pub fn write_rar50_encrypted_stored_volumes(
-        self,
-        entry: rar50::EncryptedStoredEntry<'_>,
-        max_encrypted_per_volume: usize,
-    ) -> Result<Vec<Vec<u8>>> {
-        rar50::write_encrypted_stored_volumes(
-            entry,
-            rar50::WriterOptions {
-                target: self.target,
-                features: self.features,
-            },
-            max_encrypted_per_volume,
-        )
-    }
-
-    pub fn write_rar50_encrypted_stored_volumes_with_recovery(
-        self,
-        entry: rar50::EncryptedStoredEntry<'_>,
-        max_encrypted_per_volume: usize,
-        recovery_percent: u64,
-    ) -> Result<Vec<Vec<u8>>> {
-        rar50::write_encrypted_stored_volumes_with_recovery(
-            entry,
-            rar50::WriterOptions {
-                target: self.target,
-                features: self.features,
-            },
-            max_encrypted_per_volume,
-            recovery_percent,
-        )
-    }
-
-    pub fn write_rar50_encrypted_compressed_volumes(
-        self,
-        entry: rar50::EncryptedCompressedEntry<'_>,
-        max_encrypted_per_volume: usize,
-    ) -> Result<Vec<Vec<u8>>> {
-        rar50::write_encrypted_compressed_volumes(
-            entry,
-            rar50::WriterOptions {
-                target: self.target,
-                features: self.features,
-            },
-            max_encrypted_per_volume,
-        )
-    }
-
-    pub fn write_rar50_encrypted_compressed_volume_set(
-        self,
-        entries: &[rar50::EncryptedCompressedEntry<'_>],
-        max_encrypted_per_volume: usize,
-    ) -> Result<Vec<Vec<u8>>> {
-        rar50::write_encrypted_compressed_volume_set(
-            entries,
-            rar50::WriterOptions {
-                target: self.target,
-                features: self.features,
-            },
-            max_encrypted_per_volume,
-        )
-    }
-
-    pub fn write_rar50_encrypted_compressed_volume_set_with_recovery(
-        self,
-        entries: &[rar50::EncryptedCompressedEntry<'_>],
-        max_encrypted_per_volume: usize,
-        recovery_percent: u64,
-    ) -> Result<Vec<Vec<u8>>> {
-        rar50::write_encrypted_compressed_volume_set_with_recovery(
-            entries,
-            rar50::WriterOptions {
-                target: self.target,
-                features: self.features,
-            },
-            max_encrypted_per_volume,
-            recovery_percent,
-        )
+    pub fn rar50_writer<'a>(self) -> Result<rar50::Rar50Writer<'a>> {
+        Ok(rar50::Rar50Writer::new(self.rar50_options()?))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_rar29_filter(
+        writer: ArchiveWriter,
+        entries: &[rar15_40::FileEntry<'_>],
+        kind: rar15_40::FilterKind,
+    ) -> Result<Vec<u8>> {
+        writer.write_rar29_compressed_with_filter_policy(
+            entries,
+            rar15_40::FilterPolicy::Explicit(rar15_40::FilterSpec::whole(kind)),
+        )
+    }
+
+    fn write_rar29_filter_range(
+        writer: ArchiveWriter,
+        entries: &[rar15_40::FileEntry<'_>],
+        kind: rar15_40::FilterKind,
+        range: std::ops::Range<usize>,
+    ) -> Result<Vec<u8>> {
+        writer.write_rar29_compressed_with_filter_policy(
+            entries,
+            rar15_40::FilterPolicy::Explicit(rar15_40::FilterSpec::range(kind, range)),
+        )
+    }
 
     fn assert_rar50_volume_recovery_records(archives: &[rar50::Archive], percent: u64) {
         assert!(archives.iter().all(|archive| archive.main.is_volume()));
@@ -1204,9 +579,9 @@ mod tests {
     #[test]
     fn archive_writer_creates_rar29_e8_filtered_compressed_archive() {
         let payload = b"\xe8\0\0\0\0facade rar29 e8 filter payload\n".repeat(12);
-        let bytes = ArchiveWriter::new(ArchiveVersion::Rar29)
-            .unwrap()
-            .write_rar29_e8_filtered_compressed(&[rar15_40::FileEntry {
+        let bytes = write_rar29_filter(
+            ArchiveWriter::new(ArchiveVersion::Rar29).unwrap(),
+            &[rar15_40::FileEntry {
                 name: b"rar29-e8.bin",
                 data: &payload,
                 file_time: 0,
@@ -1214,8 +589,10 @@ mod tests {
                 host_os: 3,
                 password: None,
                 file_comment: None,
-            }])
-            .unwrap();
+            }],
+            rar15_40::FilterKind::E8,
+        )
+        .unwrap();
 
         let archive = ArchiveReader::read(&bytes).unwrap();
         let extracted = archive.extract(None).unwrap();
@@ -1227,15 +604,18 @@ mod tests {
         let payload = b"\xe8\0\0\0\0facade rar29 auto filter payload\n".repeat(12);
         let bytes = ArchiveWriter::new(ArchiveVersion::Rar29)
             .unwrap()
-            .write_rar29_auto_filtered_compressed(&[rar15_40::FileEntry {
-                name: b"rar29-auto.bin",
-                data: &payload,
-                file_time: 0,
-                file_attr: 0x20,
-                host_os: 3,
-                password: None,
-                file_comment: None,
-            }])
+            .write_rar29_compressed_with_filter_policy(
+                &[rar15_40::FileEntry {
+                    name: b"rar29-auto.bin",
+                    data: &payload,
+                    file_time: 0,
+                    file_attr: 0x20,
+                    host_os: 3,
+                    password: None,
+                    file_comment: None,
+                }],
+                rar15_40::FilterPolicy::Auto,
+            )
             .unwrap();
 
         let archive = ArchiveReader::read(&bytes).unwrap();
@@ -1250,21 +630,21 @@ mod tests {
         payload.extend_from_slice(b"\xe8\0\0\0\0facade segmented e8 filter payload\n");
         let filter_end = payload.len();
         payload.extend_from_slice(b"facade unfiltered suffix after x86 segment\n");
-        let bytes = ArchiveWriter::new(ArchiveVersion::Rar29)
-            .unwrap()
-            .write_rar29_e8_range_filtered_compressed(
-                &[rar15_40::FileEntry {
-                    name: b"rar29-segmented-e8.bin",
-                    data: &payload,
-                    file_time: 0,
-                    file_attr: 0x20,
-                    host_os: 3,
-                    password: None,
-                    file_comment: None,
-                }],
-                filter_start..filter_end,
-            )
-            .unwrap();
+        let bytes = write_rar29_filter_range(
+            ArchiveWriter::new(ArchiveVersion::Rar29).unwrap(),
+            &[rar15_40::FileEntry {
+                name: b"rar29-segmented-e8.bin",
+                data: &payload,
+                file_time: 0,
+                file_attr: 0x20,
+                host_os: 3,
+                password: None,
+                file_comment: None,
+            }],
+            rar15_40::FilterKind::E8,
+            filter_start..filter_end,
+        )
+        .unwrap();
 
         let archive = ArchiveReader::read(&bytes).unwrap();
         let extracted = archive.extract(None).unwrap();
@@ -1277,10 +657,11 @@ mod tests {
         let second = b"\xe8\0\0\0\0facade rar29 solid e8 second payload\n".repeat(12);
         let mut features = FeatureSet::store_only();
         features.solid = true;
-        let bytes = ArchiveWriter::new(ArchiveVersion::Rar29)
-            .unwrap()
-            .with_features(features)
-            .write_rar29_e8_filtered_compressed(&[
+        let bytes = write_rar29_filter(
+            ArchiveWriter::new(ArchiveVersion::Rar29)
+                .unwrap()
+                .with_features(features),
+            &[
                 rar15_40::FileEntry {
                     name: b"rar29-solid-e8-first.bin",
                     data: &first,
@@ -1299,8 +680,10 @@ mod tests {
                     password: None,
                     file_comment: None,
                 },
-            ])
-            .unwrap();
+            ],
+            rar15_40::FilterKind::E8,
+        )
+        .unwrap();
 
         let archive = ArchiveReader::read(&bytes).unwrap();
         let raw = archive.as_rar15_40().unwrap();
@@ -1318,10 +701,11 @@ mod tests {
         let payload = b"\xe8\0\0\0\0facade rar29 encrypted e8 payload\n".repeat(12);
         let mut features = FeatureSet::store_only();
         features.file_encryption = true;
-        let bytes = ArchiveWriter::new(ArchiveVersion::Rar29)
-            .unwrap()
-            .with_features(features)
-            .write_rar29_e8_filtered_compressed(&[rar15_40::FileEntry {
+        let bytes = write_rar29_filter(
+            ArchiveWriter::new(ArchiveVersion::Rar29)
+                .unwrap()
+                .with_features(features),
+            &[rar15_40::FileEntry {
                 name: b"rar29-encrypted-e8.bin",
                 data: &payload,
                 file_time: 0,
@@ -1329,8 +713,10 @@ mod tests {
                 host_os: 3,
                 password: Some(b"password"),
                 file_comment: None,
-            }])
-            .unwrap();
+            }],
+            rar15_40::FilterKind::E8,
+        )
+        .unwrap();
 
         let archive = ArchiveReader::read(&bytes).unwrap();
         let raw = archive.as_rar15_40().unwrap();
@@ -1351,10 +737,11 @@ mod tests {
         let mut features = FeatureSet::store_only();
         features.file_encryption = true;
         features.header_encryption = true;
-        let bytes = ArchiveWriter::new(ArchiveVersion::Rar30)
-            .unwrap()
-            .with_features(features)
-            .write_rar29_e8_filtered_compressed(&[rar15_40::FileEntry {
+        let bytes = write_rar29_filter(
+            ArchiveWriter::new(ArchiveVersion::Rar30)
+                .unwrap()
+                .with_features(features),
+            &[rar15_40::FileEntry {
                 name: b"rar30-header-encrypted-e8.bin",
                 data: &payload,
                 file_time: 0,
@@ -1362,14 +749,20 @@ mod tests {
                 host_os: 3,
                 password: Some(b"password"),
                 file_comment: None,
-            }])
-            .unwrap();
+            }],
+            rar15_40::FilterKind::E8,
+        )
+        .unwrap();
 
         assert!(matches!(
             ArchiveReader::read(&bytes),
             Err(Error::NeedPassword)
         ));
-        let archive = ArchiveReader::read_with_password(&bytes, Some(b"password")).unwrap();
+        let archive = ArchiveReader::read_with_options(
+            &bytes,
+            ArchiveReadOptions::with_password(b"password"),
+        )
+        .unwrap();
         let raw = archive.as_rar15_40().unwrap();
         assert!(raw.main.has_encrypted_headers());
         let extracted = archive.extract(Some(b"password")).unwrap();
@@ -1379,9 +772,9 @@ mod tests {
     #[test]
     fn archive_writer_creates_rar29_e8e9_filtered_compressed_archive() {
         let payload = b"\xe9\0\0\0\0facade rar29 e8e9 filter payload\n".repeat(12);
-        let bytes = ArchiveWriter::new(ArchiveVersion::Rar29)
-            .unwrap()
-            .write_rar29_e8e9_filtered_compressed(&[rar15_40::FileEntry {
+        let bytes = write_rar29_filter(
+            ArchiveWriter::new(ArchiveVersion::Rar29).unwrap(),
+            &[rar15_40::FileEntry {
                 name: b"rar29-e8e9.bin",
                 data: &payload,
                 file_time: 0,
@@ -1389,8 +782,10 @@ mod tests {
                 host_os: 3,
                 password: None,
                 file_comment: None,
-            }])
-            .unwrap();
+            }],
+            rar15_40::FilterKind::E8E9,
+        )
+        .unwrap();
 
         let archive = ArchiveReader::read(&bytes).unwrap();
         let extracted = archive.extract(None).unwrap();
@@ -1400,21 +795,20 @@ mod tests {
     #[test]
     fn archive_writer_creates_rar29_delta_filtered_compressed_archive() {
         let payload: Vec<u8> = (0..384).map(|index| (index * 19 + 5) as u8).collect();
-        let bytes = ArchiveWriter::new(ArchiveVersion::Rar29)
-            .unwrap()
-            .write_rar29_delta_filtered_compressed(
-                &[rar15_40::FileEntry {
-                    name: b"rar29-delta.bin",
-                    data: &payload,
-                    file_time: 0,
-                    file_attr: 0x20,
-                    host_os: 3,
-                    password: None,
-                    file_comment: None,
-                }],
-                3,
-            )
-            .unwrap();
+        let bytes = write_rar29_filter(
+            ArchiveWriter::new(ArchiveVersion::Rar29).unwrap(),
+            &[rar15_40::FileEntry {
+                name: b"rar29-delta.bin",
+                data: &payload,
+                file_time: 0,
+                file_attr: 0x20,
+                host_os: 3,
+                password: None,
+                file_comment: None,
+            }],
+            rar15_40::FilterKind::Delta { channels: 3 },
+        )
+        .unwrap();
 
         let archive = ArchiveReader::read(&bytes).unwrap();
         let extracted = archive.extract(None).unwrap();
@@ -1428,22 +822,21 @@ mod tests {
         payload.extend((0..384).map(|index| (index * 19 + 5) as u8));
         let filter_end = payload.len();
         payload.extend_from_slice(b"facade unfiltered suffix after delta segment\n");
-        let bytes = ArchiveWriter::new(ArchiveVersion::Rar29)
-            .unwrap()
-            .write_rar29_delta_range_filtered_compressed(
-                &[rar15_40::FileEntry {
-                    name: b"rar29-segmented-delta.bin",
-                    data: &payload,
-                    file_time: 0,
-                    file_attr: 0x20,
-                    host_os: 3,
-                    password: None,
-                    file_comment: None,
-                }],
-                filter_start..filter_end,
-                3,
-            )
-            .unwrap();
+        let bytes = write_rar29_filter_range(
+            ArchiveWriter::new(ArchiveVersion::Rar29).unwrap(),
+            &[rar15_40::FileEntry {
+                name: b"rar29-segmented-delta.bin",
+                data: &payload,
+                file_time: 0,
+                file_attr: 0x20,
+                host_os: 3,
+                password: None,
+                file_comment: None,
+            }],
+            rar15_40::FilterKind::Delta { channels: 3 },
+            filter_start..filter_end,
+        )
+        .unwrap();
 
         let archive = ArchiveReader::read(&bytes).unwrap();
         let extracted = archive.extract(None).unwrap();
@@ -1456,9 +849,9 @@ mod tests {
         payload[16] = 22;
         payload[21] = 20;
         payload.extend_from_slice(b"facade rar29 itanium filter payload\n");
-        let bytes = ArchiveWriter::new(ArchiveVersion::Rar29)
-            .unwrap()
-            .write_rar29_itanium_filtered_compressed(&[rar15_40::FileEntry {
+        let bytes = write_rar29_filter(
+            ArchiveWriter::new(ArchiveVersion::Rar29).unwrap(),
+            &[rar15_40::FileEntry {
                 name: b"rar29-itanium.bin",
                 data: &payload,
                 file_time: 0,
@@ -1466,8 +859,10 @@ mod tests {
                 host_os: 3,
                 password: None,
                 file_comment: None,
-            }])
-            .unwrap();
+            }],
+            rar15_40::FilterKind::Itanium,
+        )
+        .unwrap();
 
         let archive = ArchiveReader::read(&bytes).unwrap();
         let extracted = archive.extract(None).unwrap();
@@ -1484,21 +879,21 @@ mod tests {
         payload.extend_from_slice(b"facade segmented itanium filter payload\n");
         let filter_end = payload.len();
         payload.extend_from_slice(b"facade unfiltered suffix after itanium segment\n");
-        let bytes = ArchiveWriter::new(ArchiveVersion::Rar29)
-            .unwrap()
-            .write_rar29_itanium_range_filtered_compressed(
-                &[rar15_40::FileEntry {
-                    name: b"rar29-segmented-itanium.bin",
-                    data: &payload,
-                    file_time: 0,
-                    file_attr: 0x20,
-                    host_os: 3,
-                    password: None,
-                    file_comment: None,
-                }],
-                filter_start..filter_end,
-            )
-            .unwrap();
+        let bytes = write_rar29_filter_range(
+            ArchiveWriter::new(ArchiveVersion::Rar29).unwrap(),
+            &[rar15_40::FileEntry {
+                name: b"rar29-segmented-itanium.bin",
+                data: &payload,
+                file_time: 0,
+                file_attr: 0x20,
+                host_os: 3,
+                password: None,
+                file_comment: None,
+            }],
+            rar15_40::FilterKind::Itanium,
+            filter_start..filter_end,
+        )
+        .unwrap();
 
         let archive = ArchiveReader::read(&bytes).unwrap();
         let extracted = archive.extract(None).unwrap();
@@ -1509,22 +904,20 @@ mod tests {
     fn archive_writer_creates_rar29_rgb_filtered_compressed_archive() {
         let width = 12;
         let payload: Vec<u8> = (0..96).map(|index| (index * 37 + 17) as u8).collect();
-        let bytes = ArchiveWriter::new(ArchiveVersion::Rar29)
-            .unwrap()
-            .write_rar29_rgb_filtered_compressed(
-                &[rar15_40::FileEntry {
-                    name: b"rar29-rgb.bin",
-                    data: &payload,
-                    file_time: 0,
-                    file_attr: 0x20,
-                    host_os: 3,
-                    password: None,
-                    file_comment: None,
-                }],
-                width,
-                0,
-            )
-            .unwrap();
+        let bytes = write_rar29_filter(
+            ArchiveWriter::new(ArchiveVersion::Rar29).unwrap(),
+            &[rar15_40::FileEntry {
+                name: b"rar29-rgb.bin",
+                data: &payload,
+                file_time: 0,
+                file_attr: 0x20,
+                host_os: 3,
+                password: None,
+                file_comment: None,
+            }],
+            rar15_40::FilterKind::Rgb { width, pos_r: 0 },
+        )
+        .unwrap();
 
         let archive = ArchiveReader::read(&bytes).unwrap();
         let extracted = archive.extract(None).unwrap();
@@ -1539,23 +932,21 @@ mod tests {
         payload.extend((0..96).map(|index| (index * 37 + 17) as u8));
         let filter_end = payload.len();
         payload.extend_from_slice(b"facade unfiltered suffix after rgb segment\n");
-        let bytes = ArchiveWriter::new(ArchiveVersion::Rar29)
-            .unwrap()
-            .write_rar29_rgb_range_filtered_compressed(
-                &[rar15_40::FileEntry {
-                    name: b"rar29-segmented-rgb.bin",
-                    data: &payload,
-                    file_time: 0,
-                    file_attr: 0x20,
-                    host_os: 3,
-                    password: None,
-                    file_comment: None,
-                }],
-                filter_start..filter_end,
-                width,
-                0,
-            )
-            .unwrap();
+        let bytes = write_rar29_filter_range(
+            ArchiveWriter::new(ArchiveVersion::Rar29).unwrap(),
+            &[rar15_40::FileEntry {
+                name: b"rar29-segmented-rgb.bin",
+                data: &payload,
+                file_time: 0,
+                file_attr: 0x20,
+                host_os: 3,
+                password: None,
+                file_comment: None,
+            }],
+            rar15_40::FilterKind::Rgb { width, pos_r: 0 },
+            filter_start..filter_end,
+        )
+        .unwrap();
 
         let archive = ArchiveReader::read(&bytes).unwrap();
         let extracted = archive.extract(None).unwrap();
@@ -1567,21 +958,20 @@ mod tests {
         let payload: Vec<u8> = (0..160)
             .map(|index| (index * 11 + index / 7) as u8)
             .collect();
-        let bytes = ArchiveWriter::new(ArchiveVersion::Rar29)
-            .unwrap()
-            .write_rar29_audio_filtered_compressed(
-                &[rar15_40::FileEntry {
-                    name: b"rar29-audio.bin",
-                    data: &payload,
-                    file_time: 0,
-                    file_attr: 0x20,
-                    host_os: 3,
-                    password: None,
-                    file_comment: None,
-                }],
-                2,
-            )
-            .unwrap();
+        let bytes = write_rar29_filter(
+            ArchiveWriter::new(ArchiveVersion::Rar29).unwrap(),
+            &[rar15_40::FileEntry {
+                name: b"rar29-audio.bin",
+                data: &payload,
+                file_time: 0,
+                file_attr: 0x20,
+                host_os: 3,
+                password: None,
+                file_comment: None,
+            }],
+            rar15_40::FilterKind::Audio { channels: 2 },
+        )
+        .unwrap();
 
         let archive = ArchiveReader::read(&bytes).unwrap();
         let extracted = archive.extract(None).unwrap();
@@ -1595,22 +985,21 @@ mod tests {
         payload.extend((0..160).map(|index| (index * 11 + index / 7) as u8));
         let filter_end = payload.len();
         payload.extend_from_slice(b"facade unfiltered suffix after audio segment\n");
-        let bytes = ArchiveWriter::new(ArchiveVersion::Rar29)
-            .unwrap()
-            .write_rar29_audio_range_filtered_compressed(
-                &[rar15_40::FileEntry {
-                    name: b"rar29-segmented-audio.bin",
-                    data: &payload,
-                    file_time: 0,
-                    file_attr: 0x20,
-                    host_os: 3,
-                    password: None,
-                    file_comment: None,
-                }],
-                filter_start..filter_end,
-                2,
-            )
-            .unwrap();
+        let bytes = write_rar29_filter_range(
+            ArchiveWriter::new(ArchiveVersion::Rar29).unwrap(),
+            &[rar15_40::FileEntry {
+                name: b"rar29-segmented-audio.bin",
+                data: &payload,
+                file_time: 0,
+                file_attr: 0x20,
+                host_os: 3,
+                password: None,
+                file_comment: None,
+            }],
+            rar15_40::FilterKind::Audio { channels: 2 },
+            filter_start..filter_end,
+        )
+        .unwrap();
 
         let archive = ArchiveReader::read(&bytes).unwrap();
         let extracted = archive.extract(None).unwrap();
@@ -2366,7 +1755,11 @@ mod tests {
             ArchiveReader::read(&bytes),
             Err(Error::NeedPassword)
         ));
-        let archive = ArchiveReader::read_with_password(&bytes, Some(b"password")).unwrap();
+        let archive = ArchiveReader::read_with_options(
+            &bytes,
+            ArchiveReadOptions::with_password(b"password"),
+        )
+        .unwrap();
         let raw = archive.as_rar15_40().unwrap();
         assert!(raw.main.has_encrypted_headers());
         assert_eq!(raw.files().next().unwrap().name, b"rar30-header-secret.txt");
@@ -2412,7 +1805,11 @@ mod tests {
             ArchiveReader::read(&bytes),
             Err(Error::NeedPassword)
         ));
-        let archive = ArchiveReader::read_with_password(&bytes, Some(b"password")).unwrap();
+        let archive = ArchiveReader::read_with_options(
+            &bytes,
+            ArchiveReadOptions::with_password(b"password"),
+        )
+        .unwrap();
         let extracted = archive.extract(Some(b"password")).unwrap();
         assert_eq!(
             extracted[0].data,
@@ -2428,13 +1825,16 @@ mod tests {
     fn archive_writer_creates_rar50_stored_archive() {
         let bytes = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
-            .write_rar50_stored(&[rar50::StoredEntry {
+            .rar50_writer()
+            .unwrap()
+            .stored_entries(&[rar50::StoredEntry {
                 name: b"rar5-store.txt",
                 data: b"facade rar5 stored payload\n",
                 mtime: Some(0),
                 attributes: 0x20,
                 host_os: 3,
             }])
+            .finish()
             .unwrap();
 
         let archive = ArchiveReader::read(&bytes).unwrap();
@@ -2447,13 +1847,16 @@ mod tests {
     fn archive_writer_creates_rar50_compressed_archive() {
         let bytes = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
-            .write_rar50_compressed(&[rar50::CompressedEntry {
+            .rar50_writer()
+            .unwrap()
+            .compressed_entries(&[rar50::CompressedEntry {
                 name: b"rar5-compressed.txt",
                 data: b"facade rar5 compressed payload\nfacade rar5 compressed payload\n",
                 mtime: Some(0),
                 attributes: 0x20,
                 host_os: 3,
             }])
+            .finish()
             .unwrap();
 
         let archive = ArchiveReader::read(&bytes).unwrap();
@@ -2476,7 +1879,9 @@ mod tests {
         let bytes = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
             .with_features(features)
-            .write_rar50_compressed(&[
+            .rar50_writer()
+            .unwrap()
+            .compressed_entries(&[
                 rar50::CompressedEntry {
                     name: b"rar5-solid-one.txt",
                     data: &first,
@@ -2492,6 +1897,7 @@ mod tests {
                     host_os: 3,
                 },
             ])
+            .finish()
             .unwrap();
 
         let archive = ArchiveReader::read(&bytes).unwrap();
@@ -2512,16 +1918,19 @@ mod tests {
             .collect();
         let bytes = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
-            .write_rar50_delta_filtered_compressed(
-                &[rar50::CompressedEntry {
-                    name: b"rar5-delta-filtered.bin",
-                    data: &payload,
-                    mtime: Some(0),
-                    attributes: 0x20,
-                    host_os: 3,
-                }],
-                3,
-            )
+            .rar50_writer()
+            .unwrap()
+            .compressed_entries(&[rar50::CompressedEntry {
+                name: b"rar5-delta-filtered.bin",
+                data: &payload,
+                mtime: Some(0),
+                attributes: 0x20,
+                host_os: 3,
+            }])
+            .filter_policy(rar50::FilterPolicy::Explicit(rar50::FilterKind::Delta {
+                channels: 3,
+            }))
+            .finish()
             .unwrap();
 
         let archive = ArchiveReader::read(&bytes).unwrap();
@@ -2534,16 +1943,17 @@ mod tests {
         let payload = b"\xe8\0\0\0\0facade rar5 e8 filter payload".to_vec();
         let bytes = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
-            .write_rar50_e8_filtered_compressed(
-                &[rar50::CompressedEntry {
-                    name: b"rar5-e8-filtered.bin",
-                    data: &payload,
-                    mtime: Some(0),
-                    attributes: 0x20,
-                    host_os: 3,
-                }],
-                false,
-            )
+            .rar50_writer()
+            .unwrap()
+            .compressed_entries(&[rar50::CompressedEntry {
+                name: b"rar5-e8-filtered.bin",
+                data: &payload,
+                mtime: Some(0),
+                attributes: 0x20,
+                host_os: 3,
+            }])
+            .filter_policy(rar50::FilterPolicy::Explicit(rar50::FilterKind::E8))
+            .finish()
             .unwrap();
 
         let archive = ArchiveReader::read(&bytes).unwrap();
@@ -2556,13 +1966,17 @@ mod tests {
         let payload = [0x04, 0x00, 0x00, 0xeb, b'A', b'R', b'M', b'!'];
         let bytes = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
-            .write_rar50_arm_filtered_compressed(&[rar50::CompressedEntry {
+            .rar50_writer()
+            .unwrap()
+            .compressed_entries(&[rar50::CompressedEntry {
                 name: b"rar5-arm-filtered.bin",
                 data: &payload,
                 mtime: Some(0),
                 attributes: 0x20,
                 host_os: 3,
             }])
+            .filter_policy(rar50::FilterPolicy::Explicit(rar50::FilterKind::Arm))
+            .finish()
             .unwrap();
 
         let archive = ArchiveReader::read(&bytes).unwrap();
@@ -2575,16 +1989,17 @@ mod tests {
         let payload = b"\xe8\0\0\0\0facade rar5 auto filter payload\n".repeat(16);
         let bytes = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
-            .write_rar50_compressed_with_filter_policy(
-                &[rar50::CompressedEntry {
-                    name: b"rar5-auto-filtered.bin",
-                    data: &payload,
-                    mtime: Some(0),
-                    attributes: 0x20,
-                    host_os: 3,
-                }],
-                rar50::FilterPolicy::AutoSize,
-            )
+            .rar50_writer()
+            .unwrap()
+            .compressed_entries(&[rar50::CompressedEntry {
+                name: b"rar5-auto-filtered.bin",
+                data: &payload,
+                mtime: Some(0),
+                attributes: 0x20,
+                host_os: 3,
+            }])
+            .filter_policy(rar50::FilterPolicy::AutoSize)
+            .finish()
             .unwrap();
 
         let archive = ArchiveReader::read(&bytes).unwrap();
@@ -2599,16 +2014,17 @@ mod tests {
         let bytes = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
             .with_features(features)
-            .write_rar50_stored_with_comment(
-                &[rar50::StoredEntry {
-                    name: b"rar5-commented.txt",
-                    data: b"facade rar5 comment payload\n",
-                    mtime: None,
-                    attributes: 0x20,
-                    host_os: 3,
-                }],
-                Some(b"facade rar5 comment\n"),
-            )
+            .rar50_writer()
+            .unwrap()
+            .stored_entries(&[rar50::StoredEntry {
+                name: b"rar5-commented.txt",
+                data: b"facade rar5 comment payload\n",
+                mtime: None,
+                attributes: 0x20,
+                host_os: 3,
+            }])
+            .archive_comment(Some(b"facade rar5 comment\n"))
+            .finish()
             .unwrap();
 
         let archive = ArchiveReader::read(&bytes).unwrap();
@@ -2632,7 +2048,9 @@ mod tests {
         }];
         let bytes = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
-            .write_rar50_stored_with_file_services(&[rar50::StoredEntryWithServices {
+            .rar50_writer()
+            .unwrap()
+            .stored_entries_with_services(&[rar50::StoredEntryWithServices {
                 entry: rar50::StoredEntry {
                     name: b"rar5-file-commented.txt",
                     data: b"facade rar5 file comment payload\n",
@@ -2642,6 +2060,7 @@ mod tests {
                 },
                 services: &services,
             }])
+            .finish()
             .unwrap();
 
         let archive = ArchiveReader::read(&bytes).unwrap();
@@ -2670,22 +2089,27 @@ mod tests {
         let bytes = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
             .with_features(features)
-            .write_rar50_encrypted_stored_with_file_services(&[
-                rar50::EncryptedStoredEntryWithServices {
-                    entry: rar50::EncryptedStoredEntry {
-                        name: b"rar5-encrypted-file-commented.txt",
-                        data: b"facade encrypted rar5 file comment payload\n",
-                        mtime: None,
-                        attributes: 0x20,
-                        host_os: 3,
-                        password: b"password",
-                    },
-                    services: &services,
+            .rar50_writer()
+            .unwrap()
+            .encrypted_stored_entries_with_services(&[rar50::EncryptedStoredEntryWithServices {
+                entry: rar50::EncryptedStoredEntry {
+                    name: b"rar5-encrypted-file-commented.txt",
+                    data: b"facade encrypted rar5 file comment payload\n",
+                    mtime: None,
+                    attributes: 0x20,
+                    host_os: 3,
+                    password: b"password",
                 },
-            ])
+                services: &services,
+            }])
+            .finish()
             .unwrap();
 
-        let archive = ArchiveReader::read_with_password(&bytes, Some(b"password")).unwrap();
+        let archive = ArchiveReader::read_with_options(
+            &bytes,
+            ArchiveReadOptions::with_password(b"password"),
+        )
+        .unwrap();
         let raw = archive.as_rar50().unwrap();
         let service = raw.services().next().unwrap().extract(raw).unwrap();
         assert_eq!(service.data, b"facade encrypted rar5 file comment\n");
@@ -2710,26 +2134,31 @@ mod tests {
         let bytes = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
             .with_features(features)
-            .write_rar50_encrypted_stored_with_file_services(&[
-                rar50::EncryptedStoredEntryWithServices {
-                    entry: rar50::EncryptedStoredEntry {
-                        name: b"rar5-header-file-commented.txt",
-                        data: b"facade header encrypted rar5 file comment payload\n",
-                        mtime: None,
-                        attributes: 0x20,
-                        host_os: 3,
-                        password: b"password",
-                    },
-                    services: &services,
+            .rar50_writer()
+            .unwrap()
+            .encrypted_stored_entries_with_services(&[rar50::EncryptedStoredEntryWithServices {
+                entry: rar50::EncryptedStoredEntry {
+                    name: b"rar5-header-file-commented.txt",
+                    data: b"facade header encrypted rar5 file comment payload\n",
+                    mtime: None,
+                    attributes: 0x20,
+                    host_os: 3,
+                    password: b"password",
                 },
-            ])
+                services: &services,
+            }])
+            .finish()
             .unwrap();
 
         assert!(matches!(
             ArchiveReader::read(&bytes),
             Err(Error::NeedPassword)
         ));
-        let archive = ArchiveReader::read_with_password(&bytes, Some(b"password")).unwrap();
+        let archive = ArchiveReader::read_with_options(
+            &bytes,
+            ArchiveReadOptions::with_password(b"password"),
+        )
+        .unwrap();
         let raw = archive.as_rar50().unwrap();
         let service = raw.services().next().unwrap().extract(raw).unwrap();
         assert_eq!(service.data, b"facade header encrypted rar5 file comment\n");
@@ -2747,13 +2176,16 @@ mod tests {
         let bytes = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
             .with_features(features)
-            .write_rar50_stored(&[rar50::StoredEntry {
+            .rar50_writer()
+            .unwrap()
+            .stored_entries(&[rar50::StoredEntry {
                 name: b"rar5-qo.txt",
                 data: b"facade rar5 quick-open payload\n",
                 mtime: None,
                 attributes: 0x20,
                 host_os: 3,
             }])
+            .finish()
             .unwrap();
 
         let archive = ArchiveReader::read(&bytes).unwrap();
@@ -2781,7 +2213,9 @@ mod tests {
         ];
         let bytes = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
-            .write_rar50_stored_with_file_services(&[rar50::StoredEntryWithServices {
+            .rar50_writer()
+            .unwrap()
+            .stored_entries_with_services(&[rar50::StoredEntryWithServices {
                 entry: rar50::StoredEntry {
                     name: b"rar5-services.txt",
                     data: b"facade rar5 service payload\n",
@@ -2791,6 +2225,7 @@ mod tests {
                 },
                 services: &services,
             }])
+            .finish()
             .unwrap();
 
         let archive = ArchiveReader::read(&bytes).unwrap();
@@ -2812,16 +2247,17 @@ mod tests {
         let bytes = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
             .with_features(features)
-            .write_rar50_stored_with_recovery(
-                &[rar50::StoredEntry {
-                    name: b"rar5-recovery.txt",
-                    data: b"facade rar5 recovery payload\n",
-                    mtime: None,
-                    attributes: 0x20,
-                    host_os: 3,
-                }],
-                9,
-            )
+            .rar50_writer()
+            .unwrap()
+            .stored_entries(&[rar50::StoredEntry {
+                name: b"rar5-recovery.txt",
+                data: b"facade rar5 recovery payload\n",
+                mtime: None,
+                attributes: 0x20,
+                host_os: 3,
+            }])
+            .recovery_percent(Some(9))
+            .finish()
             .unwrap();
 
         let archive = ArchiveReader::read(&bytes).unwrap();
@@ -2843,16 +2279,17 @@ mod tests {
         let bytes = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
             .with_features(features)
-            .write_rar50_compressed_with_recovery(
-                &[rar50::CompressedEntry {
-                    name: b"rar5-compressed-recovery.txt",
-                    data: &payload,
-                    mtime: None,
-                    attributes: 0x20,
-                    host_os: 3,
-                }],
-                9,
-            )
+            .rar50_writer()
+            .unwrap()
+            .compressed_entries(&[rar50::CompressedEntry {
+                name: b"rar5-compressed-recovery.txt",
+                data: &payload,
+                mtime: None,
+                attributes: 0x20,
+                host_os: 3,
+            }])
+            .recovery_percent(Some(9))
+            .finish()
             .unwrap();
 
         let archive = ArchiveReader::read(&bytes).unwrap();
@@ -2869,20 +2306,20 @@ mod tests {
     fn archive_writer_creates_rar70_stored_archive_with_metadata() {
         let bytes = ArchiveWriter::new(ArchiveVersion::Rar70)
             .unwrap()
-            .write_rar50_stored_with_comment_and_metadata(
-                &[rar50::StoredEntry {
-                    name: b"rar7-metadata.txt",
-                    data: b"facade rar7 metadata payload\n",
-                    mtime: None,
-                    attributes: 0x20,
-                    host_os: 3,
-                }],
-                None,
-                Some(rar50::ArchiveMetadataEntry {
-                    name: Some(b"facade-metadata.rar"),
-                    creation_time: Some(0x01dcd60e_662d7a32),
-                }),
-            )
+            .rar50_writer()
+            .unwrap()
+            .stored_entries(&[rar50::StoredEntry {
+                name: b"rar7-metadata.txt",
+                data: b"facade rar7 metadata payload\n",
+                mtime: None,
+                attributes: 0x20,
+                host_os: 3,
+            }])
+            .archive_metadata(Some(rar50::ArchiveMetadataEntry {
+                name: Some(b"facade-metadata.rar"),
+                creation_time: Some(0x01dcd60e_662d7a32),
+            }))
+            .finish()
             .unwrap();
 
         let archive = ArchiveReader::read(&bytes).unwrap();
@@ -2900,19 +2337,20 @@ mod tests {
         let payload = b"facade rar7 compressed metadata payload repeated\n".repeat(8);
         let bytes = ArchiveWriter::new(ArchiveVersion::Rar70)
             .unwrap()
-            .write_rar50_compressed_with_metadata(
-                &[rar50::CompressedEntry {
-                    name: b"rar7-compressed-metadata.txt",
-                    data: &payload,
-                    mtime: None,
-                    attributes: 0x20,
-                    host_os: 3,
-                }],
-                Some(rar50::ArchiveMetadataEntry {
-                    name: Some(b"facade-compressed-metadata.rar"),
-                    creation_time: Some(0x01dcd60e_662d7a32),
-                }),
-            )
+            .rar50_writer()
+            .unwrap()
+            .compressed_entries(&[rar50::CompressedEntry {
+                name: b"rar7-compressed-metadata.txt",
+                data: &payload,
+                mtime: None,
+                attributes: 0x20,
+                host_os: 3,
+            }])
+            .archive_metadata(Some(rar50::ArchiveMetadataEntry {
+                name: Some(b"facade-compressed-metadata.rar"),
+                creation_time: Some(0x01dcd60e_662d7a32),
+            }))
+            .finish()
             .unwrap();
 
         let archive = ArchiveReader::read(&bytes).unwrap();
@@ -2933,17 +2371,17 @@ mod tests {
         let bytes = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
             .with_features(features)
-            .write_rar50_compressed_with_comment_and_metadata(
-                &[rar50::CompressedEntry {
-                    name: b"rar5-compressed-comment.txt",
-                    data: &payload,
-                    mtime: None,
-                    attributes: 0x20,
-                    host_os: 3,
-                }],
-                Some(b"facade compressed comment\n"),
-                None,
-            )
+            .rar50_writer()
+            .unwrap()
+            .compressed_entries(&[rar50::CompressedEntry {
+                name: b"rar5-compressed-comment.txt",
+                data: &payload,
+                mtime: None,
+                attributes: 0x20,
+                host_os: 3,
+            }])
+            .archive_comment(Some(b"facade compressed comment\n"))
+            .finish()
             .unwrap();
 
         let archive = ArchiveReader::read(&bytes).unwrap();
@@ -2961,21 +2399,21 @@ mod tests {
         let bytes = ArchiveWriter::new(ArchiveVersion::Rar70)
             .unwrap()
             .with_features(features)
-            .write_rar50_encrypted_stored_with_comment_and_metadata(
-                &[rar50::EncryptedStoredEntry {
-                    name: b"rar7-encrypted-metadata.txt",
-                    data: b"facade rar7 encrypted metadata payload\n",
-                    mtime: None,
-                    attributes: 0x20,
-                    host_os: 3,
-                    password: b"password",
-                }],
-                None,
-                Some(rar50::ArchiveMetadataEntry {
-                    name: Some(b"facade-encrypted-metadata.rar"),
-                    creation_time: Some(0x01dcd60e_662d7a32),
-                }),
-            )
+            .rar50_writer()
+            .unwrap()
+            .encrypted_stored_entries(&[rar50::EncryptedStoredEntry {
+                name: b"rar7-encrypted-metadata.txt",
+                data: b"facade rar7 encrypted metadata payload\n",
+                mtime: None,
+                attributes: 0x20,
+                host_os: 3,
+                password: b"password",
+            }])
+            .archive_metadata(Some(rar50::ArchiveMetadataEntry {
+                name: Some(b"facade-encrypted-metadata.rar"),
+                creation_time: Some(0x01dcd60e_662d7a32),
+            }))
+            .finish()
             .unwrap();
 
         let archive = ArchiveReader::read(&bytes).unwrap();
@@ -2999,20 +2437,21 @@ mod tests {
         let bytes = ArchiveWriter::new(ArchiveVersion::Rar70)
             .unwrap()
             .with_features(features)
-            .write_rar50_encrypted_compressed_with_metadata(
-                &[rar50::EncryptedCompressedEntry {
-                    name: b"rar7-encrypted-compressed-metadata.txt",
-                    data: &payload,
-                    mtime: None,
-                    attributes: 0x20,
-                    host_os: 3,
-                    password: b"password",
-                }],
-                Some(rar50::ArchiveMetadataEntry {
-                    name: Some(b"facade-encrypted-compressed-metadata.rar"),
-                    creation_time: Some(0x01dcd60e_662d7a32),
-                }),
-            )
+            .rar50_writer()
+            .unwrap()
+            .encrypted_compressed_entries(&[rar50::EncryptedCompressedEntry {
+                name: b"rar7-encrypted-compressed-metadata.txt",
+                data: &payload,
+                mtime: None,
+                attributes: 0x20,
+                host_os: 3,
+                password: b"password",
+            }])
+            .archive_metadata(Some(rar50::ArchiveMetadataEntry {
+                name: Some(b"facade-encrypted-compressed-metadata.rar"),
+                creation_time: Some(0x01dcd60e_662d7a32),
+            }))
+            .finish()
             .unwrap();
 
         let archive = ArchiveReader::read(&bytes).unwrap();
@@ -3033,28 +2472,32 @@ mod tests {
         let bytes = ArchiveWriter::new(ArchiveVersion::Rar70)
             .unwrap()
             .with_features(features)
-            .write_rar50_encrypted_stored_with_comment_and_metadata(
-                &[rar50::EncryptedStoredEntry {
-                    name: b"rar7-header-metadata.txt",
-                    data: b"facade rar7 header encrypted metadata payload\n",
-                    mtime: None,
-                    attributes: 0x20,
-                    host_os: 3,
-                    password: b"password",
-                }],
-                None,
-                Some(rar50::ArchiveMetadataEntry {
-                    name: Some(b"facade-header-metadata.rar"),
-                    creation_time: Some(0x01dcd60e_662d7a32),
-                }),
-            )
+            .rar50_writer()
+            .unwrap()
+            .encrypted_stored_entries(&[rar50::EncryptedStoredEntry {
+                name: b"rar7-header-metadata.txt",
+                data: b"facade rar7 header encrypted metadata payload\n",
+                mtime: None,
+                attributes: 0x20,
+                host_os: 3,
+                password: b"password",
+            }])
+            .archive_metadata(Some(rar50::ArchiveMetadataEntry {
+                name: Some(b"facade-header-metadata.rar"),
+                creation_time: Some(0x01dcd60e_662d7a32),
+            }))
+            .finish()
             .unwrap();
 
         assert!(matches!(
             ArchiveReader::read(&bytes),
             Err(Error::NeedPassword)
         ));
-        let archive = ArchiveReader::read_with_password(&bytes, Some(b"password")).unwrap();
+        let archive = ArchiveReader::read_with_options(
+            &bytes,
+            ArchiveReadOptions::with_password(b"password"),
+        )
+        .unwrap();
         let metadata = archive.as_rar50().unwrap().main.archive_metadata().unwrap();
         assert_eq!(
             metadata.name.as_deref(),
@@ -3077,27 +2520,32 @@ mod tests {
         let bytes = ArchiveWriter::new(ArchiveVersion::Rar70)
             .unwrap()
             .with_features(features)
-            .write_rar50_encrypted_compressed_with_metadata(
-                &[rar50::EncryptedCompressedEntry {
-                    name: b"rar7-header-compressed-metadata.txt",
-                    data: &payload,
-                    mtime: None,
-                    attributes: 0x20,
-                    host_os: 3,
-                    password: b"password",
-                }],
-                Some(rar50::ArchiveMetadataEntry {
-                    name: Some(b"facade-header-compressed-metadata.rar"),
-                    creation_time: Some(0x01dcd60e_662d7a32),
-                }),
-            )
+            .rar50_writer()
+            .unwrap()
+            .encrypted_compressed_entries(&[rar50::EncryptedCompressedEntry {
+                name: b"rar7-header-compressed-metadata.txt",
+                data: &payload,
+                mtime: None,
+                attributes: 0x20,
+                host_os: 3,
+                password: b"password",
+            }])
+            .archive_metadata(Some(rar50::ArchiveMetadataEntry {
+                name: Some(b"facade-header-compressed-metadata.rar"),
+                creation_time: Some(0x01dcd60e_662d7a32),
+            }))
+            .finish()
             .unwrap();
 
         assert!(matches!(
             ArchiveReader::read(&bytes),
             Err(Error::NeedPassword)
         ));
-        let archive = ArchiveReader::read_with_password(&bytes, Some(b"password")).unwrap();
+        let archive = ArchiveReader::read_with_options(
+            &bytes,
+            ArchiveReadOptions::with_password(b"password"),
+        )
+        .unwrap();
         let metadata = archive.as_rar50().unwrap().main.archive_metadata().unwrap();
         assert_eq!(
             metadata.name.as_deref(),
@@ -3114,7 +2562,9 @@ mod tests {
         let bytes = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
             .with_features(features)
-            .write_rar50_encrypted_stored(&[rar50::EncryptedStoredEntry {
+            .rar50_writer()
+            .unwrap()
+            .encrypted_stored_entries(&[rar50::EncryptedStoredEntry {
                 name: b"rar5-secret.txt",
                 data: b"facade rar5 encrypted stored payload\n",
                 mtime: Some(0),
@@ -3122,6 +2572,7 @@ mod tests {
                 host_os: 3,
                 password: b"password",
             }])
+            .finish()
             .unwrap();
 
         let archive = ArchiveReader::read(&bytes).unwrap();
@@ -3145,7 +2596,9 @@ mod tests {
         let bytes = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
             .with_features(features)
-            .write_rar50_encrypted_compressed(&[rar50::EncryptedCompressedEntry {
+            .rar50_writer()
+            .unwrap()
+            .encrypted_compressed_entries(&[rar50::EncryptedCompressedEntry {
                 name: b"rar5-secret-compressed.txt",
                 data: b"facade rar5 encrypted compressed\nfacade rar5 encrypted compressed\n",
                 mtime: None,
@@ -3153,6 +2606,7 @@ mod tests {
                 host_os: 3,
                 password: b"password",
             }])
+            .finish()
             .unwrap();
 
         let archive = ArchiveReader::read(&bytes).unwrap();
@@ -3178,7 +2632,9 @@ mod tests {
         let bytes = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
             .with_features(features)
-            .write_rar50_encrypted_compressed(&[
+            .rar50_writer()
+            .unwrap()
+            .encrypted_compressed_entries(&[
                 rar50::EncryptedCompressedEntry {
                     name: b"rar5-encrypted-solid-one.txt",
                     data: &first,
@@ -3196,6 +2652,7 @@ mod tests {
                     password: b"password",
                 },
             ])
+            .finish()
             .unwrap();
 
         let archive = ArchiveReader::read(&bytes).unwrap();
@@ -3218,7 +2675,9 @@ mod tests {
         let bytes = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
             .with_features(features)
-            .write_rar50_encrypted_compressed(&[rar50::EncryptedCompressedEntry {
+            .rar50_writer()
+            .unwrap()
+            .encrypted_compressed_entries(&[rar50::EncryptedCompressedEntry {
                 name: b"rar5-header-secret-compressed.txt",
                 data: b"facade rar5 header encrypted compressed\nfacade rar5 header encrypted compressed\n",
                 mtime: None,
@@ -3226,13 +2685,18 @@ mod tests {
                 host_os: 3,
                 password: b"password",
             }])
+            .finish()
             .unwrap();
 
         assert!(matches!(
             ArchiveReader::read(&bytes),
             Err(Error::NeedPassword)
         ));
-        let archive = ArchiveReader::read_with_password(&bytes, Some(b"password")).unwrap();
+        let archive = ArchiveReader::read_with_options(
+            &bytes,
+            ArchiveReadOptions::with_password(b"password"),
+        )
+        .unwrap();
         let raw = archive.as_rar50().unwrap();
         let file = raw.files().next().unwrap();
         assert!(file.encrypted);
@@ -3258,7 +2722,9 @@ mod tests {
         let bytes = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
             .with_features(features)
-            .write_rar50_encrypted_compressed(&[
+            .rar50_writer()
+            .unwrap()
+            .encrypted_compressed_entries(&[
                 rar50::EncryptedCompressedEntry {
                     name: b"rar5-header-solid-one.txt",
                     data: &first,
@@ -3276,13 +2742,18 @@ mod tests {
                     password: b"password",
                 },
             ])
+            .finish()
             .unwrap();
 
         assert!(matches!(
             ArchiveReader::read(&bytes),
             Err(Error::NeedPassword)
         ));
-        let archive = ArchiveReader::read_with_password(&bytes, Some(b"password")).unwrap();
+        let archive = ArchiveReader::read_with_options(
+            &bytes,
+            ArchiveReadOptions::with_password(b"password"),
+        )
+        .unwrap();
         let raw = archive.as_rar50().unwrap();
         let files: Vec<_> = raw.files().collect();
         assert!(raw.main.is_solid());
@@ -3302,23 +2773,28 @@ mod tests {
         let bytes = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
             .with_features(features)
-            .write_rar50_encrypted_stored_with_comment(
-                &[rar50::EncryptedStoredEntry {
-                    name: b"rar5-secret.txt",
-                    data: b"facade rar5 encrypted stored payload\n",
-                    mtime: Some(0),
-                    attributes: 0x20,
-                    host_os: 3,
-                    password: b"password",
-                }],
-                Some(rar50::EncryptedArchiveCommentEntry {
-                    data: b"facade encrypted comment\n",
-                    password: b"password",
-                }),
-            )
+            .rar50_writer()
+            .unwrap()
+            .encrypted_stored_entries(&[rar50::EncryptedStoredEntry {
+                name: b"rar5-secret.txt",
+                data: b"facade rar5 encrypted stored payload\n",
+                mtime: Some(0),
+                attributes: 0x20,
+                host_os: 3,
+                password: b"password",
+            }])
+            .encrypted_archive_comment(Some(rar50::EncryptedArchiveCommentEntry {
+                data: b"facade encrypted comment\n",
+                password: b"password",
+            }))
+            .finish()
             .unwrap();
 
-        let archive = ArchiveReader::read_with_password(&bytes, Some(b"password")).unwrap();
+        let archive = ArchiveReader::read_with_options(
+            &bytes,
+            ArchiveReadOptions::with_password(b"password"),
+        )
+        .unwrap();
         let raw = archive.as_rar50().unwrap();
         let comment = raw.services().next().unwrap().extract(raw).unwrap();
         assert_eq!(comment.data, b"facade encrypted comment\n");
@@ -3335,24 +2811,28 @@ mod tests {
         let bytes = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
             .with_features(features)
-            .write_rar50_encrypted_compressed_with_comment_and_metadata(
-                &[rar50::EncryptedCompressedEntry {
-                    name: b"rar5-encrypted-compressed-comment.txt",
-                    data: &payload,
-                    mtime: Some(0),
-                    attributes: 0x20,
-                    host_os: 3,
-                    password: b"password",
-                }],
-                Some(rar50::EncryptedArchiveCommentEntry {
-                    data: b"facade encrypted compressed comment\n",
-                    password: b"password",
-                }),
-                None,
-            )
+            .rar50_writer()
+            .unwrap()
+            .encrypted_compressed_entries(&[rar50::EncryptedCompressedEntry {
+                name: b"rar5-encrypted-compressed-comment.txt",
+                data: &payload,
+                mtime: Some(0),
+                attributes: 0x20,
+                host_os: 3,
+                password: b"password",
+            }])
+            .encrypted_archive_comment(Some(rar50::EncryptedArchiveCommentEntry {
+                data: b"facade encrypted compressed comment\n",
+                password: b"password",
+            }))
+            .finish()
             .unwrap();
 
-        let archive = ArchiveReader::read_with_password(&bytes, Some(b"password")).unwrap();
+        let archive = ArchiveReader::read_with_options(
+            &bytes,
+            ArchiveReadOptions::with_password(b"password"),
+        )
+        .unwrap();
         let raw = archive.as_rar50().unwrap();
         let comment = raw.services().next().unwrap().extract(raw).unwrap();
         assert_eq!(comment.data, b"facade encrypted compressed comment\n");
@@ -3368,7 +2848,9 @@ mod tests {
         let bytes = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
             .with_features(features)
-            .write_rar50_encrypted_stored(&[rar50::EncryptedStoredEntry {
+            .rar50_writer()
+            .unwrap()
+            .encrypted_stored_entries(&[rar50::EncryptedStoredEntry {
                 name: b"rar5-header-secret.txt",
                 data: b"facade rar5 header encrypted stored payload\n",
                 mtime: Some(0),
@@ -3376,6 +2858,7 @@ mod tests {
                 host_os: 3,
                 password: b"password",
             }])
+            .finish()
             .unwrap();
 
         assert!(matches!(
@@ -3383,10 +2866,14 @@ mod tests {
             Err(Error::NeedPassword)
         ));
         assert!(matches!(
-            ArchiveReader::read_with_password(&bytes, Some(b"wrong")),
+            ArchiveReader::read_with_options(&bytes, ArchiveReadOptions::with_password(b"wrong")),
             Err(Error::WrongPasswordOrCorruptData)
         ));
-        let archive = ArchiveReader::read_with_password(&bytes, Some(b"password")).unwrap();
+        let archive = ArchiveReader::read_with_options(
+            &bytes,
+            ArchiveReadOptions::with_password(b"password"),
+        )
+        .unwrap();
         let extracted = archive.extract(Some(b"password")).unwrap();
         assert_eq!(
             extracted[0].data,
@@ -3403,23 +2890,28 @@ mod tests {
         let bytes = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
             .with_features(features)
-            .write_rar50_encrypted_stored_with_comment(
-                &[rar50::EncryptedStoredEntry {
-                    name: b"rar5-header-comment-secret.txt",
-                    data: b"facade rar5 header encrypted comment payload\n",
-                    mtime: Some(0),
-                    attributes: 0x20,
-                    host_os: 3,
-                    password: b"password",
-                }],
-                Some(rar50::EncryptedArchiveCommentEntry {
-                    data: b"facade header encrypted comment\n",
-                    password: b"password",
-                }),
-            )
+            .rar50_writer()
+            .unwrap()
+            .encrypted_stored_entries(&[rar50::EncryptedStoredEntry {
+                name: b"rar5-header-comment-secret.txt",
+                data: b"facade rar5 header encrypted comment payload\n",
+                mtime: Some(0),
+                attributes: 0x20,
+                host_os: 3,
+                password: b"password",
+            }])
+            .encrypted_archive_comment(Some(rar50::EncryptedArchiveCommentEntry {
+                data: b"facade header encrypted comment\n",
+                password: b"password",
+            }))
+            .finish()
             .unwrap();
 
-        let archive = ArchiveReader::read_with_password(&bytes, Some(b"password")).unwrap();
+        let archive = ArchiveReader::read_with_options(
+            &bytes,
+            ArchiveReadOptions::with_password(b"password"),
+        )
+        .unwrap();
         let raw = archive.as_rar50().unwrap();
         let comment = raw.services().next().unwrap().extract(raw).unwrap();
         assert_eq!(comment.data, b"facade header encrypted comment\n");
@@ -3440,24 +2932,28 @@ mod tests {
         let bytes = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
             .with_features(features)
-            .write_rar50_encrypted_compressed_with_comment_and_metadata(
-                &[rar50::EncryptedCompressedEntry {
-                    name: b"rar5-header-compressed-comment-secret.txt",
-                    data: &payload,
-                    mtime: Some(0),
-                    attributes: 0x20,
-                    host_os: 3,
-                    password: b"password",
-                }],
-                Some(rar50::EncryptedArchiveCommentEntry {
-                    data: b"facade header encrypted compressed comment\n",
-                    password: b"password",
-                }),
-                None,
-            )
+            .rar50_writer()
+            .unwrap()
+            .encrypted_compressed_entries(&[rar50::EncryptedCompressedEntry {
+                name: b"rar5-header-compressed-comment-secret.txt",
+                data: &payload,
+                mtime: Some(0),
+                attributes: 0x20,
+                host_os: 3,
+                password: b"password",
+            }])
+            .encrypted_archive_comment(Some(rar50::EncryptedArchiveCommentEntry {
+                data: b"facade header encrypted compressed comment\n",
+                password: b"password",
+            }))
+            .finish()
             .unwrap();
 
-        let archive = ArchiveReader::read_with_password(&bytes, Some(b"password")).unwrap();
+        let archive = ArchiveReader::read_with_options(
+            &bytes,
+            ArchiveReadOptions::with_password(b"password"),
+        )
+        .unwrap();
         let raw = archive.as_rar50().unwrap();
         let comment = raw.services().next().unwrap().extract(raw).unwrap();
         assert_eq!(
@@ -3476,21 +2972,26 @@ mod tests {
         let bytes = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
             .with_features(features)
-            .write_rar50_encrypted_stored_with_recovery(
-                &[rar50::EncryptedStoredEntry {
-                    name: b"rar5-encrypted-recovery.txt",
-                    data: b"facade rar5 encrypted recovery payload\n",
-                    mtime: None,
-                    attributes: 0x20,
-                    host_os: 3,
-                    password: b"password",
-                }],
-                6,
-                b"password",
-            )
+            .rar50_writer()
+            .unwrap()
+            .encrypted_stored_entries(&[rar50::EncryptedStoredEntry {
+                name: b"rar5-encrypted-recovery.txt",
+                data: b"facade rar5 encrypted recovery payload\n",
+                mtime: None,
+                attributes: 0x20,
+                host_os: 3,
+                password: b"password",
+            }])
+            .recovery_percent(Some(6))
+            .recovery_password(Some(b"password"))
+            .finish()
             .unwrap();
 
-        let archive = ArchiveReader::read_with_password(&bytes, Some(b"password")).unwrap();
+        let archive = ArchiveReader::read_with_options(
+            &bytes,
+            ArchiveReadOptions::with_password(b"password"),
+        )
+        .unwrap();
         let raw = archive.as_rar50().unwrap();
         assert!(raw.main.has_recovery_record());
         let service = raw.services().next().unwrap();
@@ -3518,20 +3019,25 @@ mod tests {
         let bytes = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
             .with_features(features)
-            .write_rar50_encrypted_compressed_with_recovery(
-                &[rar50::EncryptedCompressedEntry {
-                    name: b"rar5-encrypted-compressed-recovery.txt",
-                    data: &payload,
-                    mtime: None,
-                    attributes: 0x20,
-                    host_os: 3,
-                    password: b"password",
-                }],
-                6,
-            )
+            .rar50_writer()
+            .unwrap()
+            .encrypted_compressed_entries(&[rar50::EncryptedCompressedEntry {
+                name: b"rar5-encrypted-compressed-recovery.txt",
+                data: &payload,
+                mtime: None,
+                attributes: 0x20,
+                host_os: 3,
+                password: b"password",
+            }])
+            .recovery_percent(Some(6))
+            .finish()
             .unwrap();
 
-        let archive = ArchiveReader::read_with_password(&bytes, Some(b"password")).unwrap();
+        let archive = ArchiveReader::read_with_options(
+            &bytes,
+            ArchiveReadOptions::with_password(b"password"),
+        )
+        .unwrap();
         let raw = archive.as_rar50().unwrap();
         assert!(raw.main.has_recovery_record());
         let service = raw.services().next().unwrap();
@@ -3550,25 +3056,30 @@ mod tests {
         let bytes = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
             .with_features(features)
-            .write_rar50_encrypted_stored_with_recovery(
-                &[rar50::EncryptedStoredEntry {
-                    name: b"rar5-header-recovery.txt",
-                    data: b"facade rar5 header encrypted recovery payload\n",
-                    mtime: None,
-                    attributes: 0x20,
-                    host_os: 3,
-                    password: b"password",
-                }],
-                4,
-                b"password",
-            )
+            .rar50_writer()
+            .unwrap()
+            .encrypted_stored_entries(&[rar50::EncryptedStoredEntry {
+                name: b"rar5-header-recovery.txt",
+                data: b"facade rar5 header encrypted recovery payload\n",
+                mtime: None,
+                attributes: 0x20,
+                host_os: 3,
+                password: b"password",
+            }])
+            .recovery_percent(Some(4))
+            .recovery_password(Some(b"password"))
+            .finish()
             .unwrap();
 
         assert!(matches!(
             ArchiveReader::read(&bytes),
             Err(Error::NeedPassword)
         ));
-        let archive = ArchiveReader::read_with_password(&bytes, Some(b"password")).unwrap();
+        let archive = ArchiveReader::read_with_options(
+            &bytes,
+            ArchiveReadOptions::with_password(b"password"),
+        )
+        .unwrap();
         let raw = archive.as_rar50().unwrap();
         assert!(raw.main.has_recovery_record());
         let service = raw.services().next().unwrap();
@@ -3599,24 +3110,29 @@ mod tests {
         let bytes = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
             .with_features(features)
-            .write_rar50_encrypted_compressed_with_recovery(
-                &[rar50::EncryptedCompressedEntry {
-                    name: b"rar5-header-compressed-recovery.txt",
-                    data: &payload,
-                    mtime: None,
-                    attributes: 0x20,
-                    host_os: 3,
-                    password: b"password",
-                }],
-                4,
-            )
+            .rar50_writer()
+            .unwrap()
+            .encrypted_compressed_entries(&[rar50::EncryptedCompressedEntry {
+                name: b"rar5-header-compressed-recovery.txt",
+                data: &payload,
+                mtime: None,
+                attributes: 0x20,
+                host_os: 3,
+                password: b"password",
+            }])
+            .recovery_percent(Some(4))
+            .finish()
             .unwrap();
 
         assert!(matches!(
             ArchiveReader::read(&bytes),
             Err(Error::NeedPassword)
         ));
-        let archive = ArchiveReader::read_with_password(&bytes, Some(b"password")).unwrap();
+        let archive = ArchiveReader::read_with_options(
+            &bytes,
+            ArchiveReadOptions::with_password(b"password"),
+        )
+        .unwrap();
         let raw = archive.as_rar50().unwrap();
         assert!(raw.main.has_recovery_record());
         let service = raw.services().next().unwrap();
@@ -3635,17 +3151,19 @@ mod tests {
         let parts = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
             .with_features(features)
-            .write_rar50_encrypted_stored_volumes(
-                rar50::EncryptedStoredEntry {
-                    name: b"split-secret50.txt",
-                    data: &payload,
-                    mtime: None,
-                    attributes: 0x20,
-                    host_os: 3,
-                    password: b"password",
-                },
-                16,
-            )
+            .rar50_options()
+            .map(rar50::Rar50VolumeWriter::new)
+            .unwrap()
+            .encrypted_stored_entry(rar50::EncryptedStoredEntry {
+                name: b"split-secret50.txt",
+                data: &payload,
+                mtime: None,
+                attributes: 0x20,
+                host_os: 3,
+                password: b"password",
+            })
+            .max_payload_per_volume(16)
+            .finish()
             .unwrap();
         let archives: Vec<_> = parts
             .iter()
@@ -3666,18 +3184,20 @@ mod tests {
         let parts = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
             .with_features(features)
-            .write_rar50_encrypted_stored_volumes_with_recovery(
-                rar50::EncryptedStoredEntry {
-                    name: b"split-secret50-rr.txt",
-                    data: &payload,
-                    mtime: None,
-                    attributes: 0x20,
-                    host_os: 3,
-                    password: b"password",
-                },
-                16,
-                8,
-            )
+            .rar50_options()
+            .map(rar50::Rar50VolumeWriter::new)
+            .unwrap()
+            .encrypted_stored_entry(rar50::EncryptedStoredEntry {
+                name: b"split-secret50-rr.txt",
+                data: &payload,
+                mtime: None,
+                attributes: 0x20,
+                host_os: 3,
+                password: b"password",
+            })
+            .max_payload_per_volume(16)
+            .recovery_percent(Some(8))
+            .finish()
             .unwrap();
         let archives: Vec<_> = parts
             .iter()
@@ -3691,34 +3211,43 @@ mod tests {
     }
 
     #[test]
-    fn archive_writer_rejects_rar50_header_encrypted_stored_volumes_with_recovery() {
+    fn archive_writer_creates_rar50_header_encrypted_stored_volumes_with_recovery() {
         let mut features = FeatureSet::store_only();
         features.file_encryption = true;
         features.header_encryption = true;
         features.recovery_record = true;
         let payload = b"facade rar5 header encrypted recovery split payload\n".repeat(4);
-        let result = ArchiveWriter::new(ArchiveVersion::Rar50)
+        let parts = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
             .with_features(features)
-            .write_rar50_encrypted_stored_volumes_with_recovery(
-                rar50::EncryptedStoredEntry {
-                    name: b"split-header-secret50-rr.txt",
-                    data: &payload,
-                    mtime: None,
-                    attributes: 0x20,
-                    host_os: 3,
-                    password: b"password",
-                },
-                16,
-                8,
-            );
-        assert!(matches!(
-            result,
-            Err(Error::UnsupportedFeature {
-                feature: "RAR 5 header-encrypted volume recovery writer",
-                ..
+            .rar50_options()
+            .map(rar50::Rar50VolumeWriter::new)
+            .unwrap()
+            .encrypted_stored_entry(rar50::EncryptedStoredEntry {
+                name: b"split-header-secret50-rr.txt",
+                data: &payload,
+                mtime: None,
+                attributes: 0x20,
+                host_os: 3,
+                password: b"password",
             })
+            .max_payload_per_volume(16)
+            .recovery_percent(Some(8))
+            .finish()
+            .unwrap();
+        assert!(matches!(
+            rar50::Archive::parse(&parts[0]),
+            Err(Error::NeedPassword)
         ));
+        let archives: Vec<_> = parts
+            .iter()
+            .map(|part| rar50::Archive::parse_with_password(part, Some(b"password")).unwrap())
+            .collect();
+        assert_rar50_volume_recovery_records(&archives, 8);
+
+        let extracted = rar50::extract_volumes_with_password(&archives, Some(b"password")).unwrap();
+        assert_eq!(extracted[0].name, b"split-header-secret50-rr.txt");
+        assert_eq!(extracted[0].data, payload);
     }
 
     #[test]
@@ -3730,17 +3259,19 @@ mod tests {
         let parts = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
             .with_features(features)
-            .write_rar50_encrypted_stored_volumes(
-                rar50::EncryptedStoredEntry {
-                    name: b"split-header-secret50.txt",
-                    data: &payload,
-                    mtime: None,
-                    attributes: 0x20,
-                    host_os: 3,
-                    password: b"password",
-                },
-                16,
-            )
+            .rar50_options()
+            .map(rar50::Rar50VolumeWriter::new)
+            .unwrap()
+            .encrypted_stored_entry(rar50::EncryptedStoredEntry {
+                name: b"split-header-secret50.txt",
+                data: &payload,
+                mtime: None,
+                attributes: 0x20,
+                host_os: 3,
+                password: b"password",
+            })
+            .max_payload_per_volume(16)
+            .finish()
             .unwrap();
         assert!(matches!(
             rar50::Archive::parse(&parts[0]),
@@ -3764,17 +3295,19 @@ mod tests {
         let parts = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
             .with_features(features)
-            .write_rar50_encrypted_compressed_volumes(
-                rar50::EncryptedCompressedEntry {
-                    name: b"split-secret-compressed50.txt",
-                    data: &payload,
-                    mtime: None,
-                    attributes: 0x20,
-                    host_os: 3,
-                    password: b"password",
-                },
-                32,
-            )
+            .rar50_options()
+            .map(rar50::Rar50VolumeWriter::new)
+            .unwrap()
+            .encrypted_compressed_entries(std::slice::from_ref(&rar50::EncryptedCompressedEntry {
+                name: b"split-secret-compressed50.txt",
+                data: &payload,
+                mtime: None,
+                attributes: 0x20,
+                host_os: 3,
+                password: b"password",
+            }))
+            .max_payload_per_volume(32)
+            .finish()
             .unwrap();
         let archives: Vec<_> = parts
             .iter()
@@ -3803,7 +3336,13 @@ mod tests {
         let parts = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
             .with_features(features)
-            .write_rar50_encrypted_compressed_volume_set_with_recovery(&entries, 32, 8)
+            .rar50_options()
+            .map(rar50::Rar50VolumeWriter::new)
+            .unwrap()
+            .encrypted_compressed_entries(&entries)
+            .max_payload_per_volume(32)
+            .recovery_percent(Some(8))
+            .finish()
             .unwrap();
         let archives: Vec<_> = parts
             .iter()
@@ -3817,12 +3356,13 @@ mod tests {
     }
 
     #[test]
-    fn archive_writer_rejects_rar50_header_encrypted_compressed_volumes_with_recovery() {
+    fn archive_writer_creates_rar50_header_encrypted_compressed_volumes_with_recovery() {
         let mut features = FeatureSet::store_only();
         features.file_encryption = true;
         features.header_encryption = true;
         features.recovery_record = true;
-        let payload = b"facade rar5 header encrypted compressed recovery split payload\n".repeat(4);
+        let payload =
+            b"facade rar5 header encrypted compressed recovery split payload\n".repeat(12);
         let entries = [rar50::EncryptedCompressedEntry {
             name: b"split-header-secret-compressed50-rr.txt",
             data: &payload,
@@ -3831,17 +3371,33 @@ mod tests {
             host_os: 3,
             password: b"password",
         }];
-        let result = ArchiveWriter::new(ArchiveVersion::Rar50)
+        let parts = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
             .with_features(features)
-            .write_rar50_encrypted_compressed_volume_set_with_recovery(&entries, 32, 8);
+            .rar50_options()
+            .map(rar50::Rar50VolumeWriter::new)
+            .unwrap()
+            .encrypted_compressed_entries(&entries)
+            .max_payload_per_volume(32)
+            .recovery_percent(Some(8))
+            .finish()
+            .unwrap();
         assert!(matches!(
-            result,
-            Err(Error::UnsupportedFeature {
-                feature: "RAR 5 header-encrypted compressed volume recovery writer",
-                ..
-            })
+            rar50::Archive::parse(&parts[0]),
+            Err(Error::NeedPassword)
         ));
+        let archives: Vec<_> = parts
+            .iter()
+            .map(|part| rar50::Archive::parse_with_password(part, Some(b"password")).unwrap())
+            .collect();
+        assert_rar50_volume_recovery_records(&archives, 8);
+
+        let extracted = rar50::extract_volumes_with_password(&archives, Some(b"password")).unwrap();
+        assert_eq!(
+            extracted[0].name,
+            b"split-header-secret-compressed50-rr.txt"
+        );
+        assert_eq!(extracted[0].data, payload);
     }
 
     #[test]
@@ -3853,17 +3409,19 @@ mod tests {
         let parts = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
             .with_features(features)
-            .write_rar50_encrypted_compressed_volumes(
-                rar50::EncryptedCompressedEntry {
-                    name: b"split-solid-secret-compressed50.txt",
-                    data: &payload,
-                    mtime: None,
-                    attributes: 0x20,
-                    host_os: 3,
-                    password: b"password",
-                },
-                32,
-            )
+            .rar50_options()
+            .map(rar50::Rar50VolumeWriter::new)
+            .unwrap()
+            .encrypted_compressed_entries(std::slice::from_ref(&rar50::EncryptedCompressedEntry {
+                name: b"split-solid-secret-compressed50.txt",
+                data: &payload,
+                mtime: None,
+                attributes: 0x20,
+                host_os: 3,
+                password: b"password",
+            }))
+            .max_payload_per_volume(32)
+            .finish()
             .unwrap();
         let archives: Vec<_> = parts
             .iter()
@@ -3885,17 +3443,19 @@ mod tests {
         let parts = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
             .with_features(features)
-            .write_rar50_encrypted_compressed_volumes(
-                rar50::EncryptedCompressedEntry {
-                    name: b"split-header-secret-compressed50.txt",
-                    data: &payload,
-                    mtime: None,
-                    attributes: 0x20,
-                    host_os: 3,
-                    password: b"password",
-                },
-                64,
-            )
+            .rar50_options()
+            .map(rar50::Rar50VolumeWriter::new)
+            .unwrap()
+            .encrypted_compressed_entries(std::slice::from_ref(&rar50::EncryptedCompressedEntry {
+                name: b"split-header-secret-compressed50.txt",
+                data: &payload,
+                mtime: None,
+                attributes: 0x20,
+                host_os: 3,
+                password: b"password",
+            }))
+            .max_payload_per_volume(64)
+            .finish()
             .unwrap();
         assert!(matches!(
             rar50::Archive::parse(&parts[0]),
@@ -3921,17 +3481,19 @@ mod tests {
         let parts = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
             .with_features(features)
-            .write_rar50_encrypted_compressed_volumes(
-                rar50::EncryptedCompressedEntry {
-                    name: b"split-header-solid-secret-compressed50.txt",
-                    data: &payload,
-                    mtime: None,
-                    attributes: 0x20,
-                    host_os: 3,
-                    password: b"password",
-                },
-                32,
-            )
+            .rar50_options()
+            .map(rar50::Rar50VolumeWriter::new)
+            .unwrap()
+            .encrypted_compressed_entries(std::slice::from_ref(&rar50::EncryptedCompressedEntry {
+                name: b"split-header-solid-secret-compressed50.txt",
+                data: &payload,
+                mtime: None,
+                attributes: 0x20,
+                host_os: 3,
+                password: b"password",
+            }))
+            .max_payload_per_volume(32)
+            .finish()
             .unwrap();
         assert!(matches!(
             rar50::Archive::parse(&parts[0]),
@@ -3956,16 +3518,18 @@ mod tests {
         let payload = b"facade rar5 stored split payload\n".repeat(20);
         let parts = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
-            .write_rar50_stored_volumes(
-                rar50::StoredEntry {
-                    name: b"split50.txt",
-                    data: &payload,
-                    mtime: None,
-                    attributes: 0x20,
-                    host_os: 3,
-                },
-                80,
-            )
+            .rar50_options()
+            .map(rar50::Rar50VolumeWriter::new)
+            .unwrap()
+            .stored_entry(rar50::StoredEntry {
+                name: b"split50.txt",
+                data: &payload,
+                mtime: None,
+                attributes: 0x20,
+                host_os: 3,
+            })
+            .max_payload_per_volume(80)
+            .finish()
             .unwrap();
         let archives: Vec<_> = parts
             .iter()
@@ -3985,17 +3549,19 @@ mod tests {
         let parts = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
             .with_features(features)
-            .write_rar50_stored_volumes_with_recovery(
-                rar50::StoredEntry {
-                    name: b"split50-rr.txt",
-                    data: &payload,
-                    mtime: None,
-                    attributes: 0x20,
-                    host_os: 3,
-                },
-                80,
-                8,
-            )
+            .rar50_options()
+            .map(rar50::Rar50VolumeWriter::new)
+            .unwrap()
+            .stored_entry(rar50::StoredEntry {
+                name: b"split50-rr.txt",
+                data: &payload,
+                mtime: None,
+                attributes: 0x20,
+                host_os: 3,
+            })
+            .max_payload_per_volume(80)
+            .recovery_percent(Some(8))
+            .finish()
             .unwrap();
         let archives: Vec<_> = parts
             .iter()
@@ -4013,16 +3579,18 @@ mod tests {
         let payload: Vec<u8> = (0..512).map(|index| (index * 53 + 17) as u8).collect();
         let parts = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
-            .write_rar50_compressed_volumes(
-                rar50::CompressedEntry {
-                    name: b"split-compressed50.txt",
-                    data: &payload,
-                    mtime: None,
-                    attributes: 0x20,
-                    host_os: 3,
-                },
-                64,
-            )
+            .rar50_options()
+            .map(rar50::Rar50VolumeWriter::new)
+            .unwrap()
+            .compressed_entries(std::slice::from_ref(&rar50::CompressedEntry {
+                name: b"split-compressed50.txt",
+                data: &payload,
+                mtime: None,
+                attributes: 0x20,
+                host_os: 3,
+            }))
+            .max_payload_per_volume(64)
+            .finish()
             .unwrap();
         let archives: Vec<_> = parts
             .iter()
@@ -4049,7 +3617,13 @@ mod tests {
         let parts = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
             .with_features(features)
-            .write_rar50_compressed_volume_set_with_recovery(&entries, 64, 8)
+            .rar50_options()
+            .map(rar50::Rar50VolumeWriter::new)
+            .unwrap()
+            .compressed_entries(&entries)
+            .max_payload_per_volume(64)
+            .recovery_percent(Some(8))
+            .finish()
             .unwrap();
         let archives: Vec<_> = parts
             .iter()
@@ -4070,16 +3644,18 @@ mod tests {
         let parts = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
             .with_features(features)
-            .write_rar50_compressed_volumes(
-                rar50::CompressedEntry {
-                    name: b"split-solid-compressed50.txt",
-                    data: &payload,
-                    mtime: None,
-                    attributes: 0x20,
-                    host_os: 3,
-                },
-                32,
-            )
+            .rar50_options()
+            .map(rar50::Rar50VolumeWriter::new)
+            .unwrap()
+            .compressed_entries(std::slice::from_ref(&rar50::CompressedEntry {
+                name: b"split-solid-compressed50.txt",
+                data: &payload,
+                mtime: None,
+                attributes: 0x20,
+                host_os: 3,
+            }))
+            .max_payload_per_volume(32)
+            .finish()
             .unwrap();
         let archives: Vec<_> = parts
             .iter()
@@ -4117,7 +3693,12 @@ mod tests {
         let parts = ArchiveWriter::new(ArchiveVersion::Rar50)
             .unwrap()
             .with_features(features)
-            .write_rar50_compressed_volume_set(&entries, 96)
+            .rar50_options()
+            .map(rar50::Rar50VolumeWriter::new)
+            .unwrap()
+            .compressed_entries(&entries)
+            .max_payload_per_volume(96)
+            .finish()
             .unwrap();
         let archives: Vec<_> = parts
             .iter()

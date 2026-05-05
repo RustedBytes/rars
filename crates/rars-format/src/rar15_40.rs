@@ -19,22 +19,13 @@ mod extract;
 mod write;
 use extract::DecoderSession;
 pub use extract::{
-    extract_volumes, extract_volumes_to, extract_volumes_to_with_password,
-    extract_volumes_with_password,
+    extract_volumes, extract_volumes_to, extract_volumes_to_with_options,
+    extract_volumes_to_with_password, extract_volumes_with_options, extract_volumes_with_password,
 };
 pub use write::{
     write_compressed_archive, write_compressed_archive_with_comment, write_compressed_volumes,
-    write_rar29_audio_filtered_compressed_archive,
-    write_rar29_audio_range_filtered_compressed_archive,
-    write_rar29_auto_filtered_compressed_archive, write_rar29_delta_filtered_compressed_archive,
-    write_rar29_delta_range_filtered_compressed_archive,
-    write_rar29_e8_filtered_compressed_archive, write_rar29_e8_range_filtered_compressed_archive,
-    write_rar29_e8e9_filtered_compressed_archive,
-    write_rar29_e8e9_range_filtered_compressed_archive,
-    write_rar29_itanium_filtered_compressed_archive,
-    write_rar29_itanium_range_filtered_compressed_archive,
-    write_rar29_rgb_filtered_compressed_archive, write_rar29_rgb_range_filtered_compressed_archive,
-    write_stored_archive, write_stored_archive_with_comment, write_stored_volumes,
+    write_rar29_compressed_archive_with_filter_policy, write_stored_archive,
+    write_stored_archive_with_comment, write_stored_volumes, FilterKind, FilterPolicy, FilterSpec,
 };
 
 const MARK_HEAD: u8 = 0x72;
@@ -816,16 +807,30 @@ impl CommentHeader {
 
 impl Archive {
     pub fn parse(input: &[u8]) -> Result<Self> {
-        Self::parse_with_password(input, None)
+        Self::parse_with_options(input, crate::ArchiveReadOptions::default())
+    }
+
+    pub fn parse_with_options(
+        input: &[u8],
+        options: crate::ArchiveReadOptions<'_>,
+    ) -> Result<Self> {
+        let data: Arc<[u8]> = Arc::from(input.to_vec().into_boxed_slice());
+        Self::parse_shared(data, options.password)
     }
 
     pub fn parse_with_password(input: &[u8], password: Option<&[u8]>) -> Result<Self> {
-        let data: Arc<[u8]> = Arc::from(input.to_vec().into_boxed_slice());
-        Self::parse_shared(data, password)
+        Self::parse_with_options(input, crate::ArchiveReadOptions { password })
     }
 
     pub fn parse_path(path: impl AsRef<Path>) -> Result<Self> {
-        Self::parse_path_with_password(path, None)
+        Self::parse_path_with_options(path, crate::ArchiveReadOptions::default())
+    }
+
+    pub fn parse_path_with_options(
+        path: impl AsRef<Path>,
+        options: crate::ArchiveReadOptions<'_>,
+    ) -> Result<Self> {
+        Self::parse_path_with_password(path, options.password)
     }
 
     pub fn parse_path_with_password(

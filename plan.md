@@ -36,6 +36,28 @@ Encoder policy should remain pluggable. The baseline policy can be simple and
 legal; WinRAR-like match finding, filter choice, and block-splitting heuristics
 belong behind policy interfaces rather than inside format serialization.
 
+Writer APIs should not grow by cartesian-product function names. The intended
+shape is:
+
+- A builder captures user intent and ergonomic defaults.
+- A resolver validates that intent against the selected archive version and
+  produces a resolved emission plan. Validation belongs here, not in every
+  builder setter.
+- The resolved plan describes the concrete block sequence, encryption material,
+  service records, recovery layout, and locator/extent placeholders needed for
+  emission. It is not a renamed struct of option booleans.
+- Layout resolution may use bounded passes for coupled features such as Quick
+  Open locators, inline recovery records, encrypted headers, and volumes. Passes
+  must have a fixed cap and return a clear error if they do not converge.
+- The emitter consumes the resolved plan and performs mechanical serialization
+  and final patching. Mechanical work includes computing bytes implied by the
+  resolved layout, such as recovery parity shards, header checksums, HMACs, and
+  locator fields; it must not re-run feature policy.
+- Parallel tests for a new writer path must keep the existing behavioural and
+  reference-oracle coverage. Reference parity means generated archives are
+  accepted by the relevant `rar t`/reader oracle and decode to the expected
+  metadata and payloads; byte-identical WinRAR output is not required.
+
 Keep `rars-format` as the crate boundary for now, but split large family
 modules internally before adding more RAR5 encryption or RAR7 work. The target
 shape is wire parsing and typed block models in the family root module, with
@@ -333,10 +355,44 @@ Keep this section short. Detailed behavioural claims belong in tests.
 ### 4. API And Error Quality
 
 - Keep pushing `ArchiveReadOptions` into lower-level parsing as formats need
-  it. RAR 5 `parse_with_password` / `parse_path_with_password` now attach
-  derived per-file decryptor state to parsed entries, so encrypted files and
-  split payloads can extract without re-threading raw passwords. Existing
-  no-password and `_with_password` helpers remain compatibility shims for now.
+  it. `ArchiveReadOptions` now lives in `rars-format` and is re-exported by the
+  facade. The public facade reader uses `read_with_options` and
+  `read_path_with_options`, and RAR 1.5-4.x plus RAR5 format parsers and
+  multivolume extractors have option-based entry points. The old
+  `ArchiveReader::*with_password` compatibility methods are gone. RAR 5
+  `parse_with_password` / `parse_path_with_password` still attach derived
+  per-file decryptor state to parsed entries, so encrypted files and split
+  payloads can extract without re-threading raw passwords. Remaining
+  password-specific lower-level helpers are compatibility wrappers or
+  member-level helpers.
+- Keep collapsing writer option combinations into policy objects rather than
+  named functions. The codec layer now exposes RAR29/RAR50 filter specs, and
+  the RAR 2.9/3.x/4.x plus RAR5 public writer surfaces use filter-policy entry
+  points instead of per-filter wrapper functions. RAR5 CLI add-path option
+  construction now builds one feature/options value per invocation instead of
+  rebuilding it inside every stored/compressed/encrypted branch. Plain
+  stored/compressed RAR5 recovery archives, stored quick-open archives, and
+  stored/compressed single archives, including header-encrypted single
+  archives without recovery records, now route through the resolved writer plan
+  so member payloads are prepared once and only the bounded locator/QO/RR
+  layout pass is repeated. Stored file-service archive paths, including
+  header-encrypted stored file-service archives, also use the resolved writer
+  plan. The old RAR5 single-archive `write_*_archive*` public shims and
+  facade `ArchiveWriter::write_rar50_*` mirrors have been removed. Callers use
+  `Rar50Writer` or `ArchiveWriter::rar50_writer()` for single archives and
+  `Rar50VolumeWriter` for multi-part archives. The internal volume emitter is
+  still separate because it produces multiple archive parts, but the public
+  surface is a builder rather than named combinations; encrypted/header-encrypted
+  and recovery combinations share the same header-key and split-layout
+  mechanics instead of rejecting header-encrypted recovery volumes. RAR 1.5-4.x
+  remains on its small set of named writer functions for now:
+  stored/compressed, optional archive comment, RAR29 filter policy, and
+  stored/compressed volumes. That surface is not yet growing cartesianly;
+  introduce a `Rar15_40Writer` only if encryption,
+  recovery, per-file services, or another independent option axis lands there.
+  RAR5 facade tests exercise `Rar50Writer` or `Rar50VolumeWriter` directly
+  rather than preserving private compatibility shims; keep new RAR5 writer
+  tests grouped by behaviour rather than by helper method names.
 - Continue enriching library errors with block type and broader operation
   context before treating the public API as stable. RAR 5 block parse errors
   already carry archive-relative offsets, and RAR 5 extraction errors carry
@@ -347,6 +403,11 @@ Keep this section short. Detailed behavioural claims belong in tests.
 - Consider deprecating Vec-returning extraction APIs once integration tests and
   examples primarily use streaming APIs.
 - Keep archive equality undefined unless a clear value semantics is needed.
+- The per-family `ExtractedEntry` and `ExtractedEntryMeta` types remain
+  duplicated for now because they are not driving the writer/API combinatorics,
+  but the duplication is real. Revisit a shared entry/meta model after writer
+  and reader option convergence, with version-specific metadata represented
+  deliberately rather than as a loose catch-all bucket.
 
 ### 5. Fixture And Coverage Work
 
