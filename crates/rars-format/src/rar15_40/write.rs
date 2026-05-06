@@ -1,7 +1,7 @@
 use super::*;
 use rars_codec::rar13::{unpack15_encode, Unpack15Encoder};
 use rars_codec::rar20::{unpack20_encode_literals, Unpack20Encoder};
-use rars_codec::rar29::{unpack29_encode_literals, unpack29_encode_ppmd_literals, Unpack29Encoder};
+use rars_codec::rar29::{unpack29_encode_literals, unpack29_encode_ppmd, Unpack29Encoder};
 pub use rars_codec::rar29::{Rar29FilterKind as FilterKind, Rar29FilterSpec as FilterSpec};
 use std::ops::Range;
 
@@ -125,7 +125,7 @@ fn encode_rar29_policy_filtered_payload(
             method: 0x33,
         }),
         FilterPolicy::Ppmd => Ok(EncodedPayload {
-            data: unpack29_encode_ppmd_literals(data).map_err(Error::from)?,
+            data: unpack29_encode_ppmd(data).map_err(Error::from)?,
             method: 0x35,
         }),
     }

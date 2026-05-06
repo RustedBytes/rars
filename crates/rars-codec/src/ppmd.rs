@@ -864,6 +864,37 @@ impl PpmdEncoder {
         Ok(())
     }
 
+    pub fn encode_repeat_offset_one(&mut self, length: usize) -> Result<()> {
+        if !(4..=259).contains(&length) {
+            return Err(Error::InvalidData(
+                "RAR PPMd offset-one repeat length is invalid",
+            ));
+        }
+        self.model.encode_symbol(self.esc_char, &mut self.range)?;
+        self.model.encode_symbol(5, &mut self.range)?;
+        self.model
+            .encode_symbol((length - 4) as u8, &mut self.range)?;
+        Ok(())
+    }
+
+    pub fn encode_match(&mut self, offset: usize, length: usize) -> Result<()> {
+        if !(2..=0x1000001).contains(&offset) || !(32..=287).contains(&length) {
+            return Err(Error::InvalidData("RAR PPMd match is invalid"));
+        }
+        let encoded_offset = offset - 2;
+        self.model.encode_symbol(self.esc_char, &mut self.range)?;
+        self.model.encode_symbol(4, &mut self.range)?;
+        self.model
+            .encode_symbol(((encoded_offset >> 16) & 0xff) as u8, &mut self.range)?;
+        self.model
+            .encode_symbol(((encoded_offset >> 8) & 0xff) as u8, &mut self.range)?;
+        self.model
+            .encode_symbol((encoded_offset & 0xff) as u8, &mut self.range)?;
+        self.model
+            .encode_symbol((length - 32) as u8, &mut self.range)?;
+        Ok(())
+    }
+
     pub fn finish(mut self) -> Result<Vec<u8>> {
         self.model.encode_symbol(self.esc_char, &mut self.range)?;
         self.model.encode_symbol(2, &mut self.range)?;

@@ -40,6 +40,9 @@ const MAX_ENCODER_MATCH_OFFSET: usize = 1024 * 1024;
 const MAX_ENCODER_MATCH_LENGTH: usize = 258;
 const MATCH_HASH_BUCKETS: usize = 4096;
 const MAX_MATCH_CANDIDATES: usize = 256;
+const MAX_PPMD_MATCH_LENGTH: usize = 287;
+const MIN_PPMD_MATCH_LENGTH: usize = 32;
+const MAX_PPMD_REPEAT_LENGTH: usize = 259;
 const RAR3_E8_FILTER_BYTECODE: &[u8] = &[
     0x97, 0x1b, 0x01, 0x28, 0x07, 0x06, 0x98, 0x08, 0x00, 0x00, 0x00, 0xd1, 0x3a, 0x10, 0x15, 0x92,
     0xec, 0x50, 0xcb, 0x99, 0x20, 0xb9, 0x25, 0xf0, 0x29, 0x19, 0x15, 0x53, 0x03, 0x12, 0xae, 0x51,
@@ -105,6 +108,14 @@ pub fn unpack29_encode_literals(input: &[u8]) -> Result<Vec<u8>> {
 }
 
 pub fn unpack29_encode_ppmd_literals(input: &[u8]) -> Result<Vec<u8>> {
+    encode_ppmd_member(input, false)
+}
+
+pub fn unpack29_encode_ppmd(input: &[u8]) -> Result<Vec<u8>> {
+    encode_ppmd_member(input, true)
+}
+
+fn encode_ppmd_member(input: &[u8], lz_escapes: bool) -> Result<Vec<u8>> {
     const PPMD_ORDER: usize = 4;
     const PPMD_ESC: u8 = 2;
 
@@ -113,11 +124,24 @@ pub fn unpack29_encode_ppmd_literals(input: &[u8]) -> Result<Vec<u8>> {
     out.push(0);
     out.push(PPMD_ESC);
     let mut encoder = PpmdEncoder::new(PPMD_ORDER, PPMD_ESC)?;
-    for &byte in input {
-        encoder.encode_literal(byte)?;
+    for token in encode_ppmd_tokens(input, lz_escapes) {
+        match token {
+            PpmdEncodeToken::Literal(byte) => encoder.encode_literal(byte)?,
+            PpmdEncodeToken::RepeatOffsetOne { length } => {
+                encoder.encode_repeat_offset_one(length)?
+            }
+            PpmdEncodeToken::Match { offset, length } => encoder.encode_match(offset, length)?,
+        }
     }
     out.extend_from_slice(&encoder.finish()?);
     Ok(out)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PpmdEncodeToken {
+    Literal(u8),
+    RepeatOffsetOne { length: usize },
+    Match { offset: usize, length: usize },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -658,6 +682,100 @@ fn encode_tokens(input: &[u8], history: &[u8]) -> Vec<EncodeToken> {
         }
     }
     tokens
+}
+
+fn encode_ppmd_tokens(input: &[u8], lz_escapes: bool) -> Vec<PpmdEncodeToken> {
+    if !lz_escapes {
+        return input
+            .iter()
+            .copied()
+            .map(PpmdEncodeToken::Literal)
+            .collect();
+    }
+
+    let mut tokens = Vec::new();
+    let mut buckets = vec![Vec::new(); MATCH_HASH_BUCKETS];
+    let mut pos = 0usize;
+    while pos < input.len() {
+        if let Some(length) = ppmd_offset_one_repeat(input, pos) {
+            tokens.push(PpmdEncodeToken::RepeatOffsetOne { length });
+            for history_pos in pos..pos + length {
+                insert_match_position(input, history_pos, &mut buckets);
+            }
+            pos += length;
+            continue;
+        }
+
+        if let Some((length, offset)) = best_ppmd_match(input, pos, &buckets) {
+            tokens.push(PpmdEncodeToken::Match { offset, length });
+            for history_pos in pos..pos + length {
+                insert_match_position(input, history_pos, &mut buckets);
+            }
+            pos += length;
+            continue;
+        }
+
+        tokens.push(PpmdEncodeToken::Literal(input[pos]));
+        insert_match_position(input, pos, &mut buckets);
+        pos += 1;
+    }
+    tokens
+}
+
+fn ppmd_offset_one_repeat(input: &[u8], pos: usize) -> Option<usize> {
+    if pos == 0 || input[pos] != input[pos - 1] {
+        return None;
+    }
+    let mut length = 0usize;
+    while pos + length < input.len()
+        && input[pos + length] == input[pos - 1]
+        && length < MAX_PPMD_REPEAT_LENGTH
+    {
+        length += 1;
+    }
+    (length >= 4).then_some(length)
+}
+
+fn best_ppmd_match(input: &[u8], pos: usize, buckets: &[Vec<usize>]) -> Option<(usize, usize)> {
+    let max_offset = pos.min(0x1000001).min(MAX_ENCODER_MATCH_OFFSET);
+    let max_length = (input.len() - pos).min(MAX_PPMD_MATCH_LENGTH);
+    if max_offset < 2 || max_length < MIN_PPMD_MATCH_LENGTH || pos + 2 >= input.len() {
+        return None;
+    }
+    let bucket = &buckets[match_hash(input, pos)];
+    let mut best = None;
+    let mut checked = 0usize;
+    for &candidate in bucket.iter().rev() {
+        if candidate >= pos {
+            continue;
+        }
+        let offset = pos - candidate;
+        if offset > max_offset {
+            break;
+        }
+        if offset < 2 {
+            continue;
+        }
+        checked += 1;
+        let mut length = 0usize;
+        while length < max_length && input[pos + length] == input[pos + length - offset] {
+            length += 1;
+        }
+        if length >= MIN_PPMD_MATCH_LENGTH
+            && best.is_none_or(|(best_length, best_offset)| {
+                length > best_length || (length == best_length && offset < best_offset)
+            })
+        {
+            best = Some((length, offset));
+            if length == max_length {
+                break;
+            }
+        }
+        if checked >= MAX_MATCH_CANDIDATES {
+            break;
+        }
+    }
+    best
 }
 
 fn best_match(
@@ -2115,9 +2233,10 @@ mod tests {
     use std::ops::Range;
 
     use super::{
-        encode_tokens, unpack29_decode, unpack29_encode_literals, unpack29_encode_ppmd_literals,
-        EncodeToken, Rar29FilterKind, Rar29FilterSpec, Result, StandardFilter, Unpack29,
-        Unpack29Encoder, VmFilter, VmProgram, VmProgramKind,
+        encode_ppmd_tokens, encode_tokens, unpack29_decode, unpack29_encode_literals,
+        unpack29_encode_ppmd, unpack29_encode_ppmd_literals, EncodeToken, PpmdEncodeToken,
+        Rar29FilterKind, Rar29FilterSpec, Result, StandardFilter, Unpack29, Unpack29Encoder,
+        VmFilter, VmProgram, VmProgramKind,
     };
 
     const COMPRESSED_TEXT: &[u8] = &[
@@ -2151,6 +2270,40 @@ mod tests {
 
         assert_eq!(unpack29_decode(&packed, input.len()).unwrap(), input);
         assert_ne!(packed.first().copied(), Some(0));
+    }
+
+    #[test]
+    fn ppmd_encoder_emits_offset_one_repeat_escapes() {
+        let input = b"seed "
+            .iter()
+            .copied()
+            .chain(std::iter::repeat_n(b'Z', 512))
+            .collect::<Vec<_>>();
+        let tokens = encode_ppmd_tokens(&input, true);
+        let packed = unpack29_encode_ppmd(&input).unwrap();
+
+        assert!(tokens.iter().any(
+            |token| matches!(token, PpmdEncodeToken::RepeatOffsetOne { length } if *length >= 4)
+        ));
+        assert_eq!(unpack29_decode(&packed, input.len()).unwrap(), input);
+    }
+
+    #[test]
+    fn ppmd_encoder_emits_distance_match_escapes() {
+        let phrase = b"repeated phrase for rar29 ppmd distance escape 4 ";
+        let mut input = Vec::new();
+        input.extend_from_slice(phrase);
+        input.extend_from_slice(b"middle bytes make the repeat distance greater than one ");
+        input.extend_from_slice(phrase);
+        input.extend_from_slice(phrase);
+        input.extend_from_slice(b"tail");
+        let tokens = encode_ppmd_tokens(&input, true);
+        let packed = unpack29_encode_ppmd(&input).unwrap();
+
+        assert!(tokens
+            .iter()
+            .any(|token| matches!(token, PpmdEncodeToken::Match { offset, length } if *offset > 1 && *length >= 32)));
+        assert_eq!(unpack29_decode(&packed, input.len()).unwrap(), input);
     }
 
     fn encode_with_filter(input: &[u8], kind: Rar29FilterKind) -> Result<Vec<u8>> {

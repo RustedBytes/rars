@@ -2525,6 +2525,44 @@ fn ppmd_rar29_writer_emits_method_35_member() {
 }
 
 #[test]
+fn ppmd_rar29_writer_uses_lz_escapes_for_repeated_data() {
+    let phrase = b"rar29 ppmd writer repeated distance phrase ";
+    let mut payload = b"seed "
+        .iter()
+        .copied()
+        .chain(std::iter::repeat_n(b'Q', 512))
+        .collect::<Vec<_>>();
+    payload.extend_from_slice(phrase);
+    payload.extend_from_slice(b"middle gap for offset greater than one ");
+    payload.extend_from_slice(phrase);
+    payload.extend_from_slice(phrase);
+    let entries = [FileEntry {
+        name: b"rar29-ppmd-lz.txt",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+    let options = WriterOptions {
+        target: ArchiveVersion::Rar29,
+        features: FeatureSet::store_only(),
+    };
+
+    let ppmd =
+        write_rar29_compressed_archive_with_filter_policy(&entries, options, FilterPolicy::Ppmd)
+            .unwrap();
+    let codec_packed = rars_codec::rar29::unpack29_encode_ppmd(&payload).unwrap();
+    let archive = Archive::parse(&ppmd).unwrap();
+    let file = archive.files().next().unwrap();
+
+    assert_eq!(file.method, 0x35);
+    assert_eq!(file.pack_size, codec_packed.len() as u64);
+    assert_eq!(archive.extract().unwrap()[0].data, payload);
+}
+
+#[test]
 fn writes_solid_compressed_rar15_archive_that_reader_extracts() {
     let entries = [
         FileEntry {
