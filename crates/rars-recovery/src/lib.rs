@@ -4,6 +4,381 @@
 //! and a Cauchy encoder matrix. This crate intentionally exposes the field
 //! and matrix building blocks before wiring them into archive serialization.
 
+pub mod rar3 {
+    const MAX_PARITY: usize = 255;
+    const MAX_POLYNOMIAL: usize = 512;
+    const PRIMITIVE_POLYNOMIAL: u16 = 0x11d;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum Error {
+        InvalidParitySize,
+        InvalidCodewordSize,
+        TooManyErasures,
+        DecodeFailed,
+    }
+
+    pub type Result<T> = std::result::Result<T, Error>;
+
+    #[derive(Debug, Clone)]
+    pub struct RSCoder8 {
+        parity_size: usize,
+        gf_exp: [u8; MAX_POLYNOMIAL],
+        gf_log: [u16; MAX_PARITY + 1],
+        generator: Vec<u8>,
+    }
+
+    impl RSCoder8 {
+        pub fn new(parity_size: usize) -> Result<Self> {
+            if parity_size == 0 || parity_size > MAX_PARITY {
+                return Err(Error::InvalidParitySize);
+            }
+            let mut coder = Self {
+                parity_size,
+                gf_exp: [0; MAX_POLYNOMIAL],
+                gf_log: [0; MAX_PARITY + 1],
+                generator: vec![0; parity_size],
+            };
+            coder.init_field();
+            coder.init_generator();
+            Ok(coder)
+        }
+
+        pub fn encode(&self, data: &[u8]) -> Vec<u8> {
+            let mut shift = vec![0u8; self.parity_size + 1];
+            for &byte in data {
+                let feedback = byte ^ shift[self.parity_size - 1];
+                for index in (1..self.parity_size).rev() {
+                    shift[index] = shift[index - 1] ^ self.mul(self.generator[index], feedback);
+                }
+                shift[0] = self.mul(self.generator[0], feedback);
+            }
+            (0..self.parity_size)
+                .map(|index| shift[self.parity_size - index - 1])
+                .collect()
+        }
+
+        pub fn correct_erasures(&self, codeword: &mut [u8], erasures: &[usize]) -> Result<()> {
+            if codeword.is_empty() || codeword.len() > MAX_PARITY {
+                return Err(Error::InvalidCodewordSize);
+            }
+            if erasures.len() > self.parity_size {
+                return Err(Error::TooManyErasures);
+            }
+            if erasures.iter().any(|&index| index >= codeword.len()) {
+                return Err(Error::InvalidCodewordSize);
+            }
+
+            let mut syndromes = vec![0u8; self.parity_size];
+            let mut all_zero = true;
+            for (index, syndrome) in syndromes.iter_mut().enumerate() {
+                let factor = self.gf_exp[index + 1];
+                let mut sum = 0;
+                for &byte in codeword.iter() {
+                    sum = byte ^ self.mul(factor, sum);
+                }
+                *syndrome = sum;
+                all_zero &= sum == 0;
+            }
+            if all_zero {
+                return Ok(());
+            }
+            if erasures.is_empty() {
+                return Err(Error::DecodeFailed);
+            }
+
+            let mut locator = vec![0u8; self.parity_size + 1];
+            locator[0] = 1;
+            for &erasure in erasures {
+                let multiplier = self.gf_exp[codeword.len() - erasure - 1];
+                for index in (1..=self.parity_size).rev() {
+                    locator[index] ^= self.mul(multiplier, locator[index - 1]);
+                }
+            }
+
+            let mut error_locs = Vec::new();
+            let mut denominators = Vec::new();
+            for root in (MAX_PARITY - codeword.len())..=MAX_PARITY {
+                let mut sum = 0;
+                for (power, &coefficient) in locator.iter().enumerate() {
+                    sum ^= self.mul(self.gf_exp[(power * root) % MAX_PARITY], coefficient);
+                }
+                if sum == 0 {
+                    let loc = MAX_PARITY - root;
+                    error_locs.push(loc);
+                    let mut denominator = 0;
+                    for index in (1..=self.parity_size).step_by(2) {
+                        denominator ^= self.mul(
+                            locator[index],
+                            self.gf_exp[(root * (index - 1)) % MAX_PARITY],
+                        );
+                    }
+                    denominators.push(denominator);
+                }
+            }
+            if error_locs.is_empty() || error_locs.len() > self.parity_size {
+                return Err(Error::DecodeFailed);
+            }
+
+            let evaluator = self.multiply_polynomials(&locator, &syndromes);
+            for (&loc, &denominator) in error_locs.iter().zip(&denominators) {
+                if denominator == 0 {
+                    return Err(Error::DecodeFailed);
+                }
+                let data_pos = codeword
+                    .len()
+                    .checked_sub(loc + 1)
+                    .ok_or(Error::DecodeFailed)?;
+                let dloc = MAX_PARITY - loc;
+                let mut numerator = 0;
+                for (index, &coefficient) in evaluator.iter().enumerate() {
+                    numerator ^= self.mul(coefficient, self.gf_exp[(dloc * index) % MAX_PARITY]);
+                }
+                let correction = self.mul(
+                    numerator,
+                    self.gf_exp[MAX_PARITY - usize::from(self.gf_log[denominator as usize])],
+                );
+                codeword[data_pos] ^= correction;
+            }
+            Ok(())
+        }
+
+        fn init_field(&mut self) {
+            let mut value = 1u16;
+            for index in 0..MAX_PARITY {
+                self.gf_log[value as usize] = index as u16;
+                self.gf_exp[index] = value as u8;
+                value <<= 1;
+                if value > 0xff {
+                    value ^= PRIMITIVE_POLYNOMIAL;
+                }
+            }
+            for index in MAX_PARITY..MAX_POLYNOMIAL {
+                self.gf_exp[index] = self.gf_exp[index - MAX_PARITY];
+            }
+        }
+
+        fn init_generator(&mut self) {
+            let mut current = vec![0u8; self.parity_size];
+            current[0] = 1;
+            for index in 1..=self.parity_size {
+                let mut factor = vec![0u8; self.parity_size];
+                factor[0] = self.gf_exp[index];
+                if self.parity_size > 1 {
+                    factor[1] = 1;
+                }
+                self.generator = self.multiply_polynomials(&factor, &current);
+                current.clone_from(&self.generator);
+            }
+        }
+
+        fn multiply_polynomials(&self, left: &[u8], right: &[u8]) -> Vec<u8> {
+            let mut out = vec![0u8; self.parity_size];
+            for left_index in 0..self.parity_size {
+                if left.get(left_index).copied().unwrap_or(0) == 0 {
+                    continue;
+                }
+                for right_index in 0..(self.parity_size - left_index) {
+                    out[left_index + right_index] ^= self.mul(
+                        left[left_index],
+                        right.get(right_index).copied().unwrap_or(0),
+                    );
+                }
+            }
+            out
+        }
+
+        fn mul(&self, left: u8, right: u8) -> u8 {
+            if left == 0 || right == 0 {
+                0
+            } else {
+                self.gf_exp[usize::from(self.gf_log[left as usize] + self.gf_log[right as usize])]
+            }
+        }
+    }
+
+    pub fn reconstruct_data_volumes(
+        data_volumes: &[Option<&[u8]>],
+        recovery_count: usize,
+        recovery_volumes: &[(usize, &[u8])],
+    ) -> Result<Vec<Vec<u8>>> {
+        if data_volumes.is_empty() || data_volumes.len() + recovery_count > MAX_PARITY {
+            return Err(Error::InvalidCodewordSize);
+        }
+        if recovery_volumes.is_empty() || recovery_count == 0 || recovery_count > MAX_PARITY {
+            return Err(Error::InvalidParitySize);
+        }
+        let shard_len = recovery_volumes[0].1.len();
+        if recovery_volumes
+            .iter()
+            .any(|&(index, data)| index >= recovery_count || data.len() != shard_len)
+        {
+            return Err(Error::InvalidCodewordSize);
+        }
+        if data_volumes
+            .iter()
+            .flatten()
+            .any(|data| data.len() > shard_len)
+        {
+            return Err(Error::InvalidCodewordSize);
+        }
+
+        let mut recovery_by_index = vec![None; recovery_count];
+        for &(index, data) in recovery_volumes {
+            if recovery_by_index[index].replace(data).is_some() {
+                return Err(Error::InvalidCodewordSize);
+            }
+        }
+
+        let missing_data: Vec<_> = data_volumes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, data)| data.is_none().then_some(index))
+            .collect();
+        if missing_data.is_empty() {
+            return Ok(data_volumes
+                .iter()
+                .map(|data| {
+                    let mut out = vec![0; shard_len];
+                    if let Some(data) = data {
+                        out[..data.len()].copy_from_slice(data);
+                    }
+                    out
+                })
+                .collect());
+        }
+
+        let missing_recovery: Vec<_> = recovery_by_index
+            .iter()
+            .enumerate()
+            .filter_map(|(index, data)| data.is_none().then_some(data_volumes.len() + index))
+            .collect();
+        let mut erasures = missing_data.clone();
+        erasures.extend(missing_recovery);
+        if erasures.len() > recovery_count {
+            return Err(Error::TooManyErasures);
+        }
+
+        let coder = RSCoder8::new(recovery_count)?;
+        let mut out: Vec<Vec<u8>> = data_volumes
+            .iter()
+            .map(|data| {
+                let mut shard = vec![0; shard_len];
+                if let Some(data) = data {
+                    shard[..data.len()].copy_from_slice(data);
+                }
+                shard
+            })
+            .collect();
+
+        for offset in 0..shard_len {
+            let mut codeword = vec![0; data_volumes.len() + recovery_count];
+            for (index, data) in data_volumes.iter().enumerate() {
+                if let Some(data) = data {
+                    codeword[index] = data.get(offset).copied().unwrap_or(0);
+                }
+            }
+            for (index, data) in recovery_by_index.iter().enumerate() {
+                if let Some(data) = data {
+                    codeword[data_volumes.len() + index] = data[offset];
+                }
+            }
+            coder.correct_erasures(&mut codeword, &erasures)?;
+            for &index in &missing_data {
+                out[index][offset] = codeword[index];
+            }
+        }
+
+        Ok(out)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{reconstruct_data_volumes, Error, RSCoder8};
+
+        #[test]
+        fn rs8_encoder_matches_unrar_generator_shape() {
+            let coder = RSCoder8::new(11).unwrap();
+            assert_eq!(
+                coder.generator,
+                vec![97, 180, 203, 151, 195, 196, 219, 7, 113, 50, 69]
+            );
+        }
+
+        #[test]
+        fn rs8_reconstructs_single_erased_data_symbol() {
+            let coder = RSCoder8::new(4).unwrap();
+            let data = b"rar recovery data";
+            let parity = coder.encode(data);
+            let mut codeword = [data.as_slice(), parity.as_slice()].concat();
+            let original = codeword.clone();
+            codeword[3] ^= 0xa5;
+
+            coder.correct_erasures(&mut codeword, &[3]).unwrap();
+
+            assert_eq!(codeword, original);
+        }
+
+        #[test]
+        fn rs8_reconstructs_multiple_erased_symbols_including_parity() {
+            let coder = RSCoder8::new(5).unwrap();
+            let data = b"rar3-rs8";
+            let parity = coder.encode(data);
+            let mut codeword = [data.as_slice(), parity.as_slice()].concat();
+            let original = codeword.clone();
+            codeword[1] = 0;
+            codeword[7] = 0;
+            codeword[10] = 0;
+
+            coder.correct_erasures(&mut codeword, &[1, 7, 10]).unwrap();
+
+            assert_eq!(codeword, original);
+        }
+
+        #[test]
+        fn rs8_rejects_more_erasures_than_parity_symbols() {
+            let coder = RSCoder8::new(2).unwrap();
+            let mut codeword = b"abcde".to_vec();
+
+            assert_eq!(
+                coder.correct_erasures(&mut codeword, &[0, 1, 2]),
+                Err(Error::TooManyErasures)
+            );
+        }
+
+        #[test]
+        fn rev3_reconstructs_missing_data_volume_from_recovery_volume() {
+            let data = [
+                b"volume-one".as_slice(),
+                b"volume-two".as_slice(),
+                b"volume-three".as_slice(),
+            ];
+            let recovery_count = 2;
+            let coder = RSCoder8::new(recovery_count).unwrap();
+            let shard_len = data.iter().map(|shard| shard.len()).max().unwrap();
+            let mut recovery = vec![vec![0; shard_len]; recovery_count];
+            for offset in 0..shard_len {
+                let column: Vec<_> = data
+                    .iter()
+                    .map(|shard| shard.get(offset).copied().unwrap_or(0))
+                    .collect();
+                let encoded = coder.encode(&column);
+                for (index, byte) in encoded.into_iter().enumerate() {
+                    recovery[index][offset] = byte;
+                }
+            }
+
+            let repaired = reconstruct_data_volumes(
+                &[Some(data[0]), None, Some(data[2])],
+                recovery_count,
+                &[(0, recovery[0].as_slice())],
+            )
+            .unwrap();
+
+            assert_eq!(&repaired[1][..data[1].len()], data[1]);
+        }
+    }
+}
+
 pub mod rar5 {
     const CRC64_XZ_POLY: u64 = 0xc96c_5795_d787_0f42;
     const CRC64_XZ_INIT: u64 = 0xffff_ffff_ffff_ffff;
@@ -235,11 +610,17 @@ pub mod rar5 {
         parity: Vec<u8>,
     }
 
+    #[derive(Debug, Clone)]
+    struct FoundInlineRecoveryChunk {
+        offset: usize,
+        chunk: InlineRecoveryChunk,
+    }
+
     pub fn repair_inline_recovery_prefix(
         archive_prefix: &[u8],
         recovery_data: &[u8],
     ) -> Result<Vec<u8>> {
-        let chunks = parse_inline_recovery_chunks(recovery_data)?;
+        let chunks = parse_available_inline_recovery_chunks(recovery_data)?;
         let first = chunks.first().ok_or(Error::BadRecoveryChunk)?;
         let plan = first.plan;
         if first.protected_size != archive_prefix.len() as u64 {
@@ -270,7 +651,11 @@ pub mod rar5 {
             return Err(Error::TooManyDamagedShards);
         }
 
-        recover_damaged_shards(&mut data_shards, &damaged, &chunks[..damaged.len()])?;
+        let recovery_rows: Vec<_> = chunks[..damaged.len()]
+            .iter()
+            .map(|chunk| (chunk.shard_index, chunk.parity.as_slice()))
+            .collect();
+        recover_damaged_shards(&mut data_shards, &damaged, &recovery_rows)?;
 
         let mut repaired = Vec::with_capacity(archive_prefix.len());
         for (shard, range) in data_shards.iter().zip(shard_ranges) {
@@ -280,20 +665,127 @@ pub mod rar5 {
         Ok(repaired)
     }
 
-    fn parse_inline_recovery_chunks(recovery_data: &[u8]) -> Result<Vec<InlineRecoveryChunk>> {
+    pub fn repair_inline_recovery_archive(input: &[u8]) -> Result<Vec<u8>> {
+        let chunks = find_inline_recovery_chunks(input)?;
+        let first = chunks.first().ok_or(Error::BadRecoveryChunk)?;
+        let protected_size =
+            usize::try_from(first.chunk.protected_size).map_err(|_| Error::PlanOverflow)?;
+        if protected_size > input.len() {
+            return Err(Error::BadRecoveryChunk);
+        }
+        let mut recovery_data = Vec::with_capacity(
+            chunks
+                .iter()
+                .map(|found| found.chunk.plan.shard_size as usize)
+                .sum(),
+        );
+        for found in &chunks {
+            append_inline_recovery_chunk(input, found, &mut recovery_data)?;
+        }
+        let repaired_prefix =
+            repair_inline_recovery_prefix(&input[..protected_size], &recovery_data)?;
+        if repaired_prefix == input[..protected_size] {
+            return Err(Error::BadRecoveryChunk);
+        }
+        let mut repaired = input.to_vec();
+        repaired[..protected_size].copy_from_slice(&repaired_prefix);
+        Ok(repaired)
+    }
+
+    fn find_inline_recovery_chunks(input: &[u8]) -> Result<Vec<FoundInlineRecoveryChunk>> {
         let mut chunks = Vec::new();
         let mut offset = 0usize;
-        while offset < recovery_data.len() {
-            let chunk = parse_inline_recovery_chunk(&recovery_data[offset..])?;
-            let shard_size =
-                usize::try_from(chunk.plan.shard_size).map_err(|_| Error::PlanOverflow)?;
-            if shard_size == 0 {
-                return Err(Error::BadRecoveryChunk);
+        while let Some(relative) = input[offset..]
+            .windows(4)
+            .position(|window| window == b"{RB}")
+        {
+            let start = offset + relative;
+            if let Ok(chunk) = parse_inline_recovery_chunk(&input[start..]) {
+                let shard_size =
+                    usize::try_from(chunk.plan.shard_size).map_err(|_| Error::PlanOverflow)?;
+                if input.len().saturating_sub(start) >= shard_size {
+                    chunks.push(FoundInlineRecoveryChunk {
+                        offset: start,
+                        chunk,
+                    });
+                    offset = start + shard_size;
+                    continue;
+                }
             }
-            chunks.push(chunk);
-            offset = offset.checked_add(shard_size).ok_or(Error::PlanOverflow)?;
+            offset = start + 1;
+        }
+        if chunks.is_empty() {
+            return Err(Error::BadRecoveryChunk);
         }
         Ok(chunks)
+    }
+
+    fn append_inline_recovery_chunk(
+        input: &[u8],
+        found: &FoundInlineRecoveryChunk,
+        out: &mut Vec<u8>,
+    ) -> Result<()> {
+        let shard_size =
+            usize::try_from(found.chunk.plan.shard_size).map_err(|_| Error::PlanOverflow)?;
+        let start = found.offset;
+        let end = start.checked_add(shard_size).ok_or(Error::PlanOverflow)?;
+        out.extend_from_slice(input.get(start..end).ok_or(Error::BadRecoveryChunk)?);
+        Ok(())
+    }
+
+    pub fn reconstruct_data_shards(
+        data_shards: &[Option<&[u8]>],
+        recovery_shards: &[(usize, &[u8])],
+    ) -> Result<Vec<Vec<u8>>> {
+        if data_shards.is_empty() {
+            return Err(Error::TooManyShards);
+        }
+        let shard_len = recovery_shards
+            .first()
+            .map(|(_, shard)| shard.len())
+            .or_else(|| data_shards.iter().flatten().map(|shard| shard.len()).max())
+            .ok_or(Error::TooManyDamagedShards)?;
+        if shard_len % 2 != 0 {
+            return Err(Error::OddShardSize);
+        }
+        if recovery_shards
+            .iter()
+            .any(|(_, shard)| shard.len() != shard_len)
+        {
+            return Err(Error::ShardSizeMismatch);
+        }
+
+        let mut out = Vec::with_capacity(data_shards.len());
+        let mut missing = Vec::new();
+        for (index, shard) in data_shards.iter().enumerate() {
+            let mut padded = vec![0; shard_len];
+            if let Some(shard) = shard {
+                if shard.len() > shard_len {
+                    return Err(Error::ShardSizeMismatch);
+                }
+                padded[..shard.len()].copy_from_slice(shard);
+            } else {
+                missing.push(index);
+            }
+            out.push(padded);
+        }
+        if missing.is_empty() {
+            return Ok(out);
+        }
+        if missing.len() > recovery_shards.len() {
+            return Err(Error::TooManyDamagedShards);
+        }
+        recover_damaged_shards(&mut out, &missing, &recovery_shards[..missing.len()])?;
+        Ok(out)
+    }
+
+    fn parse_available_inline_recovery_chunks(
+        recovery_data: &[u8],
+    ) -> Result<Vec<InlineRecoveryChunk>> {
+        Ok(find_inline_recovery_chunks(recovery_data)?
+            .into_iter()
+            .map(|found| found.chunk)
+            .collect())
     }
 
     fn parse_inline_recovery_chunk(input: &[u8]) -> Result<InlineRecoveryChunk> {
@@ -367,16 +859,21 @@ pub mod rar5 {
     fn recover_damaged_shards(
         data_shards: &mut [Vec<u8>],
         damaged: &[usize],
-        chunks: &[InlineRecoveryChunk],
+        recovery_shards: &[(usize, &[u8])],
     ) -> Result<()> {
         let data_count = data_shards.len();
-        let matrix = make_encoder_matrix(data_count, chunks[0].plan.recovery_shards as usize)?;
-        let equations: Vec<Vec<u16>> = chunks
+        let recovery_count = recovery_shards
             .iter()
-            .map(|chunk| {
+            .map(|(row, _)| row + 1)
+            .max()
+            .ok_or(Error::TooManyDamagedShards)?;
+        let matrix = make_encoder_matrix(data_count, recovery_count)?;
+        let equations: Vec<Vec<u16>> = recovery_shards
+            .iter()
+            .map(|&(row_index, _)| {
                 damaged
                     .iter()
-                    .map(|&data_index| matrix[chunk.shard_index][data_index])
+                    .map(|&data_index| matrix[row_index][data_index])
                     .collect()
             })
             .collect();
@@ -384,17 +881,16 @@ pub mod rar5 {
         let shard_len = data_shards.first().ok_or(Error::TooManyShards)?.len();
         let gf = Gf16::new();
         for word_offset in (0..shard_len).step_by(2) {
-            let mut rhs = Vec::with_capacity(chunks.len());
-            for chunk in chunks {
-                let mut value =
-                    u16::from_le_bytes([chunk.parity[word_offset], chunk.parity[word_offset + 1]]);
+            let mut rhs = Vec::with_capacity(recovery_shards.len());
+            for &(row_index, parity) in recovery_shards {
+                let mut value = u16::from_le_bytes([parity[word_offset], parity[word_offset + 1]]);
                 for (data_index, shard) in data_shards.iter().enumerate() {
                     if damaged.contains(&data_index) {
                         continue;
                     }
                     let data_symbol =
                         u16::from_le_bytes([shard[word_offset], shard[word_offset + 1]]);
-                    value ^= gf.mul(matrix[chunk.shard_index][data_index], data_symbol);
+                    value ^= gf.mul(matrix[row_index][data_index], data_symbol);
                 }
                 rhs.push(value);
             }
@@ -568,8 +1064,9 @@ pub mod rar5 {
         use super::{
             build_structural_inline_recovery_data, crc64_rar_state, crc64_xz,
             encode_inline_recovery_parity, encode_parity_shards, make_encoder_matrix,
-            plan_inline_recovery, repair_inline_recovery_prefix, split_prefix_shard_ranges,
-            split_prefix_shards, Error, Gf16, InlineRecoveryPlan,
+            plan_inline_recovery, reconstruct_data_shards, repair_inline_recovery_archive,
+            repair_inline_recovery_prefix, split_prefix_shard_ranges, split_prefix_shards, Error,
+            Gf16, InlineRecoveryPlan,
         };
 
         #[test]
@@ -860,6 +1357,19 @@ pub mod rar5 {
         }
 
         #[test]
+        fn rar5_inline_recovery_skips_damaged_recovery_chunks_if_enough_survive() {
+            let prefix: Vec<u8> = (0..32_000).map(|index| (index * 13) as u8).collect();
+            let mut recovery_data = build_structural_inline_recovery_data(&prefix, 20).unwrap();
+            recovery_data[0x48] ^= 0xff;
+            let mut damaged = prefix.clone();
+            damaged[1024..1300].fill(0xa5);
+
+            let repaired = repair_inline_recovery_prefix(&damaged, &recovery_data).unwrap();
+
+            assert_eq!(repaired, prefix);
+        }
+
+        #[test]
         fn rar5_inline_recovery_repairs_multiple_damaged_data_shards() {
             let prefix: Vec<u8> = (0..128_000).map(|index| (index * 31) as u8).collect();
             let recovery_data = build_structural_inline_recovery_data(&prefix, 20).unwrap();
@@ -874,6 +1384,22 @@ pub mod rar5 {
         }
 
         #[test]
+        fn rar5_inline_recovery_archive_scans_chunks_and_repairs_prefix() {
+            let prefix: Vec<u8> = (0..32_000).map(|index| (index * 13) as u8).collect();
+            let recovery_data = build_structural_inline_recovery_data(&prefix, 20).unwrap();
+            let mut archive = prefix.clone();
+            archive.extend_from_slice(b"service header bytes before chunks");
+            archive.extend_from_slice(&recovery_data);
+            archive.extend_from_slice(b"end bytes");
+            let mut damaged = archive.clone();
+            damaged[256..320].fill(0x5a);
+
+            let repaired = repair_inline_recovery_archive(&damaged).unwrap();
+
+            assert_eq!(repaired, archive);
+        }
+
+        #[test]
         fn rar5_inline_recovery_rejects_unrepairable_damage_count() {
             let prefix = b"small prefix with only one parity shard".repeat(100);
             let recovery_data = build_structural_inline_recovery_data(&prefix, 1).unwrap();
@@ -885,6 +1411,44 @@ pub mod rar5 {
                 repair_inline_recovery_prefix(&damaged, &recovery_data),
                 Err(Error::TooManyDamagedShards)
             );
+        }
+
+        #[test]
+        fn rar5_reconstruct_data_shards_repairs_missing_shards_from_parity() {
+            let first = b"abcdefgh".to_vec();
+            let second = b"ijklmnop".to_vec();
+            let third = b"qrstuvwx".to_vec();
+            let refs = [first.as_slice(), second.as_slice(), third.as_slice()];
+            let parity = encode_parity_shards(&refs, 2).unwrap();
+
+            let reconstructed = reconstruct_data_shards(
+                &[Some(&first), None, Some(&third)],
+                &[(0, parity[0].as_slice())],
+            )
+            .unwrap();
+
+            assert_eq!(reconstructed[0], first);
+            assert_eq!(reconstructed[1], second);
+            assert_eq!(reconstructed[2], third);
+        }
+
+        #[test]
+        fn rar5_reconstruct_data_shards_repairs_multiple_missing_shards() {
+            let first = b"abcdefgh".to_vec();
+            let second = b"ijklmnop".to_vec();
+            let third = b"qrstuvwx".to_vec();
+            let refs = [first.as_slice(), second.as_slice(), third.as_slice()];
+            let parity = encode_parity_shards(&refs, 2).unwrap();
+
+            let reconstructed = reconstruct_data_shards(
+                &[None, Some(&second), None],
+                &[(0, parity[0].as_slice()), (1, parity[1].as_slice())],
+            )
+            .unwrap();
+
+            assert_eq!(reconstructed[0], first);
+            assert_eq!(reconstructed[1], second);
+            assert_eq!(reconstructed[2], third);
         }
     }
 }

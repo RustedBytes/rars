@@ -17,6 +17,12 @@ fn fixture_rar15_40(name: &str) -> PathBuf {
         .join(name)
 }
 
+fn fixture_rar50(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../rars-format/tests/fixtures/rar50")
+        .join(name)
+}
+
 fn scratch(name: &str) -> PathBuf {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -3083,6 +3089,157 @@ fn repairs_rar50_stored_archive_with_inline_recovery_record() {
     let test = rars().arg("test").arg(&repaired).output().unwrap();
     assert!(test.status.success(), "stderr: {}", stderr(&test));
     assert!(stdout(&test).contains("OK payload.txt"));
+}
+
+#[test]
+fn repairs_rar250_protect_head_archive() {
+    let dir = scratch("repair-rar250-protect-head");
+    let archive = dir.join("damaged.rar");
+    let repaired = dir.join("repaired.rar");
+    let original = fs::read(fixture_rar15_40("rar250_protect_head_rr5.rar")).unwrap();
+    let mut damaged = original.clone();
+    damaged[512 + 16..512 + 80].fill(0xa5);
+    fs::write(&archive, damaged).unwrap();
+
+    let broken = rars().arg("test").arg(&archive).output().unwrap();
+    assert!(!broken.status.success());
+
+    let repair = rars()
+        .arg("repair")
+        .arg(&archive)
+        .arg(&repaired)
+        .output()
+        .unwrap();
+    assert!(repair.status.success(), "stderr: {}", stderr(&repair));
+    assert!(stdout(&repair).contains("repaired"));
+    assert_eq!(fs::read(&repaired).unwrap(), original);
+
+    let test = rars().arg("test").arg(&repaired).output().unwrap();
+    assert!(test.status.success(), "stderr: {}", stderr(&test));
+    assert!(stdout(&test).contains("OK BIG.BIN"));
+}
+
+#[test]
+fn repairs_rar300_newsub_recovery_archive() {
+    let dir = scratch("repair-rar300-newsub-recovery");
+    let archive = dir.join("damaged.rar");
+    let repaired = dir.join("repaired.rar");
+    let original = fs::read(fixture_rar15_40("rar300/with_recovery_rar300.rar")).unwrap();
+    let mut damaged = original.clone();
+    damaged[512 + 16..512 + 80].fill(0xa5);
+    fs::write(&archive, damaged).unwrap();
+
+    let broken = rars().arg("test").arg(&archive).output().unwrap();
+    assert!(!broken.status.success());
+
+    let repair = rars()
+        .arg("repair")
+        .arg(&archive)
+        .arg(&repaired)
+        .output()
+        .unwrap();
+    assert!(repair.status.success(), "stderr: {}", stderr(&repair));
+    assert!(stdout(&repair).contains("repaired"));
+    assert_eq!(fs::read(&repaired).unwrap(), original);
+
+    let test = rars().arg("test").arg(&repaired).output().unwrap();
+    assert!(test.status.success(), "stderr: {}", stderr(&test));
+    assert!(stdout(&test).contains("OK bigtext_64k.bin"));
+}
+
+#[test]
+fn repairs_rar50_rev5_missing_data_volume_set() {
+    let dir = scratch("repair-rar50-rev5");
+    let out_dir = dir.join("out");
+    let mut command = rars();
+    command.arg("repair");
+    for name in [
+        "multivol_rev.part1.rar",
+        "multivol_rev.part3.rar",
+        "multivol_rev.part4.rar",
+        "multivol_rev.part5.rar",
+        "multivol_rev.part1.rev",
+    ] {
+        command.arg(fixture_rar50(name));
+    }
+    let output = command.arg(&out_dir).output().unwrap();
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(stdout(&output).contains("repaired"));
+
+    for index in 1..=5 {
+        assert_eq!(
+            fs::read(out_dir.join(format!("repaired.part{index}.rar"))).unwrap(),
+            fs::read(fixture_rar50(&format!("multivol_rev.part{index}.rar"))).unwrap()
+        );
+    }
+}
+
+#[test]
+fn repairs_rar300_old_style_rev_missing_data_volume_set() {
+    let dir = scratch("repair-rar300-rev3");
+    let out_dir = dir.join("out");
+    let mut command = rars();
+    command.arg("repair");
+    for name in [
+        "rar300/rev_oldstyle.part1.rar",
+        "rar300/rev_oldstyle.part3.rar",
+        "rar300/rev_oldstyle.part4.rar",
+        "rar300/rev_oldstyle.part4_2_1.rev",
+    ] {
+        command.arg(fixture_rar15_40(name));
+    }
+    let output = command.arg(&out_dir).output().unwrap();
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(stdout(&output).contains("repaired"));
+    assert_eq!(
+        fs::read(out_dir.join("repaired.part2.rar")).unwrap(),
+        fs::read(fixture_rar15_40("rar300/rev_oldstyle.part2.rar")).unwrap()
+    );
+
+    let test = rars()
+        .arg("test")
+        .arg(out_dir.join("repaired.part1.rar"))
+        .arg(out_dir.join("repaired.part2.rar"))
+        .arg(out_dir.join("repaired.part3.rar"))
+        .arg(out_dir.join("repaired.part4.rar"))
+        .output()
+        .unwrap();
+    assert!(test.status.success(), "stderr: {}", stderr(&test));
+    assert!(stdout(&test).contains("OK tmp\\rars-rar3-rev-gen\\payload.bin"));
+}
+
+#[test]
+fn repairs_rar4_new_style_rev_missing_data_volume_set() {
+    let dir = scratch("repair-rar4-rev3-new-style");
+    let out_dir = dir.join("out");
+    let mut command = rars();
+    command.arg("repair");
+    for name in [
+        "rar300/rev_newstyle.part1.rar",
+        "rar300/rev_newstyle.part3.rar",
+        "rar300/rev_newstyle.part4.rar",
+        "rar300/rev_newstyle.part1.rev",
+    ] {
+        command.arg(fixture_rar15_40(name));
+    }
+    let output = command.arg(&out_dir).output().unwrap();
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(stdout(&output).contains("repaired"));
+    assert_eq!(
+        fs::read(out_dir.join("repaired.part2.rar")).unwrap(),
+        fs::read(fixture_rar15_40("rar300/rev_newstyle.part2.rar")).unwrap()
+    );
+
+    let test = rars()
+        .arg("test")
+        .arg(out_dir.join("repaired.part1.rar"))
+        .arg(out_dir.join("repaired.part2.rar"))
+        .arg(out_dir.join("repaired.part3.rar"))
+        .arg(out_dir.join("repaired.part4.rar"))
+        .output()
+        .unwrap();
+    assert!(test.status.success(), "stderr: {}", stderr(&test));
+    assert!(stdout(&test).contains("OK tmp\\rars-rar4-rev-gen\\payload.bin"));
 }
 
 #[test]

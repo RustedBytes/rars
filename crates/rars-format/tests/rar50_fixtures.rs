@@ -1,9 +1,9 @@
 use rars_codec::rar50::{decode_lz, parse_compressed_block, read_table_lengths, DecodeTables};
 use rars_format::rar50::{
-    extract_volumes, Archive, ArchiveMetadataEntry, EncryptedArchiveCommentEntry,
-    EncryptedCompressedEntry, EncryptedStoredEntry, EncryptedStoredEntryWithServices,
-    EncryptedStoredServiceEntry, FilterKind, FilterPolicy, Rev5Volume, StoredEntryWithServices,
-    StoredServiceEntry,
+    extract_volumes, repair_inline_recovery_bytes, repair_rev5_volumes, Archive,
+    ArchiveMetadataEntry, EncryptedArchiveCommentEntry, EncryptedCompressedEntry,
+    EncryptedStoredEntry, EncryptedStoredEntryWithServices, EncryptedStoredServiceEntry,
+    FilterKind, FilterPolicy, Rev5Volume, StoredEntryWithServices, StoredServiceEntry,
 };
 use rars_format::{detect_archive_family, rar50, ArchiveFamily, ArchiveVersion, Error, FeatureSet};
 use rars_recovery::rar5::crc64_xz;
@@ -1523,6 +1523,114 @@ fn repairs_rar50_inline_recovery_payload_damage() {
 }
 
 #[test]
+fn repairs_rar50_inline_recovery_header_damage_without_parsing() {
+    let payload = b"payload protected by raw inline recovery fallback\n".repeat(64);
+    let entries = [rar50::StoredEntry {
+        name: b"header-damaged.txt",
+        data: &payload,
+        mtime: Some(0x5a21_0000),
+        attributes: 0x20,
+        host_os: 3,
+    }];
+    let mut features = FeatureSet::store_only();
+    features.recovery_record = true;
+    let bytes = write_stored_archive_with_recovery(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        20,
+    )
+    .unwrap();
+    let clean = Archive::parse(&bytes).unwrap();
+    let file_header_offset = clean.files().next().unwrap().block.offset;
+    let mut damaged = bytes.clone();
+    damaged[file_header_offset] ^= 0xff;
+
+    assert!(Archive::parse(&damaged).is_err());
+
+    let repaired = repair_inline_recovery_bytes(&damaged).unwrap();
+
+    assert_eq!(repaired, bytes);
+    let repaired_archive = Archive::parse(&repaired).unwrap();
+    let extracted = repaired_archive.extract().unwrap();
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+fn rejects_rar50_inline_recovery_service_header_damage_without_prefix_damage() {
+    let payload = b"payload with only the recovery service header damaged\n".repeat(64);
+    let entries = [rar50::StoredEntry {
+        name: b"rr-header-damaged.txt",
+        data: &payload,
+        mtime: Some(0x5a21_0000),
+        attributes: 0x20,
+        host_os: 3,
+    }];
+    let mut features = FeatureSet::store_only();
+    features.recovery_record = true;
+    let bytes = write_stored_archive_with_recovery(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        20,
+    )
+    .unwrap();
+    let clean = Archive::parse(&bytes).unwrap();
+    let service_offset = clean.services().next().unwrap().block.offset;
+    let mut damaged = bytes.clone();
+    damaged[service_offset] ^= 0xff;
+
+    assert!(Archive::parse(&damaged).is_err());
+    assert!(repair_inline_recovery_bytes(&damaged).is_err());
+}
+
+#[test]
+fn repairs_rar50_inline_recovery_with_damaged_recovery_chunk() {
+    let payload = b"payload with a damaged recovery shard still recoverable\n".repeat(512);
+    let entries = [rar50::StoredEntry {
+        name: b"recoverable-with-bad-rr.txt",
+        data: &payload,
+        mtime: Some(0x5a21_0000),
+        attributes: 0x20,
+        host_os: 3,
+    }];
+    let mut features = FeatureSet::store_only();
+    features.recovery_record = true;
+    let bytes = write_stored_archive_with_recovery(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        20,
+    )
+    .unwrap();
+    let clean = Archive::parse(&bytes).unwrap();
+    let data_range = clean.files().next().unwrap().block.data_range.clone();
+    let recovery_range = clean.services().next().unwrap().block.data_range.clone();
+    let mut damaged = bytes.clone();
+    damaged[data_range.start + 10..data_range.start + 80].fill(0xa5);
+    damaged[recovery_range.start + 0x48] ^= 0xff;
+
+    let damaged_archive = Archive::parse(&damaged).unwrap();
+    assert!(damaged_archive.extract().is_err());
+
+    let repaired = damaged_archive.repair_inline_recovery().unwrap();
+
+    assert_eq!(
+        repaired[..recovery_range.start],
+        bytes[..recovery_range.start]
+    );
+    let repaired_archive = Archive::parse(&repaired).unwrap();
+    let extracted = repaired_archive.extract().unwrap();
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
 fn repairs_encrypted_rar50_inline_recovery_payload_damage_with_password() {
     let payload = b"encrypted payload with structural recovery service\n".repeat(64);
     let entries = [EncryptedStoredEntry {
@@ -1551,6 +1659,52 @@ fn repairs_encrypted_rar50_inline_recovery_payload_damage_with_password() {
     let mut damaged = bytes.clone();
     damaged[data_range.start + 16..data_range.start + 96].fill(0xa5);
 
+    let damaged_archive = Archive::parse_with_password(&damaged, Some(b"password")).unwrap();
+    assert!(damaged_archive
+        .extract_with_password(Some(b"password"))
+        .is_err());
+
+    let repaired = damaged_archive.repair_inline_recovery().unwrap();
+
+    assert_eq!(repaired, bytes);
+    let repaired_archive = Archive::parse_with_password(&repaired, Some(b"password")).unwrap();
+    let extracted = repaired_archive
+        .extract_with_password(Some(b"password"))
+        .unwrap();
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+fn repairs_header_encrypted_rar50_inline_recovery_payload_damage_with_password() {
+    let payload = b"header encrypted payload with structural recovery service\n".repeat(64);
+    let entries = [EncryptedStoredEntry {
+        name: b"header-secret-recoverable.txt",
+        data: &payload,
+        mtime: Some(0x5a21_0000),
+        attributes: 0x20,
+        host_os: 3,
+        password: b"password",
+    }];
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    features.header_encryption = true;
+    features.recovery_record = true;
+    let bytes = write_encrypted_stored_archive_with_recovery(
+        &entries,
+        rar50::WriterOptions {
+            target: ArchiveVersion::Rar50,
+            features,
+        },
+        20,
+        b"password",
+    )
+    .unwrap();
+    let clean = Archive::parse_with_password(&bytes, Some(b"password")).unwrap();
+    let data_range = clean.files().next().unwrap().block.data_range.clone();
+    let mut damaged = bytes.clone();
+    damaged[data_range.start + 16..data_range.start + 96].fill(0xa5);
+
+    assert!(matches!(Archive::parse(&damaged), Err(Error::NeedPassword)));
     let damaged_archive = Archive::parse_with_password(&damaged, Some(b"password")).unwrap();
     assert!(damaged_archive
         .extract_with_password(Some(b"password"))
@@ -3685,10 +3839,75 @@ fn parses_rar50_rev5_recovery_volume_metadata() {
     assert_eq!(rev.recovery_count, 2);
     assert_eq!(rev.recovery_number, 5);
     assert_eq!(rev.payload_size, 4096);
+    assert_eq!(rev.payload.len(), 4096);
     assert_eq!(rev.payload_crc32, 0xfd0b_7e3f);
     assert_eq!(rev.data_volumes.len(), 5);
     assert_eq!(rev.data_volumes[0].file_size, 4096);
     assert_eq!(rev.data_volumes[4].file_size, 1032);
+}
+
+#[test]
+fn repairs_missing_rar50_data_volume_from_rev5_recovery_volume() {
+    let data: Vec<_> = (1..=5)
+        .map(|index| std::fs::read(fixture(&format!("multivol_rev.part{index}.rar"))).unwrap())
+        .collect();
+    let first_rev =
+        Rev5Volume::parse(&std::fs::read(fixture("multivol_rev.part1.rev")).unwrap()).unwrap();
+    let inputs = [
+        Some(data[0].as_slice()),
+        None,
+        Some(data[2].as_slice()),
+        Some(data[3].as_slice()),
+        Some(data[4].as_slice()),
+    ];
+
+    let repaired = repair_rev5_volumes(&inputs, &[first_rev]).unwrap();
+
+    assert_eq!(repaired, data);
+}
+
+#[test]
+fn repairs_two_missing_rar50_data_volumes_from_rev5_recovery_volumes() {
+    let data: Vec<_> = (1..=5)
+        .map(|index| std::fs::read(fixture(&format!("multivol_rev.part{index}.rar"))).unwrap())
+        .collect();
+    let revs = [
+        Rev5Volume::parse(&std::fs::read(fixture("multivol_rev.part1.rev")).unwrap()).unwrap(),
+        Rev5Volume::parse(&std::fs::read(fixture("multivol_rev.part2.rev")).unwrap()).unwrap(),
+    ];
+    let inputs = [
+        Some(data[0].as_slice()),
+        None,
+        Some(data[2].as_slice()),
+        None,
+        Some(data[4].as_slice()),
+    ];
+
+    let repaired = repair_rev5_volumes(&inputs, &revs).unwrap();
+
+    assert_eq!(repaired, data);
+}
+
+#[test]
+fn repairs_corrupt_rar50_data_volume_from_rev5_recovery_volume() {
+    let mut data: Vec<_> = (1..=5)
+        .map(|index| std::fs::read(fixture(&format!("multivol_rev.part{index}.rar"))).unwrap())
+        .collect();
+    let expected = data.clone();
+    data[1][10..60].fill(0xa5);
+    let first_rev =
+        Rev5Volume::parse(&std::fs::read(fixture("multivol_rev.part1.rev")).unwrap()).unwrap();
+    let inputs = [
+        Some(data[0].as_slice()),
+        Some(data[1].as_slice()),
+        Some(data[2].as_slice()),
+        Some(data[3].as_slice()),
+        Some(data[4].as_slice()),
+    ];
+
+    let repaired = repair_rev5_volumes(&inputs, &[first_rev]).unwrap();
+
+    assert_eq!(repaired, expected);
 }
 
 #[test]

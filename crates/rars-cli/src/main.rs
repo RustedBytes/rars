@@ -20,7 +20,7 @@ const ADD_USAGE: &str =
     "usage: rars a [--password <password>] --format <rar14|rar15|rar20|rar29|rar30|rar40|rar50|rar70> [--store] [--solid] [--encrypt-headers] [--comment <text>] [--archive-name <name>] [--file-comment <text>] [--recovery-percent <1..100>] [--volume-size <bytes>] [--auto-filter|--delta-filter <channels>|--e8-filter|--e8e9-filter|--itanium-filter|--rgb-filter <width>|--audio-filter <channels>|--arm-filter] <archive> <files...>";
 const DOS_DIRECTORY_ATTR: u8 = 0x10;
 const RAR50_STRUCTURAL_RR_WARNING: &str =
-    "warning: RAR 5 recovery writer emits validation-ready RR metadata; damage repair is still experimental";
+    "warning: RAR 5 recovery writer emits validation-ready RR metadata; byte-identical WinRAR recovery layout is not expected";
 
 fn main() {
     if let Err(err) = run() {
@@ -306,24 +306,215 @@ fn cmd_extract(args: &[String]) -> CliResult<()> {
 
 fn cmd_repair(args: &[String]) -> CliResult<()> {
     let (password, paths) = parse_password(args)?;
-    if paths.len() != 2 {
-        return Err(
-            "usage: rars repair [--password <password>] <archive> <repaired-archive>".into(),
-        );
+    if paths.len() < 2 {
+        return Err("usage: rars repair [--password <password>] <archive> <repaired-archive>\n       rars repair <rar-parts-and-rev-files...> <outdir>".into());
+    }
+    if paths.len() > 2 {
+        if password.is_some() {
+            return Err("REV repair does not use archive passwords".into());
+        }
+        return cmd_repair_volumes(&paths);
     }
     let archive = ArchiveReader::read_path_with_options(
         &paths[0],
         ArchiveReadOptions {
             password: password.as_deref(),
         },
-    )
-    .map_err(|err| read_archive_error(&paths[0], err))?;
-    let repaired = archive
-        .repair_inline_recovery()
-        .map_err(|err| format!("failed to repair archive '{}': {err}", paths[0]))?;
+    );
+    let repaired = match archive {
+        Ok(archive) => archive
+            .repair_inline_recovery()
+            .map_err(|err| format!("failed to repair archive '{}': {err}", paths[0]))?,
+        Err(parse_error) => {
+            let bytes = fs::read(&paths[0])?;
+            rars::rar50::repair_inline_recovery_bytes(&bytes).map_err(|repair_error| {
+                format!(
+                    "failed to parse archive '{}': {}; raw inline recovery repair also failed: {}",
+                    paths[0], parse_error, repair_error
+                )
+            })?
+        }
+    };
     fs::write(&paths[1], repaired)?;
     println!("repaired {}", paths[1]);
     Ok(())
+}
+
+fn cmd_repair_volumes(paths: &[String]) -> CliResult<()> {
+    let input_paths = &paths[..paths.len() - 1];
+    for path in input_paths {
+        if path_has_extension(path, "rev") {
+            let bytes = fs::read(path)?;
+            if rars::rar50::Rev5Volume::parse(&bytes).is_ok() {
+                return cmd_repair_rev5(paths);
+            }
+        }
+    }
+    cmd_repair_rev3(paths)
+}
+
+fn cmd_repair_rev5(paths: &[String]) -> CliResult<()> {
+    let out_dir = PathBuf::from(paths.last().expect("outdir"));
+    fs::create_dir_all(&out_dir)?;
+    let input_paths = &paths[..paths.len() - 1];
+    let mut data_inputs = Vec::new();
+    let mut recovery = Vec::new();
+    for path in input_paths {
+        let bytes = fs::read(path)?;
+        match rars::rar50::Rev5Volume::parse(&bytes) {
+            Ok(rev) => recovery.push(rev),
+            Err(Error::UnsupportedSignature) => data_inputs.push((PathBuf::from(path), bytes)),
+            Err(error) => {
+                return Err(format!("failed to parse REV volume '{path}': {error}").into())
+            }
+        }
+    }
+    let first = recovery
+        .first()
+        .ok_or("RAR 5 REV repair requires at least one .rev file")?;
+    let mut slots: Vec<Option<&[u8]>> = vec![None; usize::from(first.data_count)];
+    for (path, bytes) in &data_inputs {
+        if let Some(index) = infer_part_index(path, first.data_count) {
+            slots[index] = Some(bytes.as_slice());
+            continue;
+        }
+        if let Some((index, _)) = first.data_volumes.iter().enumerate().find(|(_, meta)| {
+            bytes.len() as u64 == meta.file_size && rars::rar15_40::crc32(bytes) == meta.crc32
+        }) {
+            slots[index] = Some(bytes.as_slice());
+        }
+    }
+
+    let repaired = rars::rar50::repair_rev5_volumes(&slots, &recovery)
+        .map_err(|err| format!("failed to repair RAR 5 REV volume set: {err}"))?;
+    for (index, bytes) in repaired.iter().enumerate() {
+        let path = out_dir.join(format!("repaired.part{}.rar", index + 1));
+        fs::write(&path, bytes)?;
+        println!("repaired {}", path.display());
+    }
+    Ok(())
+}
+
+fn cmd_repair_rev3(paths: &[String]) -> CliResult<()> {
+    let out_dir = PathBuf::from(paths.last().expect("outdir"));
+    fs::create_dir_all(&out_dir)?;
+    let input_paths = &paths[..paths.len() - 1];
+    let mut data_inputs = Vec::new();
+    let mut recovery_inputs = Vec::new();
+    let mut data_count = None;
+    let mut recovery_count = None;
+
+    for path in input_paths {
+        let bytes = fs::read(path)?;
+        if path_has_extension(path, "rev") {
+            let (recovery_index, rec_count, dat_count, payload) =
+                parse_rar3_rev_volume(Path::new(path), &bytes)
+                    .ok_or_else(|| format!("failed to parse RAR 3 REV volume name '{path}'"))?;
+            if recovery_count
+                .replace(rec_count)
+                .is_some_and(|count| count != rec_count)
+                || data_count
+                    .replace(dat_count)
+                    .is_some_and(|count| count != dat_count)
+            {
+                return Err("RAR 3 REV volume metadata differs across files".into());
+            }
+            recovery_inputs.push((recovery_index, payload));
+        } else {
+            data_inputs.push((PathBuf::from(path), bytes));
+        }
+    }
+
+    let data_count = data_count.ok_or("RAR 3 REV repair requires at least one .rev file")?;
+    let recovery_count =
+        recovery_count.ok_or("RAR 3 REV repair requires at least one .rev file")?;
+    let mut slots: Vec<Option<&[u8]>> = vec![None; data_count];
+    for (path, bytes) in &data_inputs {
+        if let Some(index) = infer_part_index(path, data_count as u16) {
+            slots[index] = Some(bytes.as_slice());
+        }
+    }
+    let recovery: Vec<_> = recovery_inputs
+        .iter()
+        .map(|(index, bytes)| (*index, bytes.as_slice()))
+        .collect();
+    let repaired = rars::rar15_40::repair_rev3_volumes(&slots, recovery_count, &recovery)
+        .map_err(|err| format!("failed to repair RAR 3 REV volume set: {err}"))?;
+    for (index, bytes) in repaired.iter().enumerate() {
+        let path = out_dir.join(format!("repaired.part{}.rar", index + 1));
+        fs::write(&path, bytes)?;
+        println!("repaired {}", path.display());
+    }
+    Ok(())
+}
+
+fn path_has_extension(path: &str, extension: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case(extension))
+}
+
+fn parse_rar3_rev_volume(path: &Path, bytes: &[u8]) -> Option<(usize, usize, usize, Vec<u8>)> {
+    if let Some((recovery_index, recovery_count, data_count)) = parse_rar3_new_style_rev(bytes) {
+        let mut payload = bytes[..bytes.len() - 7].to_vec();
+        payload.extend_from_slice(&[0; 7]);
+        return Some((recovery_index, recovery_count, data_count, payload));
+    }
+    let (recovery_index, recovery_count, data_count) = parse_rar3_old_style_rev_name(path)?;
+    Some((recovery_index, recovery_count, data_count, bytes.to_vec()))
+}
+
+fn parse_rar3_new_style_rev(bytes: &[u8]) -> Option<(usize, usize, usize)> {
+    if bytes.len() < 7 {
+        return None;
+    }
+    let trailer = &bytes[bytes.len() - 7..];
+    let stored_crc = u32::from_le_bytes(trailer[3..7].try_into().ok()?);
+    if rars::rar15_40::crc32(&bytes[..bytes.len() - 4]) != stored_crc {
+        return None;
+    }
+    let recovery_index = usize::from(trailer[2]);
+    let recovery_count = usize::from(trailer[1]) + 1;
+    let data_count = usize::from(trailer[0]) + 1;
+    Some((recovery_index, recovery_count, data_count))
+}
+
+fn parse_rar3_old_style_rev_name(path: &Path) -> Option<(usize, usize, usize)> {
+    let stem = path.file_stem()?.to_string_lossy();
+    let bytes = stem.as_bytes();
+    let mut cursor = bytes.len();
+    let mut numbers = Vec::new();
+    while cursor > 0 && numbers.len() < 3 {
+        while cursor > 0 && !bytes[cursor - 1].is_ascii_digit() {
+            cursor -= 1;
+        }
+        if cursor == 0 {
+            break;
+        }
+        let end = cursor;
+        while cursor > 0 && bytes[cursor - 1].is_ascii_digit() {
+            cursor -= 1;
+        }
+        let number = stem[cursor..end].parse::<usize>().ok()?;
+        numbers.push(number);
+    }
+    if numbers.len() != 3 || numbers.iter().any(|&number| number == 0 || number > 255) {
+        return None;
+    }
+    Some((numbers[0] - 1, numbers[1], numbers[2]))
+}
+
+fn infer_part_index(path: &Path, data_count: u16) -> Option<usize> {
+    let name = path.file_name()?.to_string_lossy();
+    let part_pos = name.find(".part")? + ".part".len();
+    let digits: String = name[part_pos..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect();
+    let part = digits.parse::<usize>().ok()?;
+    let index = part.checked_sub(1)?;
+    (index < usize::from(data_count)).then_some(index)
 }
 
 fn cmd_add(args: &[String]) -> CliResult<()> {
@@ -1365,6 +1556,7 @@ fn usage() {
   rars test [--password <password>] <archive> [parts...]
   rars x [--password <password>] <archive> [parts...] <outdir>
   rars repair [--password <password>] <archive> <repaired-archive>
+  rars repair <rar-parts-and-rev-files...> <outdir>
   {ADD_USAGE}"
     );
 }

@@ -1,8 +1,9 @@
 use rars_format::rar15_40::{
-    crc32, extract_volumes, write_compressed_archive, write_compressed_archive_with_comment,
-    write_compressed_volumes, write_rar29_compressed_archive_with_filter_policy,
-    write_stored_archive, write_stored_archive_with_comment, write_stored_volumes, Archive, Block,
-    FileEntry, FilterKind, FilterPolicy, FilterSpec, NewSubKind, StoredEntry, WriterOptions,
+    crc32, extract_volumes, repair_rev3_volumes, write_compressed_archive,
+    write_compressed_archive_with_comment, write_compressed_volumes,
+    write_rar29_compressed_archive_with_filter_policy, write_stored_archive,
+    write_stored_archive_with_comment, write_stored_volumes, Archive, Block, FileEntry, FilterKind,
+    FilterPolicy, FilterSpec, NewSubKind, ProtectHeader, StoredEntry, WriterOptions,
 };
 use rars_format::{detect_archive_family, ArchiveFamily, ArchiveVersion, Error, FeatureSet};
 use std::io::Write;
@@ -3647,6 +3648,149 @@ fn extracts_rar250_unp20_lz_file() {
     assert_eq!(extracted[0].name, b"PLAIN.TXT");
     assert_eq!(extracted[0].data.len(), 2300);
     assert_eq!(crc32(&extracted[0].data), 0xafc0db74);
+}
+
+#[test]
+fn parses_rar250_protect_head_recovery_record() {
+    let bytes = std::fs::read(fixture("rar250_protect_head_rr5.rar")).unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let protect = archive.protect_records().next().unwrap();
+
+    assert_eq!(protect.version, 0x14);
+    assert_eq!(protect.rec_sectors, 5);
+    assert_eq!(protect.total_blocks, 201);
+    assert_eq!(protect.mark, *b"Protect!");
+    assert_eq!(
+        protect.data_range.len(),
+        protect.total_blocks as usize * 2 + protect.rec_sectors as usize * 512
+    );
+}
+
+#[test]
+fn parses_rar300_newsub_recovery_record() {
+    let bytes = std::fs::read(fixture("rar300/with_recovery_rar300.rar")).unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    assert!(archive.main.has_recovery_record());
+
+    let recovery = archive
+        .new_subs()
+        .find(|sub| sub.kind == NewSubKind::RecoveryRecord)
+        .unwrap();
+    assert_eq!(recovery.file.name, b"RR");
+    assert_eq!(recovery.file.method, 0x30);
+    assert_eq!(recovery.file.pack_size, 5672);
+    assert_eq!(recovery.file.unp_size, 5672);
+}
+
+#[test]
+fn repairs_rar250_protect_head_single_damaged_sector() {
+    let bytes = std::fs::read(fixture("rar250_protect_head_rr5.rar")).unwrap();
+    let clean = Archive::parse(&bytes).unwrap();
+    let _file = clean.files().next().unwrap();
+    let damage_offset = 512 + 16;
+    let mut damaged = bytes.clone();
+    damaged[damage_offset..damage_offset + 64].fill(0xa5);
+
+    let damaged_archive = Archive::parse(&damaged).unwrap();
+    assert!(damaged_archive.extract().is_err());
+
+    let repaired = damaged_archive.repair_protect_head().unwrap();
+
+    assert_eq!(repaired, bytes);
+    let repaired_archive = Archive::parse(&repaired).unwrap();
+    let extracted = repaired_archive.extract().unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].name, b"BIG.BIN");
+    assert_eq!(crc32(&extracted[0].data), 0x9a0e0c8c);
+}
+
+#[test]
+fn repairs_rar300_newsub_recovery_single_damaged_sector() {
+    let bytes = std::fs::read(fixture("rar300/with_recovery_rar300.rar")).unwrap();
+    let mut damaged = bytes.clone();
+    damaged[512 + 16..512 + 80].fill(0xa5);
+
+    let damaged_archive = Archive::parse(&damaged).unwrap();
+    assert!(damaged_archive.extract().is_err());
+
+    let repaired = damaged_archive.repair_protect_head().unwrap();
+
+    assert_eq!(repaired, bytes);
+    let repaired_archive = Archive::parse(&repaired).unwrap();
+    let extracted = repaired_archive.extract().unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].name, b"bigtext_64k.bin");
+    assert_eq!(crc32(&extracted[0].data), 0xddc95682);
+}
+
+#[test]
+fn rejects_rar250_protect_head_same_group_damage() {
+    let bytes = std::fs::read(fixture("rar250_protect_head_rr5.rar")).unwrap();
+    let clean = Archive::parse(&bytes).unwrap();
+    let protect: &ProtectHeader = clean.protect_records().next().unwrap();
+    assert_eq!(protect.rec_sectors, 5);
+    let mut damaged = bytes.clone();
+    damaged[512 + 10] ^= 0x55;
+    damaged[512 * 6 + 10] ^= 0x55;
+
+    let damaged_archive = Archive::parse(&damaged).unwrap();
+    assert!(damaged_archive.repair_protect_head().is_err());
+}
+
+#[test]
+fn repairs_rar300_old_style_recovery_volume_set() {
+    let part1 = std::fs::read(fixture("rar300/rev_oldstyle.part1.rar")).unwrap();
+    let part2 = std::fs::read(fixture("rar300/rev_oldstyle.part2.rar")).unwrap();
+    let part3 = std::fs::read(fixture("rar300/rev_oldstyle.part3.rar")).unwrap();
+    let part4 = std::fs::read(fixture("rar300/rev_oldstyle.part4.rar")).unwrap();
+    let rev1 = std::fs::read(fixture("rar300/rev_oldstyle.part4_2_1.rev")).unwrap();
+
+    let repaired = repair_rev3_volumes(
+        &[Some(&part1), None, Some(&part3), Some(&part4)],
+        2,
+        &[(0, rev1.as_slice())],
+    )
+    .unwrap();
+
+    assert_eq!(repaired[1], part2);
+    let extracted = extract_volumes(&[
+        Archive::parse(&repaired[0]).unwrap(),
+        Archive::parse(&repaired[1]).unwrap(),
+        Archive::parse(&repaired[2]).unwrap(),
+        Archive::parse(&repaired[3]).unwrap(),
+    ])
+    .unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(crc32(&extracted[0].data), 0xf3a82e44);
+}
+
+#[test]
+fn repairs_rar4_new_style_recovery_volume_set_with_zeroed_rev_trailer() {
+    let part1 = std::fs::read(fixture("rar300/rev_newstyle.part1.rar")).unwrap();
+    let part2 = std::fs::read(fixture("rar300/rev_newstyle.part2.rar")).unwrap();
+    let part3 = std::fs::read(fixture("rar300/rev_newstyle.part3.rar")).unwrap();
+    let part4 = std::fs::read(fixture("rar300/rev_newstyle.part4.rar")).unwrap();
+    let mut rev1 = std::fs::read(fixture("rar300/rev_newstyle.part1.rev")).unwrap();
+    let len = rev1.len();
+    rev1[len - 7..].fill(0);
+
+    let repaired = repair_rev3_volumes(
+        &[Some(&part1), None, Some(&part3), Some(&part4)],
+        2,
+        &[(0, rev1.as_slice())],
+    )
+    .unwrap();
+
+    assert_eq!(repaired[1], part2);
+    let extracted = extract_volumes(&[
+        Archive::parse(&repaired[0]).unwrap(),
+        Archive::parse(&repaired[1]).unwrap(),
+        Archive::parse(&repaired[2]).unwrap(),
+        Archive::parse(&repaired[3]).unwrap(),
+    ])
+    .unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(crc32(&extracted[0].data), 0x442c5489);
 }
 
 #[test]

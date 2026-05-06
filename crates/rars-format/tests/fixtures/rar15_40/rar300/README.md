@@ -13,6 +13,7 @@ cases.
 | `solid_rar300.rar`, `solid_simple_rar300.rar` | Solid Unpack29 state and table reuse. |
 | `multivol_*_rar300*` | Old/new RAR 3 volume naming flags and split-file extraction. |
 | `stored_multivol_rar300*`, `compressed_multivol_prng_rar300*`, `encrypted_multivol_rar300*`, `encrypted_newnaming_rar300*` | Streaming stored, compressed, and AES-encrypted split-volume extraction. |
+| `rev_oldstyle.*`, `rev_newstyle.*` | RAR 3.00 old-style and RAR 4.20 new-style `.rev` recovery-volume repair. |
 | `rarvm_*_rar300.rar` | Standard RARVM filters: E8, E8E9, DELTA, ITANIUM, RGB, AUDIO. |
 
 Expected payloads and CRCs are asserted directly in

@@ -66,38 +66,9 @@ extraction/session/multivolume orchestration in sibling modules such as
 sibling modules such as `rar15_40/write.rs` when it is large enough to affect
 reviewability.
 
-## Current Baseline
-
-Keep this section short. Detailed behavioural claims belong in tests.
-
-- RAR 1.3/1.4 has a working read/write vertical slice, including comments,
-  legacy password handling, Unpack15, solid mode, SFX-prefix reads, and
-  old-style stored/compressed volumes.
-- RAR 1.5-4.x has broad read coverage across Unpack15, Unpack20 LZ,
-  Unpack29 LZ/PPMd/RARVM filters, RAR 1.5/2.0/3.x/4.x encryption, header
-  encryption, old/new multivolume naming, comments, compact Unicode names, and
-  solid state. Writers cover stored and baseline compressed outputs across
-  RAR 1.5/2.0/2.9/3.x/4.x, including comments, encryption, header encryption,
-  filters, solid archives, and split volumes.
-- RAR 5.0/7.x has read coverage for block walking, stored and Unpack50
-  compressed members, fixed filters, solid state, multivolume extraction,
-  BLAKE2sp/CRC32 integrity, AES-256 file encryption, header encryption,
-  service records, Quick Open, metadata extras, and RAR7 shared-format metadata.
-  Writers cover stored and baseline compressed RAR5/RAR7 archives, encryption,
-  header encryption, services, Quick Open, fixed filters, solid archives,
-  split volumes, and inline recovery records. RAR5 inline recovery repair can
-  reconstruct stored and encrypted stored payload damage through the public API
-  and CLI when the service header and recovery chunks are intact.
-- Normal archive extraction is reader-backed and streaming-first. Split-volume
-  extraction uses shared split-state and chained-reader primitives. RAR 1.5-4.x
-  and RAR5 both have named decoder sessions for stateful solid extraction.
-- Shared domain vocabulary exists for archive members, split-volume state,
-  fragment streams, semantic filter transforms, and decoder sessions. Keep
-  adding abstractions only when new work proves the repeated concept.
-
 ## Priority Backlog
 
-### 1. RAR 1.5-4.x Decoder Watchlist
+### 1. RAR 1.5-4.x Decoder And Recovery Watchlist
 
 - Find or generate a real RAR 2.50-authored Unpack20 audio-predictor fixture.
   Synthetic codec/archive coverage exists, but no promoted vintage archive has
@@ -113,8 +84,6 @@ Keep this section short. Detailed behavioural claims belong in tests.
 
 - True Unpack70 remains fixture-blocked. Commit this only when a practical
   >4 GiB dictionary fixture is worth carrying.
-- Extend reader-side recovery repair beyond intact inline `RR` records:
-  `.rev` reconstruction, damaged service/header cases, and multivolume repair.
 
 ### 3. Writer Work
 
@@ -127,9 +96,9 @@ Keep this section short. Detailed behavioural claims belong in tests.
 - Improve RAR5 compressed-writer policy beyond the deterministic method-1
   bounded hash-chain baseline. Next useful work is better match/filter tuning,
   not new named writer entry points.
-- Broaden RAR5 recovery writer repair oracles beyond stored/encrypted-stored
-  payload damage: compressed payloads, header-encrypted archives, split-volume
-  payloads, and heavier damage within the available recovery budget.
+- Add heavier RAR5 recovery writer/repair oracles only where they cover a new
+  damage shape or feature interaction not already exercised by the current
+  inline-RR and REV tests.
 - Keep byte-identical WinRAR output out of scope for baseline writers; expose
   policy hooks so better heuristics can be added without changing wire writers.
 
@@ -142,6 +111,8 @@ Keep this section short. Detailed behavioural claims belong in tests.
   added without freezing the parser object model.
 - Consider deprecating Vec-returning extraction APIs once integration tests and
   examples primarily use streaming APIs.
+- Decide whether REV repair needs a streaming output API instead of returning
+  all repaired volume files as `Vec<Vec<u8>>`.
 - Introduce a `Rar15_40Writer` builder only if another independent writer
   option axis lands there. Do not add cartesian named writer functions.
 - Consider a shared auto-filter policy only if writer work proves RAR29 and
@@ -159,12 +130,9 @@ Keep this section short. Detailed behavioural claims belong in tests.
   For historical-reader coverage, run the optional verifier path with both
   the WinRAR/UnRAR 3.00 and 4.20 Wine prefixes.
 - Use `bash scripts/reference-rar5-writer.sh` when checking generated RAR 5
-  writer output against a local RAR/WinRAR command-line tool. It verifies
-  stored, Quick Open, encrypted, header-encrypted, and RR outputs with `rar t`.
-- Use `bash scripts/reference-rar5-recovery-repair.sh` for the current RAR5
-  repair oracle. It proves both RAR-authored and rars-authored stored and
-  encrypted stored archives with RR can repair payload damage spanning multiple
-  recovery shards.
+  writer output against a local RAR/WinRAR command-line tool.
+- Use `bash scripts/reference-rar5-recovery-repair.sh` when checking RAR5
+  inline recovery repair against local reference tools.
 - Use `bash scripts/reference-rar29-rarvm-writer.sh` when checking generated
   RAR 2.9 standard RARVM filter records against the local WinRAR/UnRAR 3.00
   and 4.20 Wine prefixes.

@@ -157,6 +157,25 @@ impl From<rars_recovery::rar5::Error> for Error {
     }
 }
 
+impl From<rars_recovery::rar3::Error> for Error {
+    fn from(error: rars_recovery::rar3::Error) -> Self {
+        match error {
+            rars_recovery::rar3::Error::InvalidParitySize => {
+                Self::InvalidHeader("RAR 3 recovery parity size is invalid")
+            }
+            rars_recovery::rar3::Error::InvalidCodewordSize => {
+                Self::InvalidHeader("RAR 3 recovery codeword size is invalid")
+            }
+            rars_recovery::rar3::Error::TooManyErasures => {
+                Self::InvalidHeader("RAR 3 recovery data cannot repair this many erasures")
+            }
+            rars_recovery::rar3::Error::DecodeFailed => {
+                Self::InvalidHeader("RAR 3 recovery decode failed")
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

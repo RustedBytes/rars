@@ -220,6 +220,7 @@ pub struct Rev5Volume {
     pub recovery_number: u16,
     pub payload_crc32: u32,
     pub payload_size: u64,
+    pub payload: Vec<u8>,
     pub data_volumes: Vec<Rev5DataVolume>,
 }
 
@@ -564,9 +565,8 @@ impl Archive {
                 "RAR 5 recovery prefix is out of bounds",
             ))?;
         let recovery_data = recovery
-            .extract(self)
-            .map_err(|error| error.at_entry(recovery.name.clone(), "reading recovery data"))?
-            .data;
+            .decoded_data_unverified(self, None)
+            .map_err(|error| error.at_entry(recovery.name.clone(), "reading recovery data"))?;
         let repaired_prefix =
             rars_recovery::rar5::repair_inline_recovery_prefix(prefix, &recovery_data)?;
         let mut repaired = source;
@@ -666,9 +666,88 @@ impl Rev5Volume {
             recovery_number: recovery_number as u16,
             payload_crc32,
             payload_size: payload.len() as u64,
+            payload: payload.to_vec(),
             data_volumes,
         })
     }
+}
+
+pub fn repair_rev5_volumes(
+    data_volumes: &[Option<&[u8]>],
+    recovery_volumes: &[Rev5Volume],
+) -> Result<Vec<Vec<u8>>> {
+    let first = recovery_volumes.first().ok_or(Error::InvalidHeader(
+        "RAR 5 REV recovery volume set is empty",
+    ))?;
+    let data_count = usize::from(first.data_count);
+    if data_volumes.len() != data_count {
+        return Err(Error::InvalidHeader(
+            "RAR 5 REV data volume count does not match metadata",
+        ));
+    }
+    if recovery_volumes.iter().any(|rev| {
+        rev.version != first.version
+            || rev.data_count != first.data_count
+            || rev.recovery_count != first.recovery_count
+            || rev.data_volumes != first.data_volumes
+            || rev.payload.len() != first.payload.len()
+    }) {
+        return Err(Error::InvalidHeader(
+            "RAR 5 REV recovery volume metadata differs across files",
+        ));
+    }
+
+    let mut shards = Vec::with_capacity(data_count);
+    for (index, data) in data_volumes.iter().enumerate() {
+        let Some(data) = data else {
+            shards.push(None);
+            continue;
+        };
+        let meta = &first.data_volumes[index];
+        if data.len() as u64 != meta.file_size || crc32(data) != meta.crc32 {
+            shards.push(None);
+        } else {
+            shards.push(Some(*data));
+        }
+    }
+
+    let recovery_rows: Vec<_> = recovery_volumes
+        .iter()
+        .map(|rev| {
+            let row = usize::from(rev.recovery_number)
+                .checked_sub(data_count)
+                .ok_or(Error::InvalidHeader("RAR 5 REV recovery number is invalid"))?;
+            Ok((row, rev.payload.as_slice()))
+        })
+        .collect::<Result<_>>()?;
+    let repaired = rars_recovery::rar5::reconstruct_data_shards(&shards, &recovery_rows)?;
+
+    repaired
+        .into_iter()
+        .zip(&first.data_volumes)
+        .map(|(mut shard, meta)| {
+            let file_size = usize::try_from(meta.file_size)
+                .map_err(|_| Error::InvalidHeader("RAR 5 REV data volume size overflows usize"))?;
+            if shard.len() < file_size {
+                return Err(Error::InvalidHeader(
+                    "RAR 5 REV repaired shard is shorter than data volume size",
+                ));
+            }
+            shard.truncate(file_size);
+            let actual = crc32(&shard);
+            if actual != meta.crc32 {
+                return Err(Error::Crc32Mismatch {
+                    expected: meta.crc32,
+                    actual,
+                });
+            }
+            Ok(shard)
+        })
+        .collect()
+}
+
+pub fn repair_inline_recovery_bytes(input: &[u8]) -> Result<Vec<u8>> {
+    rars_recovery::rar5::repair_inline_recovery_archive(input).map_err(Error::from)
 }
 
 fn parse_main_header_bytes(parsed: &ParsedBlockHeader) -> Result<MainHeader> {

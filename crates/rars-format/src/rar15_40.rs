@@ -32,6 +32,7 @@ const MARK_HEAD: u8 = 0x72;
 const MAIN_HEAD: u8 = 0x73;
 const FILE_HEAD: u8 = 0x74;
 const COMM_HEAD: u8 = 0x75;
+const PROTECT_HEAD: u8 = 0x78;
 const NEWSUB_HEAD: u8 = 0x7a;
 const ENDARC_HEAD: u8 = 0x7b;
 
@@ -117,6 +118,7 @@ impl MainHeader {
 pub enum Block {
     File(FileHeader),
     Comment(CommentHeader),
+    Protect(ProtectHeader),
     NewSub(NewSubHeader),
     End(BlockHeader),
     Unknown(BlockHeader),
@@ -168,6 +170,17 @@ pub struct CommentHeader {
     pub method: u8,
     pub comment_crc: u16,
     pub packed_range: Range<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ProtectHeader {
+    pub block: BlockHeader,
+    pub version: u8,
+    pub rec_sectors: u16,
+    pub total_blocks: u32,
+    pub mark: [u8; 8],
+    pub data_range: Range<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -919,6 +932,12 @@ impl Archive {
                     blocks.push(Block::Comment(comment));
                     pos = next;
                 }
+                PROTECT_HEAD => {
+                    let next = checked_block_next(&block, total, archive.len())?;
+                    let protect = parse_protect_header(&header, &block, sig.offset, total)?;
+                    blocks.push(Block::Protect(protect));
+                    pos = next;
+                }
                 ENDARC_HEAD => {
                     let _next = checked_block_next(&block, total, archive.len())?;
                     blocks.push(Block::End(block));
@@ -1014,6 +1033,12 @@ impl Archive {
                     blocks.push(Block::Comment(comment));
                     pos = next;
                 }
+                PROTECT_HEAD => {
+                    let next = checked_file_block_next(sfx_offset, &block, total, file_len)?;
+                    let protect = parse_protect_header(&header, &block, sfx_offset, total)?;
+                    blocks.push(Block::Protect(protect));
+                    pos = next;
+                }
                 ENDARC_HEAD => {
                     let _next = checked_file_block_next(sfx_offset, &block, total, file_len)?;
                     blocks.push(Block::End(block));
@@ -1090,6 +1115,33 @@ impl Archive {
             Block::NewSub(sub) => Some(sub),
             _ => None,
         })
+    }
+
+    pub fn protect_records(&self) -> impl Iterator<Item = &ProtectHeader> {
+        self.blocks.iter().filter_map(|block| match block {
+            Block::Protect(protect) => Some(protect),
+            _ => None,
+        })
+    }
+
+    fn source_bytes(&self) -> Result<Vec<u8>> {
+        match &self.source {
+            ArchiveSource::Memory(data) => Ok(data.to_vec()),
+            ArchiveSource::File(path) => Ok(std::fs::read(path.as_ref())?),
+        }
+    }
+
+    pub fn repair_protect_head(&self) -> Result<Vec<u8>> {
+        if let Some(recovery) = self
+            .new_subs()
+            .find(|sub| sub.kind == NewSubKind::RecoveryRecord)
+        {
+            return repair_newsub_recovery_bytes(&self.source_bytes()?, self.sfx_offset, recovery);
+        }
+        let protect = self.protect_records().next().ok_or(Error::InvalidHeader(
+            "RAR 2.x archive does not contain a PROTECT_HEAD recovery record",
+        ))?;
+        repair_protect_head_bytes(&self.source_bytes()?, self.sfx_offset, protect)
     }
 
     pub fn extract_stored(&self) -> Result<Vec<ExtractedEntry>> {
@@ -1230,6 +1282,355 @@ fn parse_comment_header(input: &[u8], block: BlockHeader) -> Result<CommentHeade
         comment_crc: read_u16(input, start + 11)?,
         packed_range: 0..0,
     })
+}
+
+fn parse_protect_header(
+    input: &[u8],
+    block: &BlockHeader,
+    archive_offset: usize,
+    total_size: usize,
+) -> Result<ProtectHeader> {
+    if block.head_size != 26 {
+        return Err(Error::InvalidHeader(
+            "RAR 2.x recovery header size is invalid",
+        ));
+    }
+    let add_size = block.add_size.ok_or(Error::InvalidHeader(
+        "RAR 2.x recovery header is missing data size",
+    ))?;
+    let rec_sectors = read_u16(input, 12)?;
+    let total_blocks = read_u32(input, 14)?;
+    let expected_add_size = u64::from(total_blocks)
+        .checked_mul(2)
+        .and_then(|size| size.checked_add(u64::from(rec_sectors) * 512))
+        .ok_or(Error::InvalidHeader("RAR 2.x recovery data size overflows"))?;
+    if add_size != expected_add_size {
+        return Err(Error::InvalidHeader(
+            "RAR 2.x recovery data size does not match header",
+        ));
+    }
+    let mark: [u8; 8] = input
+        .get(18..26)
+        .ok_or(Error::TooShort)?
+        .try_into()
+        .expect("RAR protect mark size");
+    let data_start = archive_offset
+        .checked_add(block.offset)
+        .and_then(|offset| offset.checked_add(block.head_size as usize))
+        .ok_or(Error::InvalidHeader(
+            "RAR 2.x recovery data range overflows",
+        ))?;
+    let data_end = archive_offset
+        .checked_add(block.offset)
+        .and_then(|offset| offset.checked_add(total_size))
+        .ok_or(Error::InvalidHeader(
+            "RAR 2.x recovery data range overflows",
+        ))?;
+    Ok(ProtectHeader {
+        block: block.clone(),
+        version: *input.get(11).ok_or(Error::TooShort)?,
+        rec_sectors,
+        total_blocks,
+        mark,
+        data_range: data_start..data_end,
+    })
+}
+
+fn repair_protect_head_bytes(
+    source: &[u8],
+    sfx_offset: usize,
+    protect: &ProtectHeader,
+) -> Result<Vec<u8>> {
+    if protect.rec_sectors == 0 {
+        return Err(Error::InvalidHeader(
+            "RAR 2.x recovery record has no parity sectors",
+        ));
+    }
+    if protect.mark != *b"Protect!" {
+        return Err(Error::InvalidHeader("RAR 2.x recovery mark is invalid"));
+    }
+    let protected_start = sfx_offset;
+    let protected_len = usize::try_from(protect.total_blocks)
+        .ok()
+        .and_then(|blocks| blocks.checked_mul(512))
+        .ok_or(Error::InvalidHeader(
+            "RAR 2.x protected sector size overflows",
+        ))?;
+    let protected_end = protected_start
+        .checked_add(protected_len)
+        .ok_or(Error::InvalidHeader(
+            "RAR 2.x protected sector range overflows",
+        ))?;
+    if protected_end > source.len() {
+        return Err(Error::InvalidHeader(
+            "RAR 2.x protected sector range is invalid",
+        ));
+    }
+    let recovery_data = source
+        .get(protect.data_range.clone())
+        .ok_or(Error::TooShort)?;
+    let declared_blocks = usize::try_from(protect.total_blocks).map_err(|_| {
+        Error::InvalidHeader("RAR 2.x recovery protected sector count overflows usize")
+    })?;
+    let tag_len = declared_blocks
+        .checked_mul(2)
+        .ok_or(Error::InvalidHeader("RAR 2.x recovery tag size overflows"))?;
+    let parity_len =
+        usize::from(protect.rec_sectors)
+            .checked_mul(512)
+            .ok_or(Error::InvalidHeader(
+                "RAR 2.x recovery parity size overflows",
+            ))?;
+    if recovery_data.len() != tag_len + parity_len {
+        return Err(Error::InvalidHeader(
+            "RAR 2.x recovery data size is invalid",
+        ));
+    }
+    let tags = &recovery_data[..tag_len];
+    let parity = &recovery_data[tag_len..];
+    // RAR 2.x may declare a final sector that overlaps the PROTECT_HEAD
+    // record itself. The stable repairable prefix is the complete 512-byte
+    // sectors before the recovery block; the declared layout is still used to
+    // split the tag and parity areas.
+    let repairable_blocks = declared_blocks.min(protect.block.offset / 512);
+
+    let mut damaged = Vec::new();
+    for index in 0..repairable_blocks {
+        let sector_start = protected_start + index * 512;
+        let sector = &source[sector_start..sector_start + 512];
+        let actual = (!crc32(sector) & 0xffff) as u16;
+        let expected = u16::from_le_bytes(tags[index * 2..index * 2 + 2].try_into().unwrap());
+        if actual != expected {
+            damaged.push(index);
+        }
+    }
+    if damaged.is_empty() {
+        return Ok(source.to_vec());
+    }
+    if damaged.len() > usize::from(protect.rec_sectors) {
+        return Err(Error::InvalidHeader(
+            "RAR 2.x recovery damage exceeds parity sector count",
+        ));
+    }
+
+    let mut used_slots = vec![false; usize::from(protect.rec_sectors)];
+    for &index in &damaged {
+        let slot = index % usize::from(protect.rec_sectors);
+        if used_slots[slot] {
+            return Err(Error::InvalidHeader(
+                "RAR 2.x recovery cannot repair multiple sectors in the same parity group",
+            ));
+        }
+        used_slots[slot] = true;
+    }
+
+    let mut repaired = source.to_vec();
+    for &missing_index in &damaged {
+        let slot = missing_index % usize::from(protect.rec_sectors);
+        let mut sector = parity[slot * 512..slot * 512 + 512].to_vec();
+        for index in (slot..repairable_blocks).step_by(usize::from(protect.rec_sectors)) {
+            if index == missing_index {
+                continue;
+            }
+            let sector_start = protected_start + index * 512;
+            for (out, byte) in sector
+                .iter_mut()
+                .zip(&repaired[sector_start..sector_start + 512])
+            {
+                *out ^= *byte;
+            }
+        }
+        let sector_start = protected_start + missing_index * 512;
+        repaired[sector_start..sector_start + 512].copy_from_slice(&sector);
+        let actual = (!crc32(&sector) & 0xffff) as u16;
+        let expected = u16::from_le_bytes(
+            tags[missing_index * 2..missing_index * 2 + 2]
+                .try_into()
+                .unwrap(),
+        );
+        if actual != expected {
+            return Err(Error::CrcMismatch { expected, actual });
+        }
+    }
+    Ok(repaired)
+}
+
+fn repair_newsub_recovery_bytes(
+    source: &[u8],
+    sfx_offset: usize,
+    recovery: &NewSubHeader,
+) -> Result<Vec<u8>> {
+    if recovery.file.method != 0x30 {
+        return Err(Error::UnsupportedFeature {
+            feature: "compressed RAR 3.x NEWSUB recovery record",
+            version: ArchiveVersion::Rar30,
+        });
+    }
+    if recovery.file.pack_size != recovery.file.unp_size {
+        return Err(Error::InvalidHeader(
+            "RAR 3.x recovery record packed size does not match unpacked size",
+        ));
+    }
+    let protected_start = sfx_offset;
+    let protected_end =
+        sfx_offset
+            .checked_add(recovery.file.block.offset)
+            .ok_or(Error::InvalidHeader(
+                "RAR 3.x recovery protected range overflows",
+            ))?;
+    if protected_end > source.len() || protected_start > protected_end {
+        return Err(Error::InvalidHeader(
+            "RAR 3.x recovery protected range is invalid",
+        ));
+    }
+    let recovery_data = source
+        .get(recovery.file.packed_range.clone())
+        .ok_or(Error::TooShort)?;
+    let protected_len = protected_end - protected_start;
+    let protected_sectors = protected_len.div_ceil(512);
+    if protected_sectors == 0 {
+        return Err(Error::InvalidHeader(
+            "RAR 3.x recovery record has no protected sectors",
+        ));
+    }
+    let tag_len = protected_sectors
+        .checked_mul(2)
+        .ok_or(Error::InvalidHeader("RAR 3.x recovery tag size overflows"))?;
+    if recovery_data.len() <= tag_len || (recovery_data.len() - tag_len) % 512 != 0 {
+        return Err(Error::InvalidHeader(
+            "RAR 3.x recovery data size is invalid",
+        ));
+    }
+    let parity_sectors = (recovery_data.len() - tag_len) / 512;
+    if parity_sectors == 0 {
+        return Err(Error::InvalidHeader(
+            "RAR 3.x recovery record has no parity sectors",
+        ));
+    }
+    let tags = &recovery_data[..tag_len];
+    let parity = &recovery_data[tag_len..];
+
+    let mut damaged = Vec::new();
+    for index in 0..protected_sectors {
+        let sector = protected_sector(source, protected_start, protected_len, index)?;
+        let actual = (!crc32(&sector) & 0xffff) as u16;
+        let expected = u16::from_le_bytes(tags[index * 2..index * 2 + 2].try_into().unwrap());
+        if actual != expected {
+            damaged.push(index);
+        }
+    }
+    if damaged.is_empty() {
+        return Ok(source.to_vec());
+    }
+    if damaged.len() > parity_sectors {
+        return Err(Error::InvalidHeader(
+            "RAR 3.x recovery damage exceeds parity sector count",
+        ));
+    }
+
+    let mut used_slots = vec![false; parity_sectors];
+    for &index in &damaged {
+        let slot = index % parity_sectors;
+        if used_slots[slot] {
+            return Err(Error::InvalidHeader(
+                "RAR 3.x recovery cannot repair multiple sectors in the same parity group",
+            ));
+        }
+        used_slots[slot] = true;
+    }
+
+    let mut repaired = source.to_vec();
+    for &missing_index in &damaged {
+        let slot = missing_index % parity_sectors;
+        let mut sector = parity[slot * 512..slot * 512 + 512].to_vec();
+        for index in (slot..protected_sectors).step_by(parity_sectors) {
+            if index == missing_index {
+                continue;
+            }
+            let other = protected_sector(&repaired, protected_start, protected_len, index)?;
+            for (out, byte) in sector.iter_mut().zip(other) {
+                *out ^= byte;
+            }
+        }
+        let actual = (!crc32(&sector) & 0xffff) as u16;
+        let expected = u16::from_le_bytes(
+            tags[missing_index * 2..missing_index * 2 + 2]
+                .try_into()
+                .unwrap(),
+        );
+        if actual != expected {
+            return Err(Error::CrcMismatch { expected, actual });
+        }
+        let sector_start = protected_start + missing_index * 512;
+        let write_len = 512.min(protected_end - sector_start);
+        repaired[sector_start..sector_start + write_len].copy_from_slice(&sector[..write_len]);
+    }
+
+    Ok(repaired)
+}
+
+fn protected_sector(
+    source: &[u8],
+    protected_start: usize,
+    protected_len: usize,
+    index: usize,
+) -> Result<[u8; 512]> {
+    let sector_offset = index.checked_mul(512).ok_or(Error::InvalidHeader(
+        "RAR 3.x recovery sector offset overflows",
+    ))?;
+    if sector_offset >= protected_len {
+        return Err(Error::InvalidHeader(
+            "RAR 3.x recovery sector offset is invalid",
+        ));
+    }
+    let sector_start = protected_start
+        .checked_add(sector_offset)
+        .ok_or(Error::InvalidHeader(
+            "RAR 3.x recovery sector range overflows",
+        ))?;
+    let available = 512.min(protected_len - sector_offset);
+    let mut sector = [0u8; 512];
+    sector[..available].copy_from_slice(
+        source
+            .get(sector_start..sector_start + available)
+            .ok_or(Error::TooShort)?,
+    );
+    Ok(sector)
+}
+
+pub fn repair_rev3_volumes(
+    data_volumes: &[Option<&[u8]>],
+    recovery_count: usize,
+    recovery_volumes: &[(usize, &[u8])],
+) -> Result<Vec<Vec<u8>>> {
+    rars_recovery::rar3::reconstruct_data_volumes(data_volumes, recovery_count, recovery_volumes)
+        .map_err(Error::from)?
+        .into_iter()
+        .map(truncate_repaired_rev3_volume)
+        .collect()
+}
+
+fn truncate_repaired_rev3_volume(mut bytes: Vec<u8>) -> Result<Vec<u8>> {
+    let Ok(archive) = Archive::parse(&bytes) else {
+        return Ok(bytes);
+    };
+    let Some(end) = archive.blocks.iter().find_map(|block| match block {
+        Block::End(end) => Some(end),
+        _ => None,
+    }) else {
+        return Ok(bytes);
+    };
+    let end_pos = archive
+        .sfx_offset
+        .checked_add(end.offset)
+        .and_then(|offset| offset.checked_add(block_total_size(end).ok()?))
+        .ok_or(Error::InvalidHeader(
+            "RAR 3 repaired volume end offset overflows",
+        ))?;
+    if end_pos < bytes.len() && bytes[end_pos..].iter().all(|&byte| byte == 0) {
+        bytes.truncate(end_pos);
+    }
+    Ok(bytes)
 }
 
 struct EncryptedHeader {

@@ -140,10 +140,11 @@ impl Archive {
 
     pub fn repair_inline_recovery(&self) -> Result<Vec<u8>> {
         match self {
+            Self::Rar15To40(archive) => archive.repair_protect_head(),
             Self::Rar50Plus(archive) => archive.repair_inline_recovery(),
-            Self::Rar13(_) | Self::Rar15To40(_) => Err(Error::UnsupportedFeature {
-                version: ArchiveVersion::Rar50,
-                feature: "inline recovery repair for pre-RAR5 archives",
+            Self::Rar13(_) => Err(Error::UnsupportedFeature {
+                version: ArchiveVersion::Rar14,
+                feature: "inline recovery repair for RAR 1.3/1.4 archives",
             }),
         }
     }

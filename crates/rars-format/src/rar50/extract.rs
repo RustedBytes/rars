@@ -141,6 +141,17 @@ impl FileHeader {
         session.extract_file(archive, self)
     }
 
+    pub(crate) fn decoded_data_unverified(
+        &self,
+        archive: &Archive,
+        password: Option<&[u8]>,
+    ) -> Result<Vec<u8>> {
+        let mut decoder = Unpack50Decoder::new();
+        Ok(self
+            .decoded_data_with_decoder(archive, &mut decoder, password)?
+            .data)
+    }
+
     fn extract_with_decoder(
         &self,
         archive: &Archive,
