@@ -2375,6 +2375,125 @@ fn auto_filtered_rar29_writer_stores_incompressible_member_when_smaller() {
 }
 
 #[test]
+fn auto_filtered_rar29_writer_improves_x86_relative_calls() {
+    let mut payload = Vec::new();
+    payload.extend((0..2048).map(|index| (index * 37 + 11) as u8));
+    let code_start = payload.len();
+    let call_target = code_start + 0x1800;
+    for index in 0..512usize {
+        payload.extend_from_slice(&[0x55, 0x8b, 0xec, 0x83, 0xec, (index & 0x7f) as u8]);
+        let call_pos = payload.len();
+        payload.push(0xe8);
+        let next = call_pos + 5;
+        let relative = (call_target as i64 - next as i64) as i32;
+        payload.extend_from_slice(&relative.to_le_bytes());
+        payload.extend_from_slice(&[0x83, 0xc4, 0x04, 0x5d, 0xc3]);
+    }
+    payload.extend((0..2048).map(|index| (index * 53 + 7) as u8));
+    let entries = [FileEntry {
+        name: b"x86-calls.bin",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+
+    let plain = write_compressed_archive(
+        &entries,
+        WriterOptions {
+            target: ArchiveVersion::Rar29,
+            features: FeatureSet::store_only(),
+        },
+    )
+    .unwrap();
+    let auto = write_rar29_compressed_archive_with_filter_policy(
+        &entries,
+        WriterOptions {
+            target: ArchiveVersion::Rar29,
+            features: FeatureSet::store_only(),
+        },
+        FilterPolicy::Auto,
+    )
+    .unwrap();
+    let plain = Archive::parse(&plain).unwrap();
+    let auto = Archive::parse(&auto).unwrap();
+    let plain_file = plain.files().next().unwrap();
+    let auto_file = auto.files().next().unwrap();
+
+    assert_eq!(auto_file.method, 0x33);
+    assert!(
+        auto_file.pack_size * 2 < plain_file.pack_size,
+        "auto-filtered x86 payload should be much smaller than plain RAR29 LZ"
+    );
+    assert_eq!(auto.extract().unwrap()[0].data, payload);
+}
+
+#[test]
+fn auto_filtered_rar29_writer_spans_separated_x86_call_clusters() {
+    let mut payload = Vec::new();
+    payload.extend((0..12_000).map(|index| (index * 37 + 11) as u8));
+    let code_start = payload.len();
+    let call_target = code_start + 0x5000;
+    for index in 0..128usize {
+        payload.extend_from_slice(&[0x55, 0x8b, 0xec, 0x83, 0xec, (index & 0x7f) as u8]);
+        let call_pos = payload.len();
+        payload.push(0xe8);
+        let next = call_pos + 5;
+        let relative = (call_target as i64 - next as i64) as i32;
+        payload.extend_from_slice(&relative.to_le_bytes());
+        payload.extend_from_slice(&[0x83, 0xc4, 0x04, 0x5d, 0xc3]);
+    }
+    payload.extend((0..8192).map(|index| (index * 17 + 5) as u8));
+    for index in 0..128usize {
+        payload.extend_from_slice(&[0x56, 0x8b, 0xf1, 0x83, 0xec, (index & 0x7f) as u8]);
+        let call_pos = payload.len();
+        payload.push(0xe8);
+        let next = call_pos + 5;
+        let relative = (call_target as i64 - next as i64) as i32;
+        payload.extend_from_slice(&relative.to_le_bytes());
+        payload.extend_from_slice(&[0x83, 0xc4, 0x04, 0x5e, 0xc3]);
+    }
+    let code_end = payload.len();
+    payload.extend((0..12_000).map(|index| (index * 53 + 7) as u8));
+    let entries = [FileEntry {
+        name: b"x86-call-clusters.bin",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+    let options = WriterOptions {
+        target: ArchiveVersion::Rar29,
+        features: FeatureSet::store_only(),
+    };
+
+    let auto =
+        write_rar29_compressed_archive_with_filter_policy(&entries, options, FilterPolicy::Auto)
+            .unwrap();
+    let span = write_rar29_compressed_archive_with_filter_policy(
+        &entries,
+        options,
+        FilterPolicy::Explicit(FilterSpec::range(FilterKind::E8, code_start..code_end)),
+    )
+    .unwrap();
+    let auto = Archive::parse(&auto).unwrap();
+    let span = Archive::parse(&span).unwrap();
+    let auto_file = auto.files().next().unwrap();
+    let span_file = span.files().next().unwrap();
+
+    assert_eq!(auto_file.method, 0x33);
+    assert!(
+        auto_file.pack_size <= span_file.pack_size,
+        "auto filter should consider the whole code-section span"
+    );
+    assert_eq!(auto.extract().unwrap()[0].data, payload);
+}
+
+#[test]
 fn writes_solid_compressed_rar15_archive_that_reader_extracts() {
     let entries = [
         FileEntry {

@@ -6,8 +6,11 @@ pub use rars_codec::rar29::{Rar29FilterKind as FilterKind, Rar29FilterSpec as Fi
 use std::ops::Range;
 
 const AUTO_X86_CLUSTER_GAP: usize = 4096;
+const AUTO_X86_SPAN_CLUSTER_GAP: usize = 32768;
 const AUTO_X86_RANGE_PADDING: usize = 16;
 const AUTO_X86_MAX_RANGES: usize = 4;
+const AUTO_X86_MAX_SPAN_RANGES: usize = 2;
+const AUTO_X86_MIN_SPAN_OPCODES: usize = 4;
 const AUTO_RGB_WIDTHS: [usize; 4] = [24, 48, 96, 192];
 const MIN_STORE_FALLBACK_SIZE: usize = 1024;
 
@@ -244,6 +247,34 @@ fn auto_x86_filter_ranges(data: &[u8], include_e9: bool) -> Vec<Range<usize>> {
     }
 
     clusters.retain(|&(_, _, count)| count >= 2);
+    let mut ranges = Vec::new();
+    let mut span_count = 0;
+    let mut span: Option<(usize, usize, usize)> = None;
+    for &(start, last, count) in &clusters {
+        match span {
+            Some((span_start, span_last, span_opcodes))
+                if start.saturating_sub(span_last) <= AUTO_X86_SPAN_CLUSTER_GAP =>
+            {
+                span = Some((span_start, last, span_opcodes + count));
+            }
+            Some((span_start, span_last, span_opcodes)) => {
+                if span_opcodes >= AUTO_X86_MIN_SPAN_OPCODES
+                    && span_count < AUTO_X86_MAX_SPAN_RANGES
+                {
+                    push_x86_filter_range(&mut ranges, data.len(), span_start, span_last);
+                    span_count += 1;
+                }
+                span = Some((start, last, count));
+            }
+            None => span = Some((start, last, count)),
+        }
+    }
+    if let Some((span_start, span_last, span_opcodes)) = span {
+        if span_opcodes >= AUTO_X86_MIN_SPAN_OPCODES && span_count < AUTO_X86_MAX_SPAN_RANGES {
+            push_x86_filter_range(&mut ranges, data.len(), span_start, span_last);
+        }
+    }
+
     clusters.sort_by(|a, b| {
         let a_len = a.1 - a.0 + 5;
         let b_len = b.1 - b.0 + 5;
@@ -251,16 +282,24 @@ fn auto_x86_filter_ranges(data: &[u8], include_e9: bool) -> Vec<Range<usize>> {
     });
     clusters.truncate(AUTO_X86_MAX_RANGES);
 
-    let mut ranges = Vec::new();
     for (start, last, _) in clusters {
-        let range_start = start.saturating_sub(AUTO_X86_RANGE_PADDING);
-        let range_end = (last + 5 + AUTO_X86_RANGE_PADDING).min(data.len());
-        let range = range_start..range_end;
-        if range.start < range.end && !ranges.contains(&range) {
-            ranges.push(range);
-        }
+        push_x86_filter_range(&mut ranges, data.len(), start, last);
     }
     ranges
+}
+
+fn push_x86_filter_range(
+    ranges: &mut Vec<Range<usize>>,
+    data_len: usize,
+    start: usize,
+    last: usize,
+) {
+    let range_start = start.saturating_sub(AUTO_X86_RANGE_PADDING);
+    let range_end = (last + 5 + AUTO_X86_RANGE_PADDING).min(data_len);
+    let range = range_start..range_end;
+    if range.start < range.end && !ranges.contains(&range) {
+        ranges.push(range);
+    }
 }
 
 fn write_rar29_filtered_archive(
@@ -1413,8 +1452,28 @@ mod tests {
         assert!(!e8_ranges[0].contains(&12_000));
 
         let e8e9_ranges = auto_x86_filter_ranges(&data, true);
-        assert_eq!(e8e9_ranges.len(), 2);
+        assert_eq!(e8e9_ranges.len(), 3);
+        assert!(e8e9_ranges[0].contains(&1024));
+        assert!(e8e9_ranges[0].contains(&12_000));
         assert!(e8e9_ranges.iter().any(|range| range.contains(&1024)));
         assert!(e8e9_ranges.iter().any(|range| range.contains(&12_000)));
+    }
+
+    #[test]
+    fn auto_x86_filter_ranges_include_code_section_spans() {
+        let mut data = vec![0x41; 32_000];
+        for pos in [4096, 4128, 4160] {
+            data[pos] = 0xe8;
+        }
+        for pos in [14_000, 14_032, 14_064] {
+            data[pos] = 0xe8;
+        }
+
+        let ranges = auto_x86_filter_ranges(&data, false);
+
+        assert!(ranges[0].contains(&4096));
+        assert!(ranges[0].contains(&14_064));
+        assert!(ranges.iter().any(|range| range.contains(&4096)));
+        assert!(ranges.iter().any(|range| range.contains(&14_064)));
     }
 }
