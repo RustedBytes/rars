@@ -895,6 +895,15 @@ impl PpmdEncoder {
         Ok(())
     }
 
+    pub fn encode_vm_filter_record(&mut self, record: &[u8]) -> Result<()> {
+        self.model.encode_symbol(self.esc_char, &mut self.range)?;
+        self.model.encode_symbol(3, &mut self.range)?;
+        for &byte in record {
+            self.model.encode_symbol(byte, &mut self.range)?;
+        }
+        Ok(())
+    }
+
     pub fn finish(mut self) -> Result<Vec<u8>> {
         self.model.encode_symbol(self.esc_char, &mut self.range)?;
         self.model.encode_symbol(2, &mut self.range)?;

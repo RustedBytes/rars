@@ -2563,6 +2563,35 @@ fn ppmd_rar29_writer_uses_lz_escapes_for_repeated_data() {
 }
 
 #[test]
+fn ppmd_rar29_writer_embeds_vm_filter_record() {
+    let payload = b"\xe8\0\0\0\0rar29 ppmd embedded e8 filter payload\n".repeat(16);
+    let entries = [FileEntry {
+        name: b"rar29-ppmd-e8.bin",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+
+    let bytes = write_rar29_compressed_archive_with_filter_policy(
+        &entries,
+        WriterOptions {
+            target: ArchiveVersion::Rar29,
+            features: FeatureSet::store_only(),
+        },
+        FilterPolicy::PpmdFiltered(FilterSpec::whole(FilterKind::E8)),
+    )
+    .unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let file = archive.files().next().unwrap();
+
+    assert_eq!(file.method, 0x35);
+    assert_eq!(archive.extract().unwrap()[0].data, payload);
+}
+
+#[test]
 fn writes_solid_compressed_rar15_archive_that_reader_extracts() {
     let entries = [
         FileEntry {

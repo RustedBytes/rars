@@ -739,17 +739,16 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
             + usize::from(itanium_filter)
             + usize::from(rgb_filter.is_some())
             + usize::from(audio_filter.is_some())
-            + usize::from(auto_filter)
-            + usize::from(ppmd);
-        let only_rar29_policy = filter_count == 1 && !arm_filter;
-        if !only_rar29_policy
-            || !matches!(
-                target,
-                ArchiveVersion::Rar29 | ArchiveVersion::Rar30 | ArchiveVersion::Rar40
-            )
+            + usize::from(auto_filter);
+        if !matches!(
+            target,
+            ArchiveVersion::Rar29 | ArchiveVersion::Rar30 | ArchiveVersion::Rar40
+        ) || arm_filter
+            || (!ppmd && filter_count != 1)
+            || (ppmd && (auto_filter || filter_count > 1))
         {
             return Err(
-                "RAR 1.5-4.x writer currently supports only one of --ppmd/--auto-filter/--delta-filter/--e8-filter/--e8e9-filter/--itanium-filter/--rgb-filter/--audio-filter on RAR 2.9+".into(),
+                "RAR 1.5-4.x writer currently supports --ppmd alone, --ppmd with one explicit standard filter, or one of --auto-filter/--delta-filter/--e8-filter/--e8e9-filter/--itanium-filter/--rgb-filter/--audio-filter on RAR 2.9+".into(),
             );
         }
         if store {
@@ -1225,34 +1224,42 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                     file_comment: None,
                 });
             }
-            let policy = if ppmd {
+            let explicit_filter = || {
+                if let Some(channels) = delta_filter {
+                    rars::rar15_40::FilterSpec::whole(rars::rar15_40::FilterKind::Delta {
+                        channels,
+                    })
+                } else if e8_filter == Some(true) {
+                    rars::rar15_40::FilterSpec::whole(rars::rar15_40::FilterKind::E8E9)
+                } else if itanium_filter {
+                    rars::rar15_40::FilterSpec::whole(rars::rar15_40::FilterKind::Itanium)
+                } else if let Some(width) = rgb_filter {
+                    rars::rar15_40::FilterSpec::whole(rars::rar15_40::FilterKind::Rgb {
+                        width,
+                        pos_r: 0,
+                    })
+                } else if let Some(channels) = audio_filter {
+                    rars::rar15_40::FilterSpec::whole(rars::rar15_40::FilterKind::Audio {
+                        channels,
+                    })
+                } else {
+                    rars::rar15_40::FilterSpec::whole(rars::rar15_40::FilterKind::E8)
+                }
+            };
+            let policy = if ppmd
+                && (delta_filter.is_some()
+                    || e8_filter.is_some()
+                    || itanium_filter
+                    || rgb_filter.is_some()
+                    || audio_filter.is_some())
+            {
+                rars::rar15_40::FilterPolicy::PpmdFiltered(explicit_filter())
+            } else if ppmd {
                 rars::rar15_40::FilterPolicy::Ppmd
             } else if auto_filter {
                 rars::rar15_40::FilterPolicy::Auto
-            } else if let Some(channels) = delta_filter {
-                rars::rar15_40::FilterPolicy::Explicit(rars::rar15_40::FilterSpec::whole(
-                    rars::rar15_40::FilterKind::Delta { channels },
-                ))
-            } else if e8_filter == Some(true) {
-                rars::rar15_40::FilterPolicy::Explicit(rars::rar15_40::FilterSpec::whole(
-                    rars::rar15_40::FilterKind::E8E9,
-                ))
-            } else if itanium_filter {
-                rars::rar15_40::FilterPolicy::Explicit(rars::rar15_40::FilterSpec::whole(
-                    rars::rar15_40::FilterKind::Itanium,
-                ))
-            } else if let Some(width) = rgb_filter {
-                rars::rar15_40::FilterPolicy::Explicit(rars::rar15_40::FilterSpec::whole(
-                    rars::rar15_40::FilterKind::Rgb { width, pos_r: 0 },
-                ))
-            } else if let Some(channels) = audio_filter {
-                rars::rar15_40::FilterPolicy::Explicit(rars::rar15_40::FilterSpec::whole(
-                    rars::rar15_40::FilterKind::Audio { channels },
-                ))
             } else {
-                rars::rar15_40::FilterPolicy::Explicit(rars::rar15_40::FilterSpec::whole(
-                    rars::rar15_40::FilterKind::E8,
-                ))
+                rars::rar15_40::FilterPolicy::Explicit(explicit_filter())
             };
             rars::rar15_40::write_rar29_compressed_archive_with_filter_policy(
                 &entries, options, policy,

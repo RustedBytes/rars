@@ -108,14 +108,30 @@ pub fn unpack29_encode_literals(input: &[u8]) -> Result<Vec<u8>> {
 }
 
 pub fn unpack29_encode_ppmd_literals(input: &[u8]) -> Result<Vec<u8>> {
-    encode_ppmd_member(input, false)
+    encode_ppmd_member(input, false, None)
 }
 
 pub fn unpack29_encode_ppmd(input: &[u8]) -> Result<Vec<u8>> {
-    encode_ppmd_member(input, true)
+    encode_ppmd_member(input, true, None)
 }
 
-fn encode_ppmd_member(input: &[u8], lz_escapes: bool) -> Result<Vec<u8>> {
+pub fn unpack29_encode_ppmd_with_filter(input: &[u8], filter: Rar29FilterSpec) -> Result<Vec<u8>> {
+    let filtered = filtered_member(input, &filter)?;
+    let record = VmFilterRecord {
+        block_start: filtered.block_start,
+        block_size: filtered.block_size,
+        init_regs: &filtered.init_regs,
+        code: filtered.code,
+    };
+    let record = encode_vm_filter_record(record)?;
+    encode_ppmd_member(&filtered.data, true, Some(&record))
+}
+
+fn encode_ppmd_member(
+    input: &[u8],
+    lz_escapes: bool,
+    initial_filter: Option<&[u8]>,
+) -> Result<Vec<u8>> {
     const PPMD_ORDER: usize = 4;
     const PPMD_ESC: u8 = 2;
 
@@ -124,6 +140,9 @@ fn encode_ppmd_member(input: &[u8], lz_escapes: bool) -> Result<Vec<u8>> {
     out.push(0);
     out.push(PPMD_ESC);
     let mut encoder = PpmdEncoder::new(PPMD_ORDER, PPMD_ESC)?;
+    if let Some(record) = initial_filter {
+        encoder.encode_vm_filter_record(record)?;
+    }
     for token in encode_ppmd_tokens(input, lz_escapes) {
         match token {
             PpmdEncodeToken::Literal(byte) => encoder.encode_literal(byte)?,
@@ -2234,9 +2253,9 @@ mod tests {
 
     use super::{
         encode_ppmd_tokens, encode_tokens, unpack29_decode, unpack29_encode_literals,
-        unpack29_encode_ppmd, unpack29_encode_ppmd_literals, EncodeToken, PpmdEncodeToken,
-        Rar29FilterKind, Rar29FilterSpec, Result, StandardFilter, Unpack29, Unpack29Encoder,
-        VmFilter, VmProgram, VmProgramKind,
+        unpack29_encode_ppmd, unpack29_encode_ppmd_literals, unpack29_encode_ppmd_with_filter,
+        EncodeToken, PpmdEncodeToken, Rar29FilterKind, Rar29FilterSpec, Result, StandardFilter,
+        Unpack29, Unpack29Encoder, VmFilter, VmProgram, VmProgramKind,
     };
 
     const COMPRESSED_TEXT: &[u8] = &[
@@ -2303,6 +2322,21 @@ mod tests {
         assert!(tokens
             .iter()
             .any(|token| matches!(token, PpmdEncodeToken::Match { offset, length } if *offset > 1 && *length >= 32)));
+        assert_eq!(unpack29_decode(&packed, input.len()).unwrap(), input);
+    }
+
+    #[test]
+    fn ppmd_encoder_emits_embedded_vm_filter_escape() {
+        let input = b"\xe8\0\0\0\0rar29 ppmd embedded e8 filter payload\n".repeat(16);
+        let packed =
+            unpack29_encode_ppmd_with_filter(&input, Rar29FilterSpec::whole(Rar29FilterKind::E8))
+                .unwrap();
+        let plain_ppmd = unpack29_encode_ppmd(&input).unwrap();
+        let filtered_lz = Unpack29Encoder::new()
+            .encode_member_with_filter(&input, Rar29FilterSpec::whole(Rar29FilterKind::E8))
+            .unwrap();
+
+        assert!(packed.len() != plain_ppmd.len() || packed.len() != filtered_lz.len());
         assert_eq!(unpack29_decode(&packed, input.len()).unwrap(), input);
     }
 
