@@ -120,6 +120,8 @@ impl Unpack15Encoder {
             let mut payloads = Vec::new();
             let mut plan_nhfb = self.nhfb;
             let mut plan_nlzb = self.nlzb;
+            let mut plan_num_huf = self.num_huf;
+            let mut group_enters_stmode = false;
 
             while flag_bits < 8 && pos < input.len() {
                 let flag = huff_flag_bits(plan_nlzb <= plan_nhfb);
@@ -129,12 +131,17 @@ impl Unpack15Encoder {
                 write_planned_flag_bits(&mut flags, flag_bits, flag);
                 payloads.push(EncodedToken::Literal(input[pos]));
                 flag_bits += flag.len();
+                if flag_bits == 8 && plan_num_huf >= 16 {
+                    group_enters_stmode = true;
+                }
+                plan_num_huf += 1;
                 pos += 1;
                 plan_huff_effect(&mut plan_nhfb, &mut plan_nlzb);
             }
 
             self.emit_flags_byte(flags)?;
-            if self.emit_payloads(payloads)? && pos < input.len() {
+            self.emit_payloads(payloads)?;
+            if group_enters_stmode {
                 self.emit_stmode_exit()?;
             }
         }
@@ -157,6 +164,9 @@ impl Unpack15Encoder {
             let mut plan_last_length = self.last_length;
             let mut plan_old_dist = self.old_dist;
             let mut plan_old_dist_ptr = self.old_dist_ptr;
+            let mut plan_l_count = self.l_count;
+            let mut plan_num_huf = self.num_huf;
+            let mut group_enters_stmode = false;
 
             while flag_bits < 8 && pos < input.len() {
                 if let Some(token) = self
@@ -170,16 +180,23 @@ impl Unpack15Encoder {
                             old_dist_ptr: plan_old_dist_ptr,
                             nlzb: plan_nlzb,
                             nhfb: plan_nhfb,
+                            l_count: plan_l_count,
                         },
+                        flag_bits,
                     )
                     .filter(|token| !should_lazy_emit_literal(input, pos, *token, self.max_dist3))
                 {
                     let flag = token.flag_bits(plan_nlzb, plan_nhfb);
-                    if flag_bits + flag.len() <= 8 {
+                    let next_pos = pos + token.length() as usize;
+                    let leaves_unfillable_flag_bit =
+                        flag_bits + flag.len() == 7 && next_pos < input.len();
+                    if flag_bits + flag.len() <= 8 && !leaves_unfillable_flag_bit {
                         write_planned_flag_bits(&mut flags, flag_bits, flag);
                         flag_bits += flag.len();
-                        pos += token.length() as usize;
+                        pos = next_pos;
                         token.plan_effect(&mut plan_nhfb, &mut plan_nlzb);
+                        token.plan_l_count_effect(&mut plan_l_count);
+                        token.plan_num_huf_effect(&mut plan_num_huf);
                         if let Some((distance, length)) = token.match_state() {
                             plan_remember_match(
                                 &mut plan_old_dist,
@@ -202,16 +219,18 @@ impl Unpack15Encoder {
                 write_planned_flag_bits(&mut flags, flag_bits, flag);
                 payloads.push(EncodedToken::Literal(input[pos]));
                 flag_bits += flag.len();
+                if flag_bits == 8 && plan_num_huf >= 16 {
+                    group_enters_stmode = true;
+                }
+                plan_num_huf += 1;
                 pos += 1;
                 plan_huff_effect(&mut plan_nhfb, &mut plan_nlzb);
             }
 
             self.emit_flags_byte(flags)?;
-            if self.emit_payloads(payloads)? && pos < input.len() {
-                self.emit_stmode_literals(input, &mut pos)?;
-                if pos < input.len() {
-                    self.emit_stmode_exit()?;
-                }
+            self.emit_payloads(payloads)?;
+            if group_enters_stmode {
+                self.emit_stmode_exit()?;
             }
         }
         Ok(std::mem::take(&mut self.bits).finish())
@@ -222,6 +241,7 @@ impl Unpack15Encoder {
         input: &[u8],
         pos: usize,
         state: LzPlanState,
+        flag_bits: usize,
     ) -> Option<EncodedToken> {
         let candidates = find_lz_tokens(
             input,
@@ -234,10 +254,14 @@ impl Unpack15Encoder {
         );
         candidates
             .into_iter()
-            .filter_map(|token| {
-                self.token_bit_cost(token, state.nlzb, state.nhfb)
-                    .map(|cost| (token, cost))
+            .filter(|token| {
+                let flag_len = token.flag_bits(state.nlzb, state.nhfb).len();
+                let next_pos = pos + token.length() as usize;
+                next_pos == input.len()
+                    || (flag_bits + flag_len != 7
+                        && !(flag_len == 1 && flag_bits.is_multiple_of(2)))
             })
+            .filter_map(|token| self.token_bit_cost(token, state).map(|cost| (token, cost)))
             .min_by(|(left, left_cost), (right, right_cost)| {
                 let left_score = left_cost * 256 / left.length() as usize;
                 let right_score = right_cost * 256 / right.length() as usize;
@@ -248,8 +272,8 @@ impl Unpack15Encoder {
             .map(|(token, _)| token)
     }
 
-    fn token_bit_cost(&self, token: EncodedToken, nlzb: u32, nhfb: u32) -> Option<usize> {
-        let flag_cost = token.flag_bits(nlzb, nhfb).len();
+    fn token_bit_cost(&self, token: EncodedToken, state: LzPlanState) -> Option<usize> {
+        let flag_cost = token.flag_bits(state.nlzb, state.nhfb).len();
         match token {
             EncodedToken::Literal(byte) => {
                 let place = self
@@ -258,7 +282,9 @@ impl Unpack15Encoder {
                     .position(|&value| (value >> 8) as u8 == byte)?;
                 Some(flag_cost + self.literal_place_bit_cost(place)?)
             }
-            EncodedToken::RepeatLast(_) => Some(flag_cost + self.repeat_last_bit_cost()),
+            EncodedToken::RepeatLast(_) => {
+                Some(flag_cost + self.repeat_last_bit_cost(state.l_count))
+            }
             EncodedToken::ShortLz(token) => {
                 let distance_value = token.distance.checked_sub(1)?;
                 let distance_place = self
@@ -267,6 +293,7 @@ impl Unpack15Encoder {
                     .position(|&value| value as u32 == distance_value)?;
                 Some(
                     flag_cost
+                        + l_count_break_bit_cost(state.l_count)
                         + self.short_lz_prefix_bit_cost(token.length - 2)?
                         + decode_num_bit_cost(distance_place as u32, 5, DEC_HF2, POS_HF2)?,
                 )
@@ -276,6 +303,7 @@ impl Unpack15Encoder {
                     old_dist_lz_length_code(token.length, token.distance, self.max_dist3)?;
                 Some(
                     flag_cost
+                        + l_count_break_bit_cost(state.l_count)
                         + self.short_lz_prefix_bit_cost(token.short_code)?
                         + decode_num_bit_cost(length_code, 2, DEC_L1, POS_L1)?,
                 )
@@ -293,38 +321,26 @@ impl Unpack15Encoder {
         }
     }
 
-    fn emit_payloads(&mut self, payloads: Vec<EncodedToken>) -> Result<bool> {
-        let mut consumed_flag_bits = 0usize;
-        let mut decoder_enters_stmode = false;
+    fn emit_payloads(&mut self, payloads: Vec<EncodedToken>) -> Result<()> {
         for payload in payloads {
             match payload {
-                EncodedToken::Literal(byte) => {
-                    consumed_flag_bits += huff_flag_bits(self.nlzb <= self.nhfb).len();
-                    if consumed_flag_bits == 8 && self.num_huf >= 16 {
-                        decoder_enters_stmode = true;
-                    }
-                    self.emit_literal(byte)?;
-                }
+                EncodedToken::Literal(byte) => self.emit_literal(byte)?,
                 EncodedToken::ShortLz(short_lz) => {
-                    consumed_flag_bits += 2;
                     self.emit_short_lz(short_lz)?;
                 }
                 EncodedToken::RepeatLast(repeat) => {
-                    consumed_flag_bits += 2;
                     self.emit_repeat_last(repeat)?;
                 }
                 EncodedToken::OldDist(old_lz) => {
-                    consumed_flag_bits += 2;
                     self.emit_old_dist_lz(old_lz)?;
                 }
                 EncodedToken::LongLz(long_lz) => {
-                    consumed_flag_bits += long_lz_flag_bits(self.nlzb > self.nhfb).len();
                     self.emit_long_lz(long_lz)?;
                 }
             }
         }
 
-        Ok(decoder_enters_stmode)
+        Ok(())
     }
 
     fn emit_flags_byte(&mut self, flags: u8) -> Result<()> {
@@ -362,41 +378,6 @@ impl Unpack15Encoder {
             .position(|&value| (value >> 8) as u8 == byte)
             .ok_or(Error::InvalidData("RAR 1.3 literal is not encodable"))?;
         self.emit_literal_place(byte_place, byte_place, true)
-    }
-
-    fn emit_stmode_literals(&mut self, input: &[u8], pos: &mut usize) -> Result<()> {
-        while *pos < input.len() {
-            if find_repeat_last_lz(input, *pos, self.last_dist, self.last_length).is_some()
-                || find_old_dist_lz(
-                    input,
-                    *pos,
-                    self.old_dist,
-                    self.old_dist_ptr,
-                    self.max_dist3,
-                )
-                .is_some()
-                || find_short_lz(input, *pos).is_some()
-                || find_long_lz(input, *pos)
-                    .filter(|long_lz| self.long_lz_length_code(*long_lz).is_some())
-                    .is_some()
-            {
-                break;
-            }
-
-            let Some(byte_place) = self
-                .ch_set
-                .iter()
-                .position(|&value| (value >> 8) as u8 == input[*pos])
-            else {
-                return Err(Error::InvalidData("RAR 1.3 literal is not encodable"));
-            };
-            if byte_place == 255 {
-                break;
-            }
-            self.emit_literal_place(byte_place + 1, byte_place, false)?;
-            *pos += 1;
-        }
-        Ok(())
     }
 
     fn emit_literal_place(
@@ -557,8 +538,8 @@ impl Unpack15Encoder {
         } as usize)
     }
 
-    fn repeat_last_bit_cost(&self) -> usize {
-        if self.l_count == 2 {
+    fn repeat_last_bit_cost(&self, l_count: u32) -> usize {
+        if l_count == 2 {
             1
         } else {
             self.short_lz_prefix_bit_cost(9)
@@ -764,6 +745,7 @@ struct LzPlanState {
     old_dist_ptr: usize,
     nlzb: u32,
     nhfb: u32,
+    l_count: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -799,6 +781,23 @@ impl EncodedToken {
             Self::Literal(_) => plan_huff_effect(nhfb, nlzb),
             Self::LongLz(_) => plan_long_lz_effect(nhfb, nlzb),
             Self::ShortLz(_) | Self::RepeatLast(_) | Self::OldDist(_) => {}
+        }
+    }
+
+    fn plan_l_count_effect(self, l_count: &mut u32) {
+        match self {
+            Self::RepeatLast(_) if *l_count < 2 => *l_count += 1,
+            Self::ShortLz(_) | Self::OldDist(_) => *l_count = 0,
+            Self::Literal(_) | Self::RepeatLast(_) | Self::LongLz(_) => {}
+        }
+    }
+
+    fn plan_num_huf_effect(self, num_huf: &mut u32) {
+        match self {
+            Self::Literal(_) => *num_huf += 1,
+            Self::ShortLz(_) | Self::RepeatLast(_) | Self::OldDist(_) | Self::LongLz(_) => {
+                *num_huf = 0;
+            }
         }
     }
 
@@ -875,6 +874,10 @@ fn plan_long_lz_effect(nhfb: &mut u32, nlzb: &mut u32) {
         *nlzb = 0x90;
         *nhfb >>= 1;
     }
+}
+
+fn l_count_break_bit_cost(l_count: u32) -> usize {
+    usize::from(l_count == 2)
 }
 
 fn plan_remember_match(
@@ -1123,9 +1126,7 @@ fn emit_decode_num(
 ) -> Result<()> {
     for len in start_pos as usize..=16 {
         for code in 0..(1u32 << len) {
-            let bit_field = code << (16 - len);
-            let (decoded, consumed) = simulate_decode_num(bit_field, start_pos, dec_tab, pos_tab);
-            if decoded == target && consumed == len {
+            if decode_num_prefix_is_stable(code, len, target, start_pos, dec_tab, pos_tab) {
                 bits.write_bits(code, len);
                 return Ok(());
             }
@@ -1144,14 +1145,31 @@ fn decode_num_bit_cost(
 ) -> Option<usize> {
     for len in start_pos as usize..=16 {
         for code in 0..(1u32 << len) {
-            let bit_field = code << (16 - len);
-            let (decoded, consumed) = simulate_decode_num(bit_field, start_pos, dec_tab, pos_tab);
-            if decoded == target && consumed == len {
+            if decode_num_prefix_is_stable(code, len, target, start_pos, dec_tab, pos_tab) {
                 return Some(len);
             }
         }
     }
     None
+}
+
+fn decode_num_prefix_is_stable(
+    code: u32,
+    len: usize,
+    target: u32,
+    start_pos: u32,
+    dec_tab: &[u16],
+    pos_tab: &[u16],
+) -> bool {
+    let relevant_tail_bits = 16usize.saturating_sub(len + 4);
+    for tail in 0..(1u32 << relevant_tail_bits) {
+        let bit_field = (code << (16 - len)) | (tail << 4);
+        let (decoded, consumed) = simulate_decode_num(bit_field, start_pos, dec_tab, pos_tab);
+        if decoded != target || consumed != len {
+            return false;
+        }
+    }
+    true
 }
 
 fn simulate_decode_num(
@@ -1898,17 +1916,10 @@ mod tests {
     }
 
     #[test]
-    fn encoder_uses_stmode_for_long_literal_runs() {
+    fn encoder_exits_stmode_when_literal_runs_trigger_decoder_mode() {
         let input: Vec<_> = (0..96).map(|index| (index * 73 + 19) as u8).collect();
         let packed = unpack15_encode(&input).unwrap();
-        let literal_only = super::Unpack15Encoder::new()
-            .encode_literals_only(&input)
-            .unwrap();
 
-        assert!(
-            packed.len() < literal_only.len(),
-            "StMode should make literal-heavy payloads smaller than immediate-exit literal coding"
-        );
         assert_eq!(unpack15_decode(&packed, input.len()).unwrap(), input);
     }
 
@@ -1951,7 +1962,9 @@ mod tests {
                     old_dist_ptr: encoder.old_dist_ptr,
                     nlzb: encoder.nlzb,
                     nhfb: encoder.nhfb,
+                    l_count: encoder.l_count,
                 },
+                0,
             )
             .unwrap();
 
@@ -1962,6 +1975,22 @@ mod tests {
                 length: 10,
             })
         );
+    }
+
+    #[test]
+    fn encoder_round_trips_source_shaped_payload() {
+        let source = include_bytes!("rar13.rs");
+        let input = &source[..source.len().min(50_902)];
+
+        let packed = unpack15_encode(input).unwrap();
+        let decoded = unpack15_decode(&packed, input.len()).unwrap();
+
+        let first_diff = decoded
+            .iter()
+            .zip(input)
+            .position(|(actual, expected)| actual != expected);
+        assert_eq!(first_diff, None, "first differing byte in decoded payload");
+        assert_eq!(decoded, input);
     }
 }
 
