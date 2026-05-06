@@ -2018,7 +2018,9 @@ fn writes_literal_compressed_rar29_archive_that_reader_extracts() {
 
     assert_eq!(files.len(), 4);
     assert!(files.iter().all(|file| file.unp_ver == 29));
-    assert!(files.iter().all(|file| file.method == 0x33));
+    assert!(files
+        .iter()
+        .all(|file| matches!(file.method, 0x30 | 0x33 | 0x35)));
     assert_eq!(files[0].file_crc, crc32(entries[0].data));
     assert_eq!(files[1].file_crc, crc32(entries[1].data));
     assert_eq!(files[2].file_crc, crc32(entries[2].data));
@@ -2072,25 +2074,8 @@ fn writes_solid_compressed_rar29_rar30_and_rar40_archives_that_reader_extracts()
         assert_eq!(files.len(), 2);
         assert!(!files[0].is_solid());
         assert!(files[1].is_solid());
-        let independent = write_compressed_archive(
-            &[FileEntry {
-                name: b"solid-two.txt",
-                data: entries[1].data,
-                file_time: entries[1].file_time,
-                file_attr: entries[1].file_attr,
-                host_os: entries[1].host_os,
-                password: None,
-                file_comment: None,
-            }],
-            WriterOptions {
-                target,
-                features: FeatureSet::store_only(),
-            },
-        )
-        .unwrap();
-        let independent = Archive::parse(&independent).unwrap();
-        let independent = independent.files().next().unwrap();
-        assert!(files[1].pack_size < independent.pack_size);
+        let independent_lz = rars_codec::rar29::unpack29_encode_literals(entries[1].data).unwrap();
+        assert!(files[1].pack_size < independent_lz.len() as u64);
 
         let extracted = archive.extract().unwrap();
         assert_eq!(extracted.len(), 2);
@@ -2417,6 +2402,36 @@ fn auto_filtered_rar29_writer_chooses_ppmd_for_text_when_smaller() {
 }
 
 #[test]
+fn default_rar29_writer_uses_auto_policy_for_text() {
+    let payload = b"rar29 default auto text alpha beta gamma alpha beta gamma\n".repeat(512);
+    let entries = [FileEntry {
+        name: b"default-auto-text.txt",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+
+    let bytes = write_compressed_archive(
+        &entries,
+        WriterOptions {
+            target: ArchiveVersion::Rar29,
+            features: FeatureSet::store_only(),
+        },
+    )
+    .unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let file = archive.files().next().unwrap();
+    let ppmd_packed = rars_codec::rar29::unpack29_encode_ppmd(&payload).unwrap();
+
+    assert_eq!(file.method, 0x35);
+    assert_eq!(file.pack_size, ppmd_packed.len() as u64);
+    assert_eq!(archive.extract().unwrap()[0].data, payload);
+}
+
+#[test]
 fn auto_filtered_rar29_writer_improves_x86_relative_calls() {
     let mut payload = Vec::new();
     payload.extend((0..2048).map(|index| (index * 37 + 11) as u8));
@@ -2442,14 +2457,7 @@ fn auto_filtered_rar29_writer_improves_x86_relative_calls() {
         file_comment: None,
     }];
 
-    let plain = write_compressed_archive(
-        &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar29,
-            features: FeatureSet::store_only(),
-        },
-    )
-    .unwrap();
+    let plain_packed = rars_codec::rar29::unpack29_encode_literals(&payload).unwrap();
     let auto = write_rar29_compressed_archive_with_filter_policy(
         &entries,
         WriterOptions {
@@ -2459,17 +2467,103 @@ fn auto_filtered_rar29_writer_improves_x86_relative_calls() {
         FilterPolicy::Auto,
     )
     .unwrap();
-    let plain = Archive::parse(&plain).unwrap();
     let auto = Archive::parse(&auto).unwrap();
-    let plain_file = plain.files().next().unwrap();
     let auto_file = auto.files().next().unwrap();
 
     assert_eq!(auto_file.method, 0x33);
     assert!(
-        auto_file.pack_size * 2 < plain_file.pack_size,
+        auto_file.pack_size * 2 < plain_packed.len() as u64,
         "auto-filtered x86 payload should be much smaller than plain RAR29 LZ"
     );
     assert_eq!(auto.extract().unwrap()[0].data, payload);
+}
+
+#[test]
+fn default_rar29_writer_uses_auto_policy_for_x86() {
+    let mut payload = Vec::new();
+    payload.extend((0..2048).map(|index| (index * 37 + 11) as u8));
+    let code_start = payload.len();
+    let call_target = code_start + 0x1800;
+    for index in 0..512usize {
+        payload.extend_from_slice(&[0x55, 0x8b, 0xec, 0x83, 0xec, (index & 0x7f) as u8]);
+        let call_pos = payload.len();
+        payload.push(0xe8);
+        let next = call_pos + 5;
+        let relative = (call_target as i64 - next as i64) as i32;
+        payload.extend_from_slice(&relative.to_le_bytes());
+        payload.extend_from_slice(&[0x83, 0xc4, 0x04, 0x5d, 0xc3]);
+    }
+    payload.extend((0..2048).map(|index| (index * 53 + 7) as u8));
+    let entries = [FileEntry {
+        name: b"default-auto-x86.bin",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+    let options = WriterOptions {
+        target: ArchiveVersion::Rar29,
+        features: FeatureSet::store_only(),
+    };
+
+    let default = write_compressed_archive(&entries, options).unwrap();
+    let explicit_auto =
+        write_rar29_compressed_archive_with_filter_policy(&entries, options, FilterPolicy::Auto)
+            .unwrap();
+    let default_archive = Archive::parse(&default).unwrap();
+    let auto_archive = Archive::parse(&explicit_auto).unwrap();
+
+    assert_eq!(default, explicit_auto);
+    assert_eq!(default_archive.files().next().unwrap().method, 0x33);
+    assert_eq!(auto_archive.extract().unwrap()[0].data, payload);
+}
+
+#[test]
+fn default_rar29_writer_uses_auto_policy_for_audio_shaped_data() {
+    let mut payload = Vec::new();
+    for sample in 0..16_384i16 {
+        let left = sample.wrapping_mul(3).wrapping_add(200);
+        let right = sample.wrapping_mul(3).wrapping_sub(200);
+        payload.extend_from_slice(&left.to_le_bytes());
+        payload.extend_from_slice(&right.to_le_bytes());
+    }
+    let entries = [FileEntry {
+        name: b"default-auto-audio.wav",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+    let options = WriterOptions {
+        target: ArchiveVersion::Rar29,
+        features: FeatureSet::store_only(),
+    };
+
+    let default = write_compressed_archive(&entries, options).unwrap();
+    let explicit_audio = write_rar29_compressed_archive_with_filter_policy(
+        &entries,
+        options,
+        FilterPolicy::Explicit(FilterSpec::whole(FilterKind::Audio { channels: 4 })),
+    )
+    .unwrap();
+    let ppmd =
+        write_rar29_compressed_archive_with_filter_policy(&entries, options, FilterPolicy::Ppmd)
+            .unwrap();
+    let default_archive = Archive::parse(&default).unwrap();
+    let audio_archive = Archive::parse(&explicit_audio).unwrap();
+    let ppmd_archive = Archive::parse(&ppmd).unwrap();
+    let default_file = default_archive.files().next().unwrap();
+    let audio_file = audio_archive.files().next().unwrap();
+    let ppmd_file = ppmd_archive.files().next().unwrap();
+
+    assert_eq!(default_file.method, 0x33);
+    assert!(default_file.pack_size <= audio_file.pack_size);
+    assert!(default_file.pack_size < ppmd_file.pack_size);
+    assert_eq!(default_archive.extract().unwrap()[0].data, payload);
 }
 
 #[test]

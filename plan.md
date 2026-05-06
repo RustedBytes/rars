@@ -102,9 +102,11 @@ reviewability.
   escape 5 offset-one repeats, PPMd escape 4 distance matches, and PPMd escape
   3 embedded standard RARVM filter records. Quality tuning remains open. RAR29
   auto policy now considers PPMd, whole-member filters, dense opcode clusters,
-  and wider x86 code-section spans; RAR29 writers already fall back to store
-  when every encoded candidate is larger, and solid archives reset the solid
-  run around stored incompressible members.
+  and wider x86 code-section spans. Non-solid RAR29/30/40 compression uses
+  auto policy by default; explicit filter/PPMd flags are diagnostic overrides.
+  RAR29 writers already fall back to store when every encoded candidate is
+  larger, and solid archives reset the solid run around stored incompressible
+  members.
 - Improve RAR5 compressed-writer policy beyond the deterministic method-1
   bounded hash-chain baseline. Next useful work is better match/filter tuning,
   not new named writer entry points.

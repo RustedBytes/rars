@@ -798,7 +798,7 @@ mod tests {
         assert!(matches!(
             members[0].detail,
             ArchiveMemberDetail::Rar15To40 {
-                method: 0x33,
+                method: 0x33 | 0x35,
                 unpack_version: 29,
                 crc32: _,
                 solid: false,
@@ -875,6 +875,30 @@ mod tests {
             extracted[0].data,
             b"facade compressed facade compressed facade compressed\n"
         );
+    }
+
+    #[test]
+    fn archive_writer_creates_rar29_compressed_archive_with_default_auto_policy() {
+        let payload =
+            b"facade rar29 default auto text alpha beta gamma alpha beta gamma\n".repeat(256);
+        let bytes = ArchiveWriter::new(ArchiveVersion::Rar29)
+            .unwrap()
+            .write_rar15_compressed(&[rar15_40::FileEntry {
+                name: b"rar29-default-auto.txt",
+                data: &payload,
+                file_time: 0,
+                file_attr: 0x20,
+                host_os: 3,
+                password: None,
+                file_comment: None,
+            }])
+            .unwrap();
+
+        let archive = ArchiveReader::read(&bytes).unwrap();
+        let raw = archive.as_rar15_40().unwrap();
+        assert_eq!(raw.files().next().unwrap().method, 0x35);
+        let extracted = archive.extract(None).unwrap();
+        assert_eq!(extracted[0].data, payload);
     }
 
     #[test]
@@ -1380,7 +1404,7 @@ mod tests {
         let raw = archive.as_rar15_40().unwrap();
         let file = raw.files().next().unwrap();
         assert_eq!(file.unp_ver, 29);
-        assert_eq!(file.method, 0x33);
+        assert!(matches!(file.method, 0x33 | 0x35));
         assert_eq!(
             archive.extract(None).unwrap()[0].data,
             b"facade rar29 literal compressed payload\n"

@@ -769,7 +769,7 @@ fn creates_rar29_compressed_archive_that_can_be_tested() {
     let info = rars().arg("info").arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     let info_stdout = stdout(&info);
-    assert!(info_stdout.contains("method=0x33"));
+    assert!(info_stdout.contains("method=0x33") || info_stdout.contains("method=0x35"));
     assert!(info_stdout.contains("ver=29"));
 
     let test = rars().arg("test").arg(&archive).output().unwrap();
@@ -3732,6 +3732,34 @@ fn creates_rar29_auto_filtered_compressed_archive_that_can_be_tested() {
     let test = rars().arg("test").arg(&archive).output().unwrap();
     assert!(test.status.success(), "stderr: {}", stderr(&test));
     assert!(stdout(&test).contains("OK payload.bin"));
+}
+
+#[test]
+fn creates_rar29_default_compressed_archive_with_auto_policy() {
+    let dir = scratch("create-rar29-default-auto-compressed");
+    let source = dir.join("payload.txt");
+    let archive = dir.join("created.rar");
+    fs::write(
+        &source,
+        b"rar29 default auto cli text alpha beta gamma alpha beta gamma\n".repeat(256),
+    )
+    .unwrap();
+
+    let output = rars()
+        .args(["a", "--format", "rar29"])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+
+    let parsed = rar15_40::Archive::parse_path(&archive).unwrap();
+    let file = parsed.files().next().unwrap();
+    assert_eq!(file.method, 0x35);
+
+    let test = rars().arg("test").arg(&archive).output().unwrap();
+    assert!(test.status.success(), "stderr: {}", stderr(&test));
+    assert!(stdout(&test).contains("OK payload.txt"));
 }
 
 #[test]

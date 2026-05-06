@@ -505,17 +505,18 @@ pub fn write_compressed_volumes(
         options,
     )?;
 
-    let packed = encode_compressed_payload(entry.data, options.target, None)?;
+    let mut solid_encoder = None;
+    let payload = encode_or_store_payload(entry.data, options.target, &mut solid_encoder)?;
     if options.features.header_encryption {
         return write_header_encrypted_split_volumes(SplitVolumeRecord {
             name: entry.name,
             unpacked: entry.data,
-            packed: &packed,
+            packed: &payload.data,
             file_time: entry.file_time,
             file_attr: entry.file_attr,
             host_os: entry.host_os,
             target: options.target,
-            method: 0x33,
+            method: payload.method,
             base_flags: writer_file_flags(entry.password, None, false),
             main_flags: if options.features.solid { MHD_SOLID } else { 0 },
             password: entry.password,
@@ -526,12 +527,12 @@ pub fn write_compressed_volumes(
     write_split_volumes(SplitVolumeRecord {
         name: entry.name,
         unpacked: entry.data,
-        packed: &packed,
+        packed: &payload.data,
         file_time: entry.file_time,
         file_attr: entry.file_attr,
         host_os: entry.host_os,
         target: options.target,
-        method: 0x33,
+        method: payload.method,
         base_flags: writer_file_flags(entry.password, None, false),
         main_flags: if options.features.solid { MHD_SOLID } else { 0 },
         password: entry.password,
@@ -704,6 +705,14 @@ fn encode_or_store_payload(
     solid_encoder: &mut Option<SolidEncoder>,
 ) -> Result<EncodedPayload> {
     let solid = solid_encoder.is_some();
+    if !solid
+        && matches!(
+            target,
+            ArchiveVersion::Rar29 | ArchiveVersion::Rar30 | ArchiveVersion::Rar40
+        )
+    {
+        return encode_rar29_auto_filtered_member(data);
+    }
     let compressed = encode_compressed_payload(data, target, solid_encoder.as_mut())?;
     if data.len() >= MIN_STORE_FALLBACK_SIZE && compressed.len() >= data.len() {
         if solid {
