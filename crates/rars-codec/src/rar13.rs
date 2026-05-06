@@ -159,7 +159,9 @@ impl Unpack15Encoder {
                         continue;
                     }
                 }
-                if let Some(long_lz) = find_long_lz(input, pos) {
+                if let Some(long_lz) = find_long_lz(input, pos)
+                    .filter(|long_lz| self.long_lz_length_code(*long_lz).is_some())
+                {
                     let flag = long_lz_flag_bits(plan_nlzb > plan_nhfb);
                     if flag_bits + flag.len() <= 8 {
                         write_planned_flag_bits(&mut flags, flag_bits, flag);
@@ -347,8 +349,10 @@ impl Unpack15Encoder {
         }
         let old_avr2 = self.avr_ln2;
 
-        let length_code = long_lz.length - 3;
-        emit_long_lz_length(&mut self.bits, length_code)?;
+        let length_code = self.long_lz_length_code(long_lz).ok_or(Error::InvalidData(
+            "RAR 1.3 LongLZ match length is not encodable for distance",
+        ))?;
+        emit_long_lz_length(&mut self.bits, self.avr_ln2, length_code)?;
         self.avr_ln2 += length_code;
         self.avr_ln2 -= self.avr_ln2 >> 5;
 
@@ -409,6 +413,12 @@ impl Unpack15Encoder {
 
         self.remember_match(long_lz.distance, long_lz.length);
         Ok(())
+    }
+
+    fn long_lz_length_code(&self, long_lz: LongLz) -> Option<u32> {
+        let decoded_bonus =
+            u32::from(long_lz.distance >= self.max_dist3) + u32::from(long_lz.distance <= 256);
+        long_lz.length.checked_sub(3 + decoded_bonus)
     }
 
     fn long_lz_distance_place(&self, target_distance: u32) -> Result<usize> {
@@ -584,7 +594,7 @@ pub fn find_long_lz(input: &[u8], pos: usize) -> Option<LongLz> {
     };
     for distance in 257..=max_distance {
         let mut length = 0usize;
-        while length < 18
+        while length < 258
             && pos + length < input.len()
             && input[pos + length] == input[pos + length - distance]
         {
@@ -601,14 +611,24 @@ pub fn find_long_lz(input: &[u8], pos: usize) -> Option<LongLz> {
     (best.length >= 3).then_some(best)
 }
 
-fn emit_long_lz_length(bits: &mut BitWriter, length_code: u32) -> Result<()> {
-    if length_code > 15 {
-        return Err(Error::InvalidData(
-            "RAR 1.3 LongLZ encoder length is not encodable",
-        ));
+fn emit_long_lz_length(bits: &mut BitWriter, avr_ln2: u32, length_code: u32) -> Result<()> {
+    if avr_ln2 >= 122 {
+        return emit_decode_num(bits, length_code, 3, DEC_L2, POS_L2);
     }
-    bits.write_bits(1, length_code as usize + 1);
-    Ok(())
+    if avr_ln2 >= 64 {
+        return emit_decode_num(bits, length_code, 2, DEC_L1, POS_L1);
+    }
+    if length_code <= 7 {
+        bits.write_bits(1, length_code as usize + 1);
+        return Ok(());
+    }
+    if length_code < 0x100 {
+        bits.write_bits(length_code, 16);
+        return Ok(());
+    }
+    Err(Error::InvalidData(
+        "RAR 1.3 LongLZ encoder length is not encodable",
+    ))
 }
 
 fn emit_decode_num(
@@ -1277,7 +1297,7 @@ fn corr_huff(char_set: &mut [u16; 256], num_to_place: &mut [u8; 256]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{unpack15_decode, unpack15_encode, Unpack15};
+    use super::{find_long_lz, unpack15_decode, unpack15_encode, LongLz, Unpack15};
 
     #[test]
     fn decode_member_from_reader_accepts_incremental_input() {
@@ -1309,6 +1329,38 @@ mod tests {
             .unwrap();
 
         assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn encoder_emits_rar15_very_long_lz_matches() {
+        let mut input: Vec<_> = (0u8..=255).cycle().take(300).collect();
+        input.extend_from_within(..258);
+
+        assert_eq!(
+            find_long_lz(&input, 300),
+            Some(LongLz {
+                distance: 300,
+                length: 258
+            })
+        );
+        let packed = unpack15_encode(&input).unwrap();
+
+        assert!(
+            packed.len() < 330,
+            "very-long LongLZ should encode a 258-byte repeat compactly, got {} bytes",
+            packed.len()
+        );
+        assert_eq!(unpack15_decode(&packed, input.len()).unwrap(), input);
+    }
+
+    #[test]
+    fn encoder_adjusts_rar15_long_lz_length_for_far_distance_bonus() {
+        let mut input: Vec<_> = (0..9000).map(|index| (index * 73 + 19) as u8).collect();
+        input.extend_from_within(..10);
+
+        let packed = unpack15_encode(&input).unwrap();
+
+        assert_eq!(unpack15_decode(&packed, input.len()).unwrap(), input);
     }
 }
 

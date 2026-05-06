@@ -27,6 +27,7 @@ const LHD_COMMENT: u8 = 0x08;
 const LHD_SOLID: u8 = 0x10;
 const METHOD_STORE: u8 = 0;
 const DEFAULT_UNP_VER: u8 = 2;
+const MIN_STORE_FALLBACK_SIZE: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -1300,10 +1301,20 @@ pub fn write_compressed_archive_with_comment(
 
     for entry in entries {
         validate_file_entry(entry.name, entry.data)?;
+        let solid = solid_encoder.is_some();
         let mut packed = if let Some(encoder) = solid_encoder.as_mut() {
             encoder.encode_member(entry.data)?
         } else {
             unpack15_encode(entry.data)?
+        };
+        let method = if !solid
+            && entry.data.len() >= MIN_STORE_FALLBACK_SIZE
+            && packed.len() >= entry.data.len()
+        {
+            packed = entry.data.to_vec();
+            METHOD_STORE
+        } else {
+            3
         };
         if let Some(password) = entry.password {
             Rar13Cipher::new(password).encrypt_in_place(&mut packed);
@@ -1330,7 +1341,7 @@ pub fn write_compressed_archive_with_comment(
                 file_attr: entry.file_attr,
                 flags,
                 unp_ver: DEFAULT_UNP_VER,
-                method: 3,
+                method,
                 extra: &file_extra,
             },
         )?;
@@ -2088,7 +2099,7 @@ mod tests {
             find_long_lz(&data, 300),
             Some(LongLz {
                 distance: 300,
-                length: 18
+                length: 32
             })
         );
         let input = [FileEntry {
@@ -2114,6 +2125,34 @@ mod tests {
 
         let extracted = archive.extract(None).unwrap();
         assert_eq!(extracted[0].data, data);
+    }
+
+    #[test]
+    fn compressed_writer_stores_incompressible_member_when_smaller() {
+        let mut state = 0x8765_4321u32;
+        let data: Vec<_> = (0..8192)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state as u8
+            })
+            .collect();
+        let input = [FileEntry {
+            name: b"randomish.bin",
+            data: &data,
+            file_time: 0,
+            file_attr: 0x20,
+            password: None,
+            file_comment: None,
+        }];
+
+        let bytes = write_compressed_archive(&input, WriterOptions::default()).unwrap();
+        let archive = Archive::parse(&bytes).unwrap();
+
+        assert_eq!(archive.entries[0].header.method, METHOD_STORE);
+        assert_eq!(archive.entries[0].header.pack_size, data.len() as u32);
+        assert_eq!(archive.extract(None).unwrap()[0].data, data);
     }
 
     #[test]

@@ -9,6 +9,7 @@ const AUTO_X86_CLUSTER_GAP: usize = 4096;
 const AUTO_X86_RANGE_PADDING: usize = 16;
 const AUTO_X86_MAX_RANGES: usize = 4;
 const AUTO_RGB_WIDTHS: [usize; 4] = [24, 48, 96, 192];
+const MIN_STORE_FALLBACK_SIZE: usize = 1024;
 
 pub fn write_stored_archive(
     entries: &[StoredEntry<'_>],
@@ -73,11 +74,12 @@ pub fn write_compressed_archive_with_comment(
     write_archive_comment(&mut out, archive_comment, options.target)?;
     let mut solid_encoder = SolidEncoder::for_target(options.target, options.features.solid);
     for (index, entry) in entries.iter().enumerate() {
-        let packed = encode_compressed_payload(entry.data, options.target, solid_encoder.as_mut())?;
+        let payload = encode_or_store_payload(entry.data, options.target, solid_encoder.as_mut())?;
         write_compressed_entry(
             &mut out,
             entry,
-            &packed,
+            &payload.data,
+            payload.method,
             options.target,
             options.features.solid && index != 0,
         )?;
@@ -273,12 +275,20 @@ fn write_rar29_filtered_archive(
                 &mut out,
                 entry,
                 &packed,
+                0x33,
                 options.target,
                 solid_continuation,
                 password,
             )?;
         } else {
-            write_compressed_entry(&mut out, entry, &packed, options.target, solid_continuation)?;
+            write_compressed_entry(
+                &mut out,
+                entry,
+                &packed,
+                0x33,
+                options.target,
+                solid_continuation,
+            )?;
         }
     }
     Ok(out)
@@ -319,11 +329,12 @@ fn write_header_encrypted_compressed_archive(
     write_main_header(&mut out, main_flags);
     let mut solid_encoder = SolidEncoder::for_target(options.target, options.features.solid);
     for (index, entry) in entries.iter().enumerate() {
-        let packed = encode_compressed_payload(entry.data, options.target, solid_encoder.as_mut())?;
+        let payload = encode_or_store_payload(entry.data, options.target, solid_encoder.as_mut())?;
         write_header_encrypted_compressed_entry(
             &mut out,
             entry,
-            &packed,
+            &payload.data,
+            payload.method,
             options.target,
             options.features.solid && index != 0,
             password,
@@ -578,6 +589,30 @@ impl SolidEncoder {
             _ => None,
         }
     }
+}
+
+struct EncodedPayload {
+    data: Vec<u8>,
+    method: u8,
+}
+
+fn encode_or_store_payload(
+    data: &[u8],
+    target: ArchiveVersion,
+    solid_encoder: Option<&mut SolidEncoder>,
+) -> Result<EncodedPayload> {
+    let solid = solid_encoder.is_some();
+    let compressed = encode_compressed_payload(data, target, solid_encoder)?;
+    if !solid && data.len() >= MIN_STORE_FALLBACK_SIZE && compressed.len() >= data.len() {
+        return Ok(EncodedPayload {
+            data: data.to_vec(),
+            method: 0x30,
+        });
+    }
+    Ok(EncodedPayload {
+        data: compressed,
+        method: 0x33,
+    })
 }
 
 fn encode_compressed_payload(
@@ -896,6 +931,7 @@ fn write_compressed_entry(
     out: &mut Vec<u8>,
     entry: &FileEntry<'_>,
     packed: &[u8],
+    method: u8,
     target: ArchiveVersion,
     solid_continuation: bool,
 ) -> Result<()> {
@@ -920,7 +956,7 @@ fn write_compressed_entry(
             file_attr: entry.file_attr,
             host_os: entry.host_os,
             target,
-            method: 0x33,
+            method,
             flags,
             salt,
             extra: &file_comment,
@@ -969,6 +1005,7 @@ fn write_header_encrypted_compressed_entry(
     out: &mut Vec<u8>,
     entry: &FileEntry<'_>,
     packed: &[u8],
+    method: u8,
     target: ArchiveVersion,
     solid_continuation: bool,
     header_password: &[u8],
@@ -995,7 +1032,7 @@ fn write_header_encrypted_compressed_entry(
             file_attr: entry.file_attr,
             host_os: entry.host_os,
             target,
-            method: 0x33,
+            method,
             flags,
             salt,
             extra: &file_comment,

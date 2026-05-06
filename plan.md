@@ -97,8 +97,11 @@ reviewability.
 
 - Keep RAR 1.3/1.4 and RAR 1.5 writers stable; add tests only when new bugs or
   fixtures justify them.
+- Improve Unpack15 compression quality beyond the current greedy parser:
+  repeat-distance tokens, lazy matching, and cost-aware selection remain open.
 - Improve the Unpack29 writer beyond the current bounded hash-chain baseline:
-  PPMd writing and richer real-data filter-placement heuristics.
+  PPMd writing, better incompressible-data policy for filtered/solid paths, and
+  richer real-data filter-placement heuristics.
 - Improve RAR5 compressed-writer policy beyond the deterministic method-1
   bounded hash-chain baseline. Next useful work is better match/filter tuning,
   not new named writer entry points.
