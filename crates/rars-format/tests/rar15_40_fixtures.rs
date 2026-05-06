@@ -130,7 +130,6 @@ fn generated_rar29_auto_filtered_archive_round_trips() {
     let file = archive.files().next().unwrap();
 
     assert_eq!(file.unp_ver, 29);
-    assert_eq!(file.method, 0x33);
     let plain = write_compressed_archive(
         &entries,
         WriterOptions {
@@ -2372,6 +2371,49 @@ fn auto_filtered_rar29_writer_stores_incompressible_member_when_smaller() {
     assert_eq!(file.method, 0x30);
     assert_eq!(file.pack_size, data.len() as u64);
     assert_eq!(archive.extract().unwrap()[0].data, data);
+}
+
+#[test]
+fn auto_filtered_rar29_writer_chooses_ppmd_for_text_when_smaller() {
+    let mut payload = Vec::new();
+    for index in 0..512 {
+        payload.extend_from_slice(b"rar29 auto ppmd text with repeated words and punctuation. ");
+        payload.extend_from_slice(
+            format!("line {index:04}: alpha beta gamma alpha beta gamma\n").as_bytes(),
+        );
+    }
+    let lz_packed = rars_codec::rar29::unpack29_encode_literals(&payload).unwrap();
+    let ppmd_packed = rars_codec::rar29::unpack29_encode_ppmd(&payload).unwrap();
+    assert!(
+        ppmd_packed.len() < lz_packed.len(),
+        "fixture must exercise the auto-policy PPMd candidate"
+    );
+
+    let entries = [FileEntry {
+        name: b"auto-ppmd.txt",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+
+    let bytes = write_rar29_compressed_archive_with_filter_policy(
+        &entries,
+        WriterOptions {
+            target: ArchiveVersion::Rar29,
+            features: FeatureSet::store_only(),
+        },
+        FilterPolicy::Auto,
+    )
+    .unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let file = archive.files().next().unwrap();
+
+    assert_eq!(file.method, 0x35);
+    assert_eq!(file.pack_size, ppmd_packed.len() as u64);
+    assert_eq!(archive.extract().unwrap()[0].data, payload);
 }
 
 #[test]

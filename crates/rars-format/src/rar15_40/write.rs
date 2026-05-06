@@ -178,58 +178,80 @@ fn encode_rar29_filtered_member(data: &[u8], filter: FilterSpec) -> Result<Vec<u
 }
 
 fn encode_rar29_auto_filtered_member(data: &[u8]) -> Result<EncodedPayload> {
-    let mut best = unpack29_encode_literals(data).map_err(Error::from)?;
+    let mut best = EncodedPayload {
+        data: unpack29_encode_literals(data).map_err(Error::from)?,
+        method: 0x33,
+    };
     let mut candidates = vec![
-        encode_rar29_filtered_member(data, FilterSpec::whole(FilterKind::E8))?,
-        encode_rar29_filtered_member(data, FilterSpec::whole(FilterKind::E8E9))?,
-        encode_rar29_filtered_member(data, FilterSpec::whole(FilterKind::Itanium))?,
+        EncodedPayload {
+            data: unpack29_encode_ppmd(data).map_err(Error::from)?,
+            method: 0x35,
+        },
+        EncodedPayload {
+            data: encode_rar29_filtered_member(data, FilterSpec::whole(FilterKind::E8))?,
+            method: 0x33,
+        },
+        EncodedPayload {
+            data: encode_rar29_filtered_member(data, FilterSpec::whole(FilterKind::E8E9))?,
+            method: 0x33,
+        },
+        EncodedPayload {
+            data: encode_rar29_filtered_member(data, FilterSpec::whole(FilterKind::Itanium))?,
+            method: 0x33,
+        },
     ];
     for range in auto_x86_filter_ranges(data, false) {
-        candidates.push(encode_rar29_filtered_member(
-            data,
-            FilterSpec::range(FilterKind::E8, range),
-        )?);
+        candidates.push(EncodedPayload {
+            data: encode_rar29_filtered_member(data, FilterSpec::range(FilterKind::E8, range))?,
+            method: 0x33,
+        });
     }
     for range in auto_x86_filter_ranges(data, true) {
-        candidates.push(encode_rar29_filtered_member(
-            data,
-            FilterSpec::range(FilterKind::E8E9, range),
-        )?);
+        candidates.push(EncodedPayload {
+            data: encode_rar29_filtered_member(data, FilterSpec::range(FilterKind::E8E9, range))?,
+            method: 0x33,
+        });
     }
     for channels in 1..=4 {
-        candidates.push(encode_rar29_filtered_member(
-            data,
-            FilterSpec::whole(FilterKind::Delta { channels }),
-        )?);
-        candidates.push(encode_rar29_filtered_member(
-            data,
-            FilterSpec::whole(FilterKind::Audio { channels }),
-        )?);
+        candidates.push(EncodedPayload {
+            data: encode_rar29_filtered_member(
+                data,
+                FilterSpec::whole(FilterKind::Delta { channels }),
+            )?,
+            method: 0x33,
+        });
+        candidates.push(EncodedPayload {
+            data: encode_rar29_filtered_member(
+                data,
+                FilterSpec::whole(FilterKind::Audio { channels }),
+            )?,
+            method: 0x33,
+        });
     }
     for width in AUTO_RGB_WIDTHS {
         if data.len() >= width {
-            candidates.push(encode_rar29_filtered_member(
-                data,
-                FilterSpec::whole(FilterKind::Rgb { width, pos_r: 0 }),
-            )?);
+            candidates.push(EncodedPayload {
+                data: encode_rar29_filtered_member(
+                    data,
+                    FilterSpec::whole(FilterKind::Rgb { width, pos_r: 0 }),
+                )?,
+                method: 0x33,
+            });
         }
     }
 
-    for packed in candidates {
-        if packed.len() < best.len() {
-            best = packed;
+    for candidate in candidates {
+        if candidate.data.len() < best.data.len() {
+            best = candidate;
         }
     }
-    if data.len() >= MIN_STORE_FALLBACK_SIZE && best.len() >= data.len() {
+    if data.len() >= MIN_STORE_FALLBACK_SIZE && best.data.len() >= data.len() {
         return Ok(EncodedPayload {
             data: data.to_vec(),
             method: 0x30,
         });
     }
-    Ok(EncodedPayload {
-        data: best,
-        method: 0x33,
-    })
+    Ok(best)
 }
 
 fn auto_x86_filter_ranges(data: &[u8], include_e9: bool) -> Vec<Range<usize>> {
