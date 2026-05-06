@@ -1245,4 +1245,76 @@ mod tests {
             second
         );
     }
+
+    #[test]
+    fn solid_encoder_reuses_rar20_tables_at_member_boundary() {
+        let first: Vec<_> = (0u8..=255).cycle().take(4096).collect();
+        let second = b"short literal member after reused rar20 table boundary\n";
+        let independent = unpack20_encode_literals(second).unwrap();
+        let mut encoder = Unpack20Encoder::new();
+        let first_packed = encoder.encode_member(&first).unwrap();
+        let second_packed = encoder.encode_member(second).unwrap();
+
+        assert!(second_packed.len() < independent.len());
+        let mut decoder = Unpack20::new();
+        assert_eq!(
+            decoder.decode_member(&first_packed, first.len()).unwrap(),
+            first
+        );
+        assert_eq!(
+            decoder.decode_member(&second_packed, second.len()).unwrap(),
+            second
+        );
+    }
+
+    #[test]
+    fn solid_encoder_matches_immediately_after_rar20_table_boundary() {
+        let phrase = b"rar20 table boundary match phrase with enough bytes ";
+        let first = phrase.repeat(128);
+        let second = phrase.repeat(8);
+        let independent = unpack20_encode_literals(&second).unwrap();
+        let mut encoder = Unpack20Encoder::new();
+        let first_packed = encoder.encode_member(&first).unwrap();
+        let second_packed = encoder.encode_member(&second).unwrap();
+        let tokens = encode_tokens(&second, &first);
+
+        assert!(matches!(tokens.first(), Some(EncodeToken::Match { .. })));
+        assert!(second_packed.len() < independent.len());
+        let mut decoder = Unpack20::new();
+        assert_eq!(
+            decoder.decode_member(&first_packed, first.len()).unwrap(),
+            first
+        );
+        assert_eq!(
+            decoder.decode_member(&second_packed, second.len()).unwrap(),
+            second
+        );
+    }
+
+    #[test]
+    fn solid_encoder_carries_rar20_history_across_multiple_members() {
+        let first = b"rar20 multi member solid seed ".repeat(512);
+        let second = b"rar20 multi member solid seed with middle tail ".repeat(128);
+        let third = b"with middle tail ".repeat(64);
+        let independent = unpack20_encode_literals(&third).unwrap();
+        let mut encoder = Unpack20Encoder::new();
+        let first_packed = encoder.encode_member(&first).unwrap();
+        let second_packed = encoder.encode_member(&second).unwrap();
+        let third_packed = encoder.encode_member(&third).unwrap();
+
+        assert!(third_packed.len() < independent.len());
+        let mut decoder = Unpack20::new();
+        assert_eq!(
+            decoder.decode_member(&first_packed, first.len()).unwrap(),
+            first
+        );
+        assert_eq!(
+            decoder.decode_member(&second_packed, second.len()).unwrap(),
+            second
+        );
+        assert_eq!(
+            decoder.decode_member(&third_packed, third.len()).unwrap(),
+            third
+        );
+    }
 }

@@ -76,6 +76,14 @@ reviewability.
 - Keep `FHD_LARGE` parser coverage synthetic until a real >4 GiB fixture is
   worth committing.
 - Add adversarial PPMd fixtures as corpus bugs appear.
+- RAR 3 NewSub recovery repair currently supports stored recovery records only;
+  add compressed NewSub RR fixtures before implementing compressed repair.
+- Add boundary fixtures for RAR 2.x `PROTECT_HEAD` and RAR 3.x NewSub recovery
+  where the protected range ends mid-sector. The current implementations
+  deliberately differ there: `PROTECT_HEAD` repairs only complete 512-byte
+  sectors before the record, while NewSub zero-pads a trailing partial sector.
+- Add or find a fixture that demonstrates the `PROTECT_HEAD` stable repairable
+  prefix when recovery metadata overlaps the protected prefix.
 - Keep the libarchive mixed encrypted fixture as a partial oracle only for the
   RAR 3.93-validated `b.txt` member; its later `d.txt` member fails under the
   historical reference reader.
@@ -89,8 +97,6 @@ reviewability.
 
 - Keep RAR 1.3/1.4 and RAR 1.5 writers stable; add tests only when new bugs or
   fixtures justify them.
-- Improve the Unpack20 writer beyond the current bounded hash-chain baseline:
-  broader solid and table-boundary stress coverage.
 - Improve the Unpack29 writer beyond the current bounded hash-chain baseline:
   PPMd writing and richer real-data filter-placement heuristics.
 - Improve RAR5 compressed-writer policy beyond the deterministic method-1
@@ -113,6 +119,9 @@ reviewability.
   examples primarily use streaming APIs.
 - Decide whether REV repair needs a streaming output API instead of returning
   all repaired volume files as `Vec<Vec<u8>>`.
+- Split RAR 5 REV parsing into metadata-only and payload-carrying forms if REV
+  parse throughput or memory use matters; `Rev5Volume::parse` currently retains
+  the full recovery payload.
 - Introduce a `Rar15_40Writer` builder only if another independent writer
   option axis lands there. Do not add cartesian named writer functions.
 - Consider a shared auto-filter policy only if writer work proves RAR29 and

@@ -3889,6 +3889,29 @@ fn repairs_two_missing_rar50_data_volumes_from_rev5_recovery_volumes() {
 }
 
 #[test]
+fn rejects_duplicate_rar50_rev5_recovery_rows() {
+    let data: Vec<_> = (1..=5)
+        .map(|index| std::fs::read(fixture(&format!("multivol_rev.part{index}.rar"))).unwrap())
+        .collect();
+    let rev =
+        Rev5Volume::parse(&std::fs::read(fixture("multivol_rev.part1.rev")).unwrap()).unwrap();
+    let inputs = [
+        Some(data[0].as_slice()),
+        None,
+        Some(data[2].as_slice()),
+        None,
+        Some(data[4].as_slice()),
+    ];
+
+    assert!(matches!(
+        repair_rev5_volumes(&inputs, &[rev.clone(), rev]),
+        Err(Error::InvalidHeader(
+            "RAR 5 REV recovery volume set contains duplicate recovery rows"
+        ))
+    ));
+}
+
+#[test]
 fn repairs_corrupt_rar50_data_volume_from_rev5_recovery_volume() {
     let mut data: Vec<_> = (1..=5)
         .map(|index| std::fs::read(fixture(&format!("multivol_rev.part{index}.rar"))).unwrap())

@@ -720,6 +720,15 @@ pub fn repair_rev5_volumes(
             Ok((row, rev.payload.as_slice()))
         })
         .collect::<Result<_>>()?;
+    let mut seen_recovery_rows = std::collections::HashSet::with_capacity(recovery_rows.len());
+    if recovery_rows
+        .iter()
+        .any(|(row, _)| !seen_recovery_rows.insert(*row))
+    {
+        return Err(Error::InvalidHeader(
+            "RAR 5 REV recovery volume set contains duplicate recovery rows",
+        ));
+    }
     let repaired = rars_recovery::rar5::reconstruct_data_shards(&shards, &recovery_rows)?;
 
     repaired

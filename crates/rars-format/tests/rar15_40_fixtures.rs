@@ -2154,6 +2154,82 @@ fn writes_solid_compressed_rar20_archive_that_reader_extracts() {
 }
 
 #[test]
+fn writes_solid_rar20_archive_across_table_boundary_and_multiple_history_members() {
+    let first_data: Vec<_> = (0u8..=255).cycle().take(4096).collect();
+    let phrase = b"RAR 2.0 solid table boundary phrase alpha beta gamma.\n";
+    let second_data = phrase.repeat(96);
+    let mut third_data = phrase.repeat(24);
+    third_data.extend_from_slice(b"third member literal tail after history matches\n");
+    let entries = [
+        FileEntry {
+            name: b"solid-rar20-table.bin",
+            data: &first_data,
+            file_time: 0x5a21_0000,
+            file_attr: 0x20,
+            host_os: 3,
+            password: None,
+            file_comment: None,
+        },
+        FileEntry {
+            name: b"solid-rar20-boundary.txt",
+            data: &second_data,
+            file_time: 0x5a21_0000,
+            file_attr: 0x20,
+            host_os: 3,
+            password: None,
+            file_comment: None,
+        },
+        FileEntry {
+            name: b"solid-rar20-third.txt",
+            data: &third_data,
+            file_time: 0x5a21_0000,
+            file_attr: 0x20,
+            host_os: 3,
+            password: None,
+            file_comment: None,
+        },
+    ];
+    let mut features = FeatureSet::store_only();
+    features.solid = true;
+
+    let bytes = write_compressed_archive(
+        &entries,
+        WriterOptions {
+            target: ArchiveVersion::Rar20,
+            features,
+        },
+    )
+    .unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let files: Vec<_> = archive.files().collect();
+
+    assert!(archive.main.is_solid());
+    assert_eq!(files.len(), 3);
+    assert!(!files[0].is_solid());
+    assert!(files[1].is_solid());
+    assert!(files[2].is_solid());
+    assert!(files.iter().all(|file| file.unp_ver == 20));
+
+    let independent_third = write_compressed_archive(
+        &[entries[2]],
+        WriterOptions {
+            target: ArchiveVersion::Rar20,
+            features: FeatureSet::store_only(),
+        },
+    )
+    .unwrap();
+    let independent_third = Archive::parse(&independent_third).unwrap();
+    let independent_third = independent_third.files().next().unwrap();
+    assert!(files[2].pack_size < independent_third.pack_size);
+
+    let extracted = archive.extract().unwrap();
+    assert_eq!(extracted.len(), 3);
+    assert_eq!(extracted[0].data, first_data);
+    assert_eq!(extracted[1].data, second_data);
+    assert_eq!(extracted[2].data, third_data);
+}
+
+#[test]
 fn writes_solid_compressed_rar15_archive_that_reader_extracts() {
     let entries = [
         FileEntry {

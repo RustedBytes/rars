@@ -323,7 +323,7 @@ fn cmd_repair(args: &[String]) -> CliResult<()> {
     );
     let repaired = match archive {
         Ok(archive) => archive
-            .repair_inline_recovery()
+            .repair_recovery()
             .map_err(|err| format!("failed to repair archive '{}': {err}", paths[0]))?,
         Err(parse_error) => {
             let bytes = fs::read(&paths[0])?;
@@ -507,13 +507,23 @@ fn parse_rar3_old_style_rev_name(path: &Path) -> Option<(usize, usize, usize)> {
 
 fn infer_part_index(path: &Path, data_count: u16) -> Option<usize> {
     let name = path.file_name()?.to_string_lossy();
-    let part_pos = name.find(".part")? + ".part".len();
-    let digits: String = name[part_pos..]
-        .chars()
-        .take_while(|ch| ch.is_ascii_digit())
-        .collect();
-    let part = digits.parse::<usize>().ok()?;
-    let index = part.checked_sub(1)?;
+    let index = if let Some(part_pos) = name.find(".part") {
+        let digits: String = name[part_pos + ".part".len()..]
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit())
+            .collect();
+        digits.parse::<usize>().ok()?.checked_sub(1)?
+    } else {
+        let ext = path.extension()?.to_str()?;
+        if ext.eq_ignore_ascii_case("rar") {
+            0
+        } else if ext.len() == 3 && ext.starts_with(['r', 'R']) {
+            let number = ext[1..].parse::<usize>().ok()?;
+            number + 1
+        } else {
+            return None;
+        }
+    };
     (index < usize::from(data_count)).then_some(index)
 }
 
@@ -1559,4 +1569,20 @@ fn usage() {
   rars repair <rar-parts-and-rev-files...> <outdir>
   {ADD_USAGE}"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::infer_part_index;
+    use std::path::Path;
+
+    #[test]
+    fn infer_part_index_accepts_new_and_old_numbered_volume_names() {
+        assert_eq!(infer_part_index(Path::new("archive.part1.rar"), 4), Some(0));
+        assert_eq!(infer_part_index(Path::new("archive.part4.rar"), 4), Some(3));
+        assert_eq!(infer_part_index(Path::new("archive.rar"), 4), Some(0));
+        assert_eq!(infer_part_index(Path::new("archive.r00"), 4), Some(1));
+        assert_eq!(infer_part_index(Path::new("archive.r02"), 4), Some(3));
+        assert_eq!(infer_part_index(Path::new("archive.r03"), 4), None);
+    }
 }

@@ -138,13 +138,13 @@ impl Archive {
         }
     }
 
-    pub fn repair_inline_recovery(&self) -> Result<Vec<u8>> {
+    pub fn repair_recovery(&self) -> Result<Vec<u8>> {
         match self {
             Self::Rar15To40(archive) => archive.repair_protect_head(),
             Self::Rar50Plus(archive) => archive.repair_inline_recovery(),
             Self::Rar13(_) => Err(Error::UnsupportedFeature {
                 version: ArchiveVersion::Rar14,
-                feature: "inline recovery repair for RAR 1.3/1.4 archives",
+                feature: "recovery repair for RAR 1.3/1.4 archives",
             }),
         }
     }
@@ -2607,7 +2607,7 @@ mod tests {
         let damaged_archive = ArchiveReader::read(&damaged).unwrap();
         assert!(damaged_archive.extract(None).is_err());
 
-        let repaired = damaged_archive.repair_inline_recovery().unwrap();
+        let repaired = damaged_archive.repair_recovery().unwrap();
 
         assert_eq!(repaired, bytes);
         let repaired_archive = ArchiveReader::read(&repaired).unwrap();

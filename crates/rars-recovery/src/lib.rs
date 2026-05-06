@@ -20,7 +20,7 @@ pub mod rar3 {
     pub type Result<T> = std::result::Result<T, Error>;
 
     #[derive(Debug, Clone)]
-    pub struct RSCoder8 {
+    pub(crate) struct RSCoder8 {
         parity_size: usize,
         gf_exp: [u8; MAX_POLYNOMIAL],
         gf_log: [u16; MAX_PARITY + 1],
@@ -28,7 +28,7 @@ pub mod rar3 {
     }
 
     impl RSCoder8 {
-        pub fn new(parity_size: usize) -> Result<Self> {
+        pub(crate) fn new(parity_size: usize) -> Result<Self> {
             if parity_size == 0 || parity_size > MAX_PARITY {
                 return Err(Error::InvalidParitySize);
             }
@@ -43,7 +43,8 @@ pub mod rar3 {
             Ok(coder)
         }
 
-        pub fn encode(&self, data: &[u8]) -> Vec<u8> {
+        #[cfg(test)]
+        fn encode(&self, data: &[u8]) -> Vec<u8> {
             let mut shift = vec![0u8; self.parity_size + 1];
             for &byte in data {
                 let feedback = byte ^ shift[self.parity_size - 1];
@@ -57,7 +58,11 @@ pub mod rar3 {
                 .collect()
         }
 
-        pub fn correct_erasures(&self, codeword: &mut [u8], erasures: &[usize]) -> Result<()> {
+        pub(crate) fn correct_erasures(
+            &self,
+            codeword: &mut [u8],
+            erasures: &[usize],
+        ) -> Result<()> {
             if codeword.is_empty() || codeword.len() > MAX_PARITY {
                 return Err(Error::InvalidCodewordSize);
             }
