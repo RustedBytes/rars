@@ -1148,6 +1148,24 @@ mod tests {
         assert_eq!(decoder.decode_member(&packed, 8).unwrap(), vec![0; 8]);
     }
 
+    #[test]
+    fn decodes_back_to_back_fresh_audio_blocks() {
+        // No real RAR 2.x encoder we tested emits a mid-stream `audio_block,
+        // !keep_tables` transition; reference encoders always either keep the
+        // existing audio tables across boundaries or switch out to LZ. The
+        // decoder branch that rebuilds `audio_tables` from a freshly-read level
+        // table inside an audio sequence is therefore only reachable via a
+        // hand-crafted fixture.
+        let mut bits = BitWriter::default();
+        write_fresh_audio_block(&mut bits, 4, /*emit_end_sentinel=*/ true);
+        write_fresh_audio_block(&mut bits, 4, /*emit_end_sentinel=*/ false);
+        let packed = bits.finish();
+
+        let mut decoder = Unpack20::new();
+
+        assert_eq!(decoder.decode_member(&packed, 8).unwrap(), vec![0; 8]);
+    }
+
     fn expected_text() -> Vec<u8> {
         b"Hello text not audio.\r\n".repeat(100)
     }
@@ -1174,6 +1192,31 @@ mod tests {
         }
 
         bits.finish()
+    }
+
+    fn write_fresh_audio_block(bits: &mut BitWriter, samples: usize, emit_end_sentinel: bool) {
+        bits.write_bits(0b10, 2); // audio block, do not keep previous tables.
+        bits.write_bits(0, 2); // one channel.
+
+        for symbol in 0..19 {
+            let len = if symbol == 1 || symbol == 18 { 1 } else { 0 };
+            bits.write_bits(len, 4);
+        }
+
+        // Audio table: symbol 0 (delta 0) = "0", symbol 256 (block end) = "1".
+        bits.write_bit(false); // level symbol 1: audio delta 0 has code length 1.
+        bits.write_bit(true); // level symbol 18: 138 zeros (audio symbols 1..=138).
+        bits.write_bits(127, 7);
+        bits.write_bit(true); // level symbol 18: 117 zeros (audio symbols 139..=255).
+        bits.write_bits(106, 7);
+        bits.write_bit(false); // level symbol 1: block-end (256) has code length 1.
+
+        for _ in 0..samples {
+            bits.write_bit(false); // audio delta 0.
+        }
+        if emit_end_sentinel {
+            bits.write_bit(true); // audio symbol 256: end of audio block.
+        }
     }
 
     #[test]

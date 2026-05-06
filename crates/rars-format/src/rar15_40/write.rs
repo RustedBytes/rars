@@ -100,14 +100,20 @@ pub fn write_rar29_compressed_archive_with_filter_policy(
 ) -> Result<Vec<u8>> {
     validate_rar29_filter_policy(&policy)?;
     write_rar29_filtered_archive(entries, options, |entry| {
-        encode_rar29_policy_filtered_member(entry.data, &policy)
+        encode_rar29_policy_filtered_payload(entry.data, &policy)
     })
 }
 
-fn encode_rar29_policy_filtered_member(data: &[u8], policy: &FilterPolicy) -> Result<Vec<u8>> {
+fn encode_rar29_policy_filtered_payload(
+    data: &[u8],
+    policy: &FilterPolicy,
+) -> Result<EncodedPayload> {
     match policy {
         FilterPolicy::Auto => encode_rar29_auto_filtered_member(data),
-        FilterPolicy::Explicit(filter) => encode_rar29_filtered_member(data, filter.clone()),
+        FilterPolicy::Explicit(filter) => Ok(EncodedPayload {
+            data: encode_rar29_filtered_member(data, filter.clone())?,
+            method: 0x33,
+        }),
     }
 }
 
@@ -148,7 +154,7 @@ fn encode_rar29_filtered_member(data: &[u8], filter: FilterSpec) -> Result<Vec<u
         .map_err(Error::from)
 }
 
-fn encode_rar29_auto_filtered_member(data: &[u8]) -> Result<Vec<u8>> {
+fn encode_rar29_auto_filtered_member(data: &[u8]) -> Result<EncodedPayload> {
     let mut best = unpack29_encode_literals(data).map_err(Error::from)?;
     let mut candidates = vec![
         encode_rar29_filtered_member(data, FilterSpec::whole(FilterKind::E8))?,
@@ -191,7 +197,16 @@ fn encode_rar29_auto_filtered_member(data: &[u8]) -> Result<Vec<u8>> {
             best = packed;
         }
     }
-    Ok(best)
+    if data.len() >= MIN_STORE_FALLBACK_SIZE && best.len() >= data.len() {
+        return Ok(EncodedPayload {
+            data: data.to_vec(),
+            method: 0x30,
+        });
+    }
+    Ok(EncodedPayload {
+        data: best,
+        method: 0x33,
+    })
 }
 
 fn auto_x86_filter_ranges(data: &[u8], include_e9: bool) -> Vec<Range<usize>> {
@@ -245,7 +260,7 @@ fn auto_x86_filter_ranges(data: &[u8], include_e9: bool) -> Vec<Range<usize>> {
 fn write_rar29_filtered_archive(
     entries: &[FileEntry<'_>],
     options: WriterOptions,
-    mut encode: impl FnMut(&FileEntry<'_>) -> Result<Vec<u8>>,
+    mut encode: impl FnMut(&FileEntry<'_>) -> Result<EncodedPayload>,
 ) -> Result<Vec<u8>> {
     validate_rar29_filtered_writer_options(options)?;
     if options.features.header_encryption {
@@ -268,14 +283,14 @@ fn write_rar29_filtered_archive(
         None
     };
     for (index, entry) in entries.iter().enumerate() {
-        let packed = encode(entry)?;
+        let payload = encode(entry)?;
         let solid_continuation = options.features.solid && index != 0;
         if let Some(password) = header_password {
             write_header_encrypted_compressed_entry(
                 &mut out,
                 entry,
-                &packed,
-                0x33,
+                &payload.data,
+                payload.method,
                 options.target,
                 solid_continuation,
                 password,
@@ -284,8 +299,8 @@ fn write_rar29_filtered_archive(
             write_compressed_entry(
                 &mut out,
                 entry,
-                &packed,
-                0x33,
+                &payload.data,
+                payload.method,
                 options.target,
                 solid_continuation,
             )?;

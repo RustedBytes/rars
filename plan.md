@@ -70,9 +70,6 @@ reviewability.
 
 ### 1. RAR 1.5-4.x Decoder And Recovery Watchlist
 
-- Find or generate a real RAR 2.50-authored Unpack20 audio-predictor fixture.
-  Synthetic codec/archive coverage exists, but no promoted vintage archive has
-  yet hit the true audio-block bit pattern at a fresh table-read boundary.
 - Keep `FHD_LARGE` parser coverage synthetic until a real >4 GiB fixture is
   worth committing.
 - Add adversarial PPMd fixtures as corpus bugs appear.
@@ -101,8 +98,9 @@ reviewability.
   Generated compressed RAR 1.x entries emit method 5; the current reader treats
   all non-store methods as the same Unpack15 path.
 - Improve the Unpack29 writer beyond the current bounded hash-chain baseline:
-  PPMd writing, better incompressible-data policy for filtered/solid paths, and
-  richer real-data filter-placement heuristics.
+  PPMd writing, better incompressible-data policy for solid paths, and richer
+  real-data filter-placement heuristics. Non-solid auto-filtered RAR29 members
+  already fall back to store when every encoded candidate is larger.
 - Improve RAR5 compressed-writer policy beyond the deterministic method-1
   bounded hash-chain baseline. Next useful work is better match/filter tuning,
   not new named writer entry points.

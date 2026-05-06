@@ -2267,6 +2267,44 @@ fn compressed_rar29_writer_stores_incompressible_member_when_smaller() {
 }
 
 #[test]
+fn auto_filtered_rar29_writer_stores_incompressible_member_when_smaller() {
+    let mut state = 0x8765_4321u32;
+    let data: Vec<_> = (0..8192)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as u8
+        })
+        .collect();
+    let entries = [FileEntry {
+        name: b"auto-randomish.bin",
+        data: &data,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+
+    let bytes = write_rar29_compressed_archive_with_filter_policy(
+        &entries,
+        WriterOptions {
+            target: ArchiveVersion::Rar29,
+            features: FeatureSet::store_only(),
+        },
+        FilterPolicy::Auto,
+    )
+    .unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let file = archive.files().next().unwrap();
+
+    assert_eq!(file.method, 0x30);
+    assert_eq!(file.pack_size, data.len() as u64);
+    assert_eq!(archive.extract().unwrap()[0].data, data);
+}
+
+#[test]
 fn writes_solid_compressed_rar15_archive_that_reader_extracts() {
     let entries = [
         FileEntry {
