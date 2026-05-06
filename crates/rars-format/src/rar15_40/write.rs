@@ -73,16 +73,22 @@ pub fn write_compressed_archive_with_comment(
     write_main_header(&mut out, main_flags);
     write_archive_comment(&mut out, archive_comment, options.target)?;
     let mut solid_encoder = SolidEncoder::for_target(options.target, options.features.solid);
-    for (index, entry) in entries.iter().enumerate() {
-        let payload = encode_or_store_payload(entry.data, options.target, solid_encoder.as_mut())?;
+    let mut solid_run_has_member = false;
+    for entry in entries {
+        let payload = encode_or_store_payload(entry.data, options.target, &mut solid_encoder)?;
+        let solid_continuation =
+            options.features.solid && payload.method != 0x30 && solid_run_has_member;
         write_compressed_entry(
             &mut out,
             entry,
             &payload.data,
             payload.method,
             options.target,
-            options.features.solid && index != 0,
+            solid_continuation,
         )?;
+        if options.features.solid {
+            solid_run_has_member = payload.method != 0x30;
+        }
     }
     Ok(out)
 }
@@ -343,17 +349,23 @@ fn write_header_encrypted_compressed_archive(
     let main_flags = MHD_PASSWORD | if options.features.solid { MHD_SOLID } else { 0 };
     write_main_header(&mut out, main_flags);
     let mut solid_encoder = SolidEncoder::for_target(options.target, options.features.solid);
-    for (index, entry) in entries.iter().enumerate() {
-        let payload = encode_or_store_payload(entry.data, options.target, solid_encoder.as_mut())?;
+    let mut solid_run_has_member = false;
+    for entry in entries {
+        let payload = encode_or_store_payload(entry.data, options.target, &mut solid_encoder)?;
+        let solid_continuation =
+            options.features.solid && payload.method != 0x30 && solid_run_has_member;
         write_header_encrypted_compressed_entry(
             &mut out,
             entry,
             &payload.data,
             payload.method,
             options.target,
-            options.features.solid && index != 0,
+            solid_continuation,
             password,
         )?;
+        if options.features.solid {
+            solid_run_has_member = payload.method != 0x30;
+        }
     }
     Ok(out)
 }
@@ -614,11 +626,14 @@ struct EncodedPayload {
 fn encode_or_store_payload(
     data: &[u8],
     target: ArchiveVersion,
-    solid_encoder: Option<&mut SolidEncoder>,
+    solid_encoder: &mut Option<SolidEncoder>,
 ) -> Result<EncodedPayload> {
     let solid = solid_encoder.is_some();
-    let compressed = encode_compressed_payload(data, target, solid_encoder)?;
-    if !solid && data.len() >= MIN_STORE_FALLBACK_SIZE && compressed.len() >= data.len() {
+    let compressed = encode_compressed_payload(data, target, solid_encoder.as_mut())?;
+    if data.len() >= MIN_STORE_FALLBACK_SIZE && compressed.len() >= data.len() {
+        if solid {
+            *solid_encoder = SolidEncoder::for_target(target, true);
+        }
         return Ok(EncodedPayload {
             data: data.to_vec(),
             method: 0x30,

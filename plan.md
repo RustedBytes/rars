@@ -98,9 +98,9 @@ reviewability.
   Generated compressed RAR 1.x entries emit method 5; the current reader treats
   all non-store methods as the same Unpack15 path.
 - Improve the Unpack29 writer beyond the current bounded hash-chain baseline:
-  PPMd writing, better incompressible-data policy for solid paths, and richer
-  real-data filter-placement heuristics. Non-solid auto-filtered RAR29 members
-  already fall back to store when every encoded candidate is larger.
+  PPMd writing and richer real-data filter-placement heuristics. RAR29 writers
+  already fall back to store when every encoded candidate is larger; solid
+  archives reset the solid run around stored incompressible members.
 - Improve RAR5 compressed-writer policy beyond the deterministic method-1
   bounded hash-chain baseline. Next useful work is better match/filter tuning,
   not new named writer entry points.
