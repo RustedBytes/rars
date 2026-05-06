@@ -7,3 +7,4 @@ repository.workspace = true
 
 [dependencies]
 aes = "0.8"
+sha1 = "0.10"

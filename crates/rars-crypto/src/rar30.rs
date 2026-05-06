@@ -1,8 +1,10 @@
 use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
 use aes::Aes128;
+use sha1::{Digest, Sha1 as FastSha1};
 
 const HASH_ROUNDS: u32 = 0x40000;
 
+#[derive(Clone)]
 pub struct Rar30Cipher {
     cipher: Aes128,
     iv: [u8; 16],
@@ -57,6 +59,10 @@ fn derive_key_iv(password: &[u8], salt: Option<[u8; 8]>) -> ([u8; 16], [u8; 16])
         raw.extend_from_slice(&salt);
     }
 
+    if raw.len() < 64 {
+        return derive_key_iv_fast(&raw);
+    }
+
     let mut sha1 = Sha1::new();
     let mut iv = [0; 16];
     for i in 0..HASH_ROUNDS {
@@ -76,6 +82,31 @@ fn derive_key_iv(password: &[u8], salt: Option<[u8; 8]>) -> ([u8; 16], [u8; 16])
     let mut key = [0; 16];
     for (i, word) in digest[..4].iter().enumerate() {
         key[i * 4..i * 4 + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    (key, iv)
+}
+
+fn derive_key_iv_fast(raw: &[u8]) -> ([u8; 16], [u8; 16]) {
+    let mut sha1 = FastSha1::new();
+    let mut iv = [0; 16];
+    for i in 0..HASH_ROUNDS {
+        sha1.update(raw);
+        sha1.update([
+            (i & 0xff) as u8,
+            ((i >> 8) & 0xff) as u8,
+            ((i >> 16) & 0xff) as u8,
+        ]);
+        if i % (HASH_ROUNDS / 16) == 0 {
+            let digest = sha1.clone().finalize();
+            iv[(i / (HASH_ROUNDS / 16)) as usize] = digest[19];
+        }
+    }
+
+    let digest = sha1.finalize();
+    let mut key = [0; 16];
+    for (word_index, chunk) in digest[..16].chunks_exact(4).enumerate() {
+        key[word_index * 4..word_index * 4 + 4]
+            .copy_from_slice(&[chunk[3], chunk[2], chunk[1], chunk[0]]);
     }
     (key, iv)
 }

@@ -886,6 +886,7 @@ impl Archive {
         let main = parse_main_header(archive, &main_block)?;
         let mut pos = main_block.offset + main_block.head_size as usize;
         let mut blocks = Vec::new();
+        let mut encrypted_header_ciphers = EncryptedHeaderCipherCache::default();
 
         while pos < archive.len() {
             if archive.len() - pos < 7 {
@@ -893,7 +894,12 @@ impl Archive {
             }
             let (block, header, total) = if main.has_encrypted_headers() {
                 let password = password.ok_or(Error::NeedPassword)?;
-                let encrypted = decrypt_encrypted_header_at(archive, pos, password)?;
+                let encrypted = decrypt_encrypted_header_at(
+                    archive,
+                    pos,
+                    password,
+                    &mut encrypted_header_ciphers,
+                )?;
                 (encrypted.block, encrypted.header, encrypted.total_size)
             } else {
                 let block = parse_block_header(archive, pos)?;
@@ -984,12 +990,19 @@ impl Archive {
         let main = parse_main_header(&main_header, &relative_block(&main_block))?;
         let mut pos = main_block.offset + main_block.head_size as usize;
         let mut blocks = Vec::new();
+        let mut encrypted_header_ciphers = EncryptedHeaderCipherCache::default();
 
         while (sfx_offset + pos) as u64 + 7 <= file_len {
             let (block, header, total) = if main.has_encrypted_headers() {
                 let password = password.ok_or(Error::NeedPassword)?;
-                let encrypted =
-                    read_encrypted_header_at(&mut file, file_len, sfx_offset, pos, password)?;
+                let encrypted = read_encrypted_header_at(
+                    &mut file,
+                    file_len,
+                    sfx_offset,
+                    pos,
+                    password,
+                    &mut encrypted_header_ciphers,
+                )?;
                 (encrypted.block, encrypted.header, encrypted.total_size)
             } else {
                 let block = read_block_header_at(&mut file, file_len, sfx_offset, pos)?;
@@ -1639,16 +1652,36 @@ struct EncryptedHeader {
     total_size: usize,
 }
 
+#[derive(Default)]
+struct EncryptedHeaderCipherCache {
+    salt: Option<[u8; 8]>,
+    cipher: Option<Rar30Cipher>,
+}
+
+impl EncryptedHeaderCipherCache {
+    fn cipher(&mut self, password: &[u8], salt: [u8; 8]) -> Rar30Cipher {
+        if self.salt != Some(salt) {
+            self.salt = Some(salt);
+            self.cipher = Some(Rar30Cipher::new(password, Some(salt)));
+        }
+        self.cipher
+            .as_ref()
+            .expect("RAR 3 encrypted header cipher cache initialized")
+            .clone()
+    }
+}
+
 fn decrypt_encrypted_header_at(
     archive: &[u8],
     offset: usize,
     password: &[u8],
+    cipher_cache: &mut EncryptedHeaderCipherCache,
 ) -> Result<EncryptedHeader> {
     let salt = read_header_salt(archive, offset)?;
     let first_ciphertext = archive
         .get(offset + 8..offset + 24)
         .ok_or(Error::TooShort)?;
-    let mut cipher = Rar30Cipher::new(password, Some(salt));
+    let mut cipher = cipher_cache.cipher(password, salt);
     let mut first_block: [u8; 16] = first_ciphertext
         .try_into()
         .expect("RAR encrypted header first block size");
@@ -1694,6 +1727,7 @@ fn read_encrypted_header_at(
     archive_offset: usize,
     offset: usize,
     password: &[u8],
+    cipher_cache: &mut EncryptedHeaderCipherCache,
 ) -> Result<EncryptedHeader> {
     let absolute = archive_offset
         .checked_add(offset)
@@ -1703,7 +1737,7 @@ fn read_encrypted_header_at(
     }
     let first = read_exact_at(file, absolute, 24)?;
     let salt = read_header_salt(&first, 0)?;
-    let mut cipher = Rar30Cipher::new(password, Some(salt));
+    let mut cipher = cipher_cache.cipher(password, salt);
     let mut first_block: [u8; 16] = first[8..24]
         .try_into()
         .expect("RAR encrypted header first block size");

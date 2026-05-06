@@ -118,13 +118,9 @@ impl Program {
 
         let mut instructions = Vec::new();
         while bits.remaining_bits() >= 8 {
-            let checkpoint = bits.clone();
             match parse_instruction(&mut bits, instructions.len()) {
                 Ok(instruction) => instructions.push(instruction),
-                Err(Error::NeedMoreInput) => {
-                    let _ = checkpoint;
-                    break;
-                }
+                Err(Error::NeedMoreInput) => break,
                 Err(error) => return Err(error),
             }
         }
