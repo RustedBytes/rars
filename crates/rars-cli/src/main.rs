@@ -17,7 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 type CliResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 const ADD_USAGE: &str =
-    "usage: rars a [--password <password>] --format <rar14|rar15|rar20|rar29|rar30|rar40|rar50|rar70> [--store] [--solid] [--encrypt-headers] [--comment <text>] [--archive-name <name>] [--file-comment <text>] [--recovery-percent <1..100>] [--volume-size <bytes>] [--auto-filter|--delta-filter <channels>|--e8-filter|--e8e9-filter|--itanium-filter|--rgb-filter <width>|--audio-filter <channels>|--arm-filter] <archive> <files...>";
+    "usage: rars a [--password <password>] --format <rar14|rar15|rar20|rar29|rar30|rar40|rar50|rar70> [--store] [--solid] [--encrypt-headers] [--comment <text>] [--archive-name <name>] [--file-comment <text>] [--recovery-percent <1..100>] [--volume-size <bytes>] [--ppmd|--auto-filter|--delta-filter <channels>|--e8-filter|--e8e9-filter|--itanium-filter|--rgb-filter <width>|--audio-filter <channels>|--arm-filter] <archive> <files...>";
 const DOS_DIRECTORY_ATTR: u8 = 0x10;
 const RAR50_STRUCTURAL_RR_WARNING: &str =
     "warning: RAR 5 recovery writer emits validation-ready RR metadata; byte-identical WinRAR recovery layout is not expected";
@@ -559,6 +559,7 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
     let mut audio_filter = None;
     let mut arm_filter = false;
     let mut auto_filter = false;
+    let mut ppmd = false;
     let mut archive_index = 2;
     while let Some(arg) = args.get(archive_index) {
         match arg.as_str() {
@@ -654,6 +655,10 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                 auto_filter = true;
                 archive_index += 1;
             }
+            "--ppmd" => {
+                ppmd = true;
+                archive_index += 1;
+            }
             unknown if unknown.starts_with('-') => {
                 return Err(format!("unknown add option: {unknown}").into());
             }
@@ -726,36 +731,41 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
         || rgb_filter.is_some()
         || audio_filter.is_some()
         || arm_filter
-        || auto_filter)
+        || auto_filter
+        || ppmd)
     {
         let filter_count = usize::from(delta_filter.is_some())
             + usize::from(e8_filter.is_some())
             + usize::from(itanium_filter)
             + usize::from(rgb_filter.is_some())
             + usize::from(audio_filter.is_some())
-            + usize::from(auto_filter);
-        let only_rarvm_filter = filter_count == 1 && !arm_filter;
-        if !only_rarvm_filter
+            + usize::from(auto_filter)
+            + usize::from(ppmd);
+        let only_rar29_policy = filter_count == 1 && !arm_filter;
+        if !only_rar29_policy
             || !matches!(
                 target,
                 ArchiveVersion::Rar29 | ArchiveVersion::Rar30 | ArchiveVersion::Rar40
             )
         {
             return Err(
-                "RAR 1.5-4.x filter writer currently supports only one of --auto-filter/--delta-filter/--e8-filter/--e8e9-filter/--itanium-filter/--rgb-filter/--audio-filter on RAR 2.9+".into(),
+                "RAR 1.5-4.x writer currently supports only one of --ppmd/--auto-filter/--delta-filter/--e8-filter/--e8e9-filter/--itanium-filter/--rgb-filter/--audio-filter on RAR 2.9+".into(),
             );
         }
         if store {
-            return Err("RAR 2.9 RARVM filter writer requires compression".into());
+            return Err("RAR 2.9 compression policy requires compression".into());
         }
         if volume_size.is_some() {
-            return Err("RAR 2.9 RARVM filter writer on volumes is not implemented yet".into());
+            return Err("RAR 2.9 compression policy on volumes is not implemented yet".into());
         }
         if archive_comment.is_some() || file_comment.is_some() {
-            return Err("RAR 2.9 RARVM filter writer with comments is not implemented yet".into());
+            return Err("RAR 2.9 compression policy with comments is not implemented yet".into());
         }
     }
     if matches!(target, ArchiveVersion::Rar50 | ArchiveVersion::Rar70) {
+        if ppmd {
+            return Err("--ppmd is only available for RAR 2.9/3.x/4.x writers".into());
+        }
         let filter_count = usize::from(delta_filter.is_some())
             + usize::from(e8_filter.is_some())
             + usize::from(itanium_filter)
@@ -1198,6 +1208,7 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
             || rgb_filter.is_some()
             || audio_filter.is_some()
             || auto_filter
+            || ppmd
         {
             let mut entries = Vec::with_capacity(owned.len());
             for entry in &owned {
@@ -1214,7 +1225,9 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                     file_comment: None,
                 });
             }
-            let policy = if auto_filter {
+            let policy = if ppmd {
+                rars::rar15_40::FilterPolicy::Ppmd
+            } else if auto_filter {
                 rars::rar15_40::FilterPolicy::Auto
             } else if let Some(channels) = delta_filter {
                 rars::rar15_40::FilterPolicy::Explicit(rars::rar15_40::FilterSpec::whole(

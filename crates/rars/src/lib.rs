@@ -925,6 +925,32 @@ mod tests {
     }
 
     #[test]
+    fn archive_writer_creates_rar29_ppmd_compressed_archive() {
+        let payload = b"facade rar29 ppmd text payload alpha beta gamma\n".repeat(64);
+        let bytes = ArchiveWriter::new(ArchiveVersion::Rar29)
+            .unwrap()
+            .write_rar29_compressed_with_filter_policy(
+                &[rar15_40::FileEntry {
+                    name: b"rar29-ppmd.txt",
+                    data: &payload,
+                    file_time: 0,
+                    file_attr: 0x20,
+                    host_os: 3,
+                    password: None,
+                    file_comment: None,
+                }],
+                rar15_40::FilterPolicy::Ppmd,
+            )
+            .unwrap();
+
+        let archive = ArchiveReader::read(&bytes).unwrap();
+        let raw = archive.as_rar15_40().unwrap();
+        let file = raw.files().next().unwrap();
+        assert_eq!(file.method, 0x35);
+        assert_eq!(archive.extract(None).unwrap()[0].data, payload);
+    }
+
+    #[test]
     fn archive_writer_creates_rar29_segmented_e8_filtered_compressed_archive() {
         let mut payload = b"facade unfiltered prefix before x86 segment ".to_vec();
         let filter_start = payload.len();

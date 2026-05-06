@@ -1,5 +1,5 @@
 use crate::filters::{self, DeltaErrorMessages, FilterOp};
-use crate::ppmd::{PpmdByteReader, PpmdDecoder};
+use crate::ppmd::{PpmdByteReader, PpmdDecoder, PpmdEncoder};
 use crate::rarvm;
 use crate::{Error, Result};
 use std::io::{Read, Write};
@@ -102,6 +102,22 @@ pub fn unpack29_decode(input: &[u8], output_size: usize) -> Result<Vec<u8>> {
 
 pub fn unpack29_encode_literals(input: &[u8]) -> Result<Vec<u8>> {
     encode_member(input, &[])
+}
+
+pub fn unpack29_encode_ppmd_literals(input: &[u8]) -> Result<Vec<u8>> {
+    const PPMD_ORDER: usize = 4;
+    const PPMD_ESC: u8 = 2;
+
+    let mut out = Vec::new();
+    out.push(0x80 | 0x40 | 0x20 | ((PPMD_ORDER as u8) - 1));
+    out.push(0);
+    out.push(PPMD_ESC);
+    let mut encoder = PpmdEncoder::new(PPMD_ORDER, PPMD_ESC)?;
+    for &byte in input {
+        encoder.encode_literal(byte)?;
+    }
+    out.extend_from_slice(&encoder.finish()?);
+    Ok(out)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2099,9 +2115,9 @@ mod tests {
     use std::ops::Range;
 
     use super::{
-        encode_tokens, unpack29_decode, unpack29_encode_literals, EncodeToken, Rar29FilterKind,
-        Rar29FilterSpec, Result, StandardFilter, Unpack29, Unpack29Encoder, VmFilter, VmProgram,
-        VmProgramKind,
+        encode_tokens, unpack29_decode, unpack29_encode_literals, unpack29_encode_ppmd_literals,
+        EncodeToken, Rar29FilterKind, Rar29FilterSpec, Result, StandardFilter, Unpack29,
+        Unpack29Encoder, VmFilter, VmProgram, VmProgramKind,
     };
 
     const COMPRESSED_TEXT: &[u8] = &[
@@ -2125,6 +2141,16 @@ mod tests {
         let packed = unpack29_encode_literals(input).unwrap();
 
         assert_eq!(unpack29_decode(&packed, input.len()).unwrap(), input);
+    }
+
+    #[test]
+    fn ppmd_literal_encoder_round_trips_rar29_ppmd_blocks() {
+        let mut input = b"rar29 ppmd literal text payload alpha beta gamma\n".repeat(64);
+        input.extend_from_slice(&[2, 2, 2, b'e', b's', b'c']);
+        let packed = unpack29_encode_ppmd_literals(&input).unwrap();
+
+        assert_eq!(unpack29_decode(&packed, input.len()).unwrap(), input);
+        assert_ne!(packed.first().copied(), Some(0));
     }
 
     fn encode_with_filter(input: &[u8], kind: Rar29FilterKind) -> Result<Vec<u8>> {

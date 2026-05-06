@@ -3735,6 +3735,52 @@ fn creates_rar29_auto_filtered_compressed_archive_that_can_be_tested() {
 }
 
 #[test]
+fn creates_rar29_ppmd_compressed_archive_that_can_be_tested() {
+    let dir = scratch("create-rar29-ppmd-compressed");
+    let source = dir.join("payload.txt");
+    let archive = dir.join("created.rar");
+    fs::write(
+        &source,
+        b"rar29 ppmd cli text alpha beta gamma\n".repeat(96),
+    )
+    .unwrap();
+
+    let output = rars()
+        .args(["a", "--format", "rar29", "--ppmd"])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+
+    let info = rars().arg("info").arg(&archive).output().unwrap();
+    assert!(info.status.success(), "stderr: {}", stderr(&info));
+    assert!(stdout(&info).contains("method=0x35"));
+
+    let test = rars().arg("test").arg(&archive).output().unwrap();
+    assert!(test.status.success(), "stderr: {}", stderr(&test));
+    assert!(stdout(&test).contains("OK payload.txt"));
+}
+
+#[test]
+fn rejects_ppmd_for_rar5_writer() {
+    let dir = scratch("reject-rar5-ppmd");
+    let source = dir.join("payload.txt");
+    let archive = dir.join("created.rar");
+    fs::write(&source, b"rar5 cannot write ppmd\n").unwrap();
+
+    let output = rars()
+        .args(["a", "--format", "rar50", "--ppmd"])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("--ppmd is only available"));
+}
+
+#[test]
 fn creates_rar50_solid_compressed_multivolume_archive_that_can_be_tested() {
     let dir = scratch("create-rar50-solid-compressed-multivolume");
     let source = dir.join("payload.txt");

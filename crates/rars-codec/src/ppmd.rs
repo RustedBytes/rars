@@ -39,6 +39,13 @@ pub struct PpmdDecoder {
 }
 
 #[derive(Debug, Clone)]
+pub struct PpmdEncoder {
+    model: PpmdDecoder,
+    range: RangeEncoder,
+    esc_char: u8,
+}
+
+#[derive(Debug, Clone)]
 struct Context {
     states: Vec<State>,
     summ_freq: u16,
@@ -289,6 +296,121 @@ impl PpmdDecoder {
                 return Err(Error::InvalidData("RAR PPMd escape symbol is invalid"));
             }
             self.range.decode(hi_cnt, freq_sum - hi_cnt);
+            self.add_see_summ(see_ref, freq_sum);
+            for state in &self.contexts[mc].states {
+                mask[state.symbol as usize] = false;
+            }
+        }
+    }
+
+    fn encode_symbol(&mut self, symbol: u8, output: &mut RangeEncoder) -> Result<()> {
+        let mut mask = [true; 256];
+        let min = self.min_context;
+        if self.contexts[min].states.len() != 1 {
+            let summ_freq = self.contexts[min].summ_freq as u32;
+            let mut start = 0u32;
+            let mut found = None;
+            for (index, state) in self.contexts[min].states.iter().enumerate() {
+                if state.symbol == symbol {
+                    found = Some((index, start, state.freq as u32));
+                    break;
+                }
+                start += state.freq as u32;
+            }
+            if let Some((index, start, size)) = found {
+                output.encode(start, size, summ_freq);
+                self.found_state = StateRef {
+                    context: min,
+                    index,
+                };
+                if index == 0 {
+                    self.update1_0();
+                } else {
+                    self.prev_success = 0;
+                    self.update1();
+                }
+                output.normalize();
+                return Ok(());
+            }
+            if start >= summ_freq {
+                return Err(Error::InvalidData("RAR PPMd frequency sum is invalid"));
+            }
+            self.prev_success = 0;
+            output.encode(start, summ_freq - start, summ_freq);
+            self.hi_bits_flag = hi_bits_flag(self.state(self.found_state).symbol, 3);
+            for state in &self.contexts[min].states {
+                mask[state.symbol as usize] = false;
+            }
+        } else {
+            let state = self.contexts[min].states[0];
+            let idx = self.bin_summ_index(state)?;
+            let prob = self.bin_summ[idx.0][idx.1] as u32;
+            let size0 = (output.range >> 14).wrapping_mul(prob);
+            let next_prob = update_prob_1(prob);
+            if state.symbol == symbol {
+                self.bin_summ[idx.0][idx.1] = (next_prob + (1 << INT_BITS)) as u16;
+                output.encode_bit0(size0);
+                self.found_state = StateRef {
+                    context: min,
+                    index: 0,
+                };
+                self.update_bin();
+                output.normalize();
+                return Ok(());
+            }
+            self.bin_summ[idx.0][idx.1] = next_prob as u16;
+            self.init_esc = EXP_ESCAPE[(next_prob >> 10) as usize] as u32;
+            output.encode_bit1(size0);
+            mask[state.symbol as usize] = false;
+            self.prev_success = 0;
+        }
+
+        loop {
+            output.normalize();
+            let mut mc = self.min_context;
+            let num_masked = self.contexts[mc].states.len();
+            loop {
+                self.order_fall += 1;
+                let Some(suffix) = self.contexts[mc].suffix else {
+                    return Err(Error::InvalidData("RAR PPMd symbol is not encodable"));
+                };
+                mc = suffix;
+                if self.contexts[mc].states.len() != num_masked {
+                    break;
+                }
+            }
+            self.min_context = mc;
+
+            let hi_cnt = self.contexts[mc]
+                .states
+                .iter()
+                .filter(|state| mask[state.symbol as usize])
+                .map(|state| state.freq as u32)
+                .sum::<u32>();
+            let (see_ref, esc_freq) = self.make_esc_freq(num_masked);
+            let freq_sum = hi_cnt + esc_freq;
+            let mut start = 0u32;
+            let mut found = None;
+            for (index, state) in self.contexts[mc].states.iter().enumerate() {
+                if !mask[state.symbol as usize] {
+                    continue;
+                }
+                let freq = state.freq as u32;
+                if state.symbol == symbol {
+                    found = Some((index, start, freq));
+                    break;
+                }
+                start += freq;
+            }
+            if let Some((index, start, freq)) = found {
+                output.encode(start, freq, freq_sum);
+                self.update_see(see_ref);
+                self.found_state = StateRef { context: mc, index };
+                self.update2();
+                output.normalize();
+                return Ok(());
+            }
+            output.encode(hi_cnt, freq_sum - hi_cnt, freq_sum);
             self.add_see_summ(see_ref, freq_sum);
             for state in &self.contexts[mc].states {
                 mask[state.symbol as usize] = false;
@@ -719,6 +841,36 @@ impl PpmdDecoder {
     }
 }
 
+impl PpmdEncoder {
+    pub fn new(max_order: usize, esc_char: u8) -> Result<Self> {
+        if !(2..=64).contains(&max_order) {
+            return Err(Error::InvalidData("RAR PPMd order is invalid"));
+        }
+        let mut model = PpmdDecoder::new();
+        model.init_model(max_order);
+        model.allocated = true;
+        Ok(Self {
+            model,
+            range: RangeEncoder::new(),
+            esc_char,
+        })
+    }
+
+    pub fn encode_literal(&mut self, symbol: u8) -> Result<()> {
+        self.model.encode_symbol(symbol, &mut self.range)?;
+        if symbol == self.esc_char {
+            self.model.encode_symbol(1, &mut self.range)?;
+        }
+        Ok(())
+    }
+
+    pub fn finish(mut self) -> Result<Vec<u8>> {
+        self.model.encode_symbol(self.esc_char, &mut self.range)?;
+        self.model.encode_symbol(2, &mut self.range)?;
+        Ok(self.range.finish())
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum SeeRef {
     Dummy,
@@ -779,6 +931,59 @@ impl RangeDecoder {
             self.low <<= 8;
         }
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RangeEncoder {
+    low: u32,
+    range: u32,
+    out: Vec<u8>,
+}
+
+impl RangeEncoder {
+    fn new() -> Self {
+        Self {
+            low: 0,
+            range: 0xffff_ffff,
+            out: Vec::new(),
+        }
+    }
+
+    fn encode(&mut self, start: u32, size: u32, total: u32) {
+        self.range /= total;
+        self.low = self.low.wrapping_add(start.wrapping_mul(self.range));
+        self.range = self.range.wrapping_mul(size);
+    }
+
+    fn encode_bit0(&mut self, size0: u32) {
+        self.range = size0;
+    }
+
+    fn encode_bit1(&mut self, size0: u32) {
+        self.low = self.low.wrapping_add(size0);
+        self.range = (self.range & !(BIN_SCALE - 1)).wrapping_sub(size0);
+    }
+
+    fn normalize(&mut self) {
+        while (self.low ^ self.low.wrapping_add(self.range)) < TOP
+            || (self.range < BOT && {
+                self.range = self.low.wrapping_neg() & (BOT - 1);
+                true
+            })
+        {
+            self.out.push((self.low >> 24) as u8);
+            self.range <<= 8;
+            self.low <<= 8;
+        }
+    }
+
+    fn finish(mut self) -> Vec<u8> {
+        for _ in 0..4 {
+            self.out.push((self.low >> 24) as u8);
+            self.low <<= 8;
+        }
+        self.out
     }
 }
 

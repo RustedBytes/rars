@@ -2494,6 +2494,37 @@ fn auto_filtered_rar29_writer_spans_separated_x86_call_clusters() {
 }
 
 #[test]
+fn ppmd_rar29_writer_emits_method_35_member() {
+    let mut payload = b"rar29 ppmd writer text alpha beta gamma delta\n".repeat(128);
+    payload.extend_from_slice(&[2, 2, 2, b'p', b'p', b'm', b'd']);
+    let entries = [FileEntry {
+        name: b"rar29-ppmd.txt",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+
+    let bytes = write_rar29_compressed_archive_with_filter_policy(
+        &entries,
+        WriterOptions {
+            target: ArchiveVersion::Rar29,
+            features: FeatureSet::store_only(),
+        },
+        FilterPolicy::Ppmd,
+    )
+    .unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let file = archive.files().next().unwrap();
+
+    assert_eq!(file.method, 0x35);
+    assert_eq!(file.unp_ver, 29);
+    assert_eq!(archive.extract().unwrap()[0].data, payload);
+}
+
+#[test]
 fn writes_solid_compressed_rar15_archive_that_reader_extracts() {
     let entries = [
         FileEntry {
