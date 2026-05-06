@@ -1051,7 +1051,7 @@ fn creates_literal_compressed_archive_that_can_be_tested() {
 
     let info = rars().arg("info").arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
-    assert!(stdout(&info).contains("method=3"));
+    assert!(stdout(&info).contains("method=5"));
 
     let test = rars().arg("test").arg(&archive).output().unwrap();
     assert!(test.status.success(), "stderr: {}", stderr(&test));

@@ -97,8 +97,9 @@ reviewability.
 
 - Keep RAR 1.3/1.4 and RAR 1.5 writers stable; add tests only when new bugs or
   fixtures justify them.
-- Improve Unpack15 compression quality beyond the current greedy parser:
-  repeat-distance tokens, lazy matching, and cost-aware selection remain open.
+- Keep Unpack15 compression quality parity-close with DOS RAR 1.402 `-m5`.
+  Generated compressed RAR 1.x entries emit method 5; the current reader treats
+  all non-store methods as the same Unpack15 path.
 - Improve the Unpack29 writer beyond the current bounded hash-chain baseline:
   PPMd writing, better incompressible-data policy for filtered/solid paths, and
   richer real-data filter-placement heuristics.
@@ -163,3 +164,5 @@ reviewability.
 - SFX writer/stub generation.
 - Byte-identical compressor heuristics: filter selection, match-finder tuning,
   solid reset thresholds, and exact block partitioning.
+- Optional Unpack15 second-pass/optimal parser for the last few percent beyond
+  the current parity-close baseline.

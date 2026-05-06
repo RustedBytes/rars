@@ -71,6 +71,7 @@ pub struct Unpack15Encoder {
     old_dist_ptr: usize,
     last_dist: u32,
     last_length: u32,
+    l_count: u32,
 }
 
 impl Unpack15Encoder {
@@ -97,6 +98,7 @@ impl Unpack15Encoder {
             old_dist_ptr: 0,
             last_dist: u32::MAX,
             last_length: 0,
+            l_count: 0,
         };
         encoder.init_huff();
         encoder
@@ -132,7 +134,9 @@ impl Unpack15Encoder {
             }
 
             self.emit_flags_byte(flags)?;
-            self.emit_payloads(payloads, pos < input.len())?;
+            if self.emit_payloads(payloads)? && pos < input.len() {
+                self.emit_stmode_exit()?;
+            }
         }
         Ok(std::mem::take(&mut self.bits).finish())
     }
@@ -149,26 +153,44 @@ impl Unpack15Encoder {
             let mut payloads = Vec::new();
             let mut plan_nhfb = self.nhfb;
             let mut plan_nlzb = self.nlzb;
+            let mut plan_last_dist = self.last_dist;
+            let mut plan_last_length = self.last_length;
+            let mut plan_old_dist = self.old_dist;
+            let mut plan_old_dist_ptr = self.old_dist_ptr;
 
             while flag_bits < 8 && pos < input.len() {
-                if let Some(short_lz) = find_short_lz(input, pos) {
-                    if flag_bits + 2 <= 8 {
-                        payloads.push(EncodedToken::ShortLz(short_lz));
-                        flag_bits += 2;
-                        pos += short_lz.length as usize;
-                        continue;
-                    }
-                }
-                if let Some(long_lz) = find_long_lz(input, pos)
-                    .filter(|long_lz| self.long_lz_length_code(*long_lz).is_some())
+                if let Some(token) = self
+                    .choose_lz_token(
+                        input,
+                        pos,
+                        LzPlanState {
+                            last_dist: plan_last_dist,
+                            last_length: plan_last_length,
+                            old_dist: plan_old_dist,
+                            old_dist_ptr: plan_old_dist_ptr,
+                            nlzb: plan_nlzb,
+                            nhfb: plan_nhfb,
+                        },
+                    )
+                    .filter(|token| !should_lazy_emit_literal(input, pos, *token, self.max_dist3))
                 {
-                    let flag = long_lz_flag_bits(plan_nlzb > plan_nhfb);
+                    let flag = token.flag_bits(plan_nlzb, plan_nhfb);
                     if flag_bits + flag.len() <= 8 {
                         write_planned_flag_bits(&mut flags, flag_bits, flag);
-                        payloads.push(EncodedToken::LongLz(long_lz));
                         flag_bits += flag.len();
-                        pos += long_lz.length as usize;
-                        plan_long_lz_effect(&mut plan_nhfb, &mut plan_nlzb);
+                        pos += token.length() as usize;
+                        token.plan_effect(&mut plan_nhfb, &mut plan_nlzb);
+                        if let Some((distance, length)) = token.match_state() {
+                            plan_remember_match(
+                                &mut plan_old_dist,
+                                &mut plan_old_dist_ptr,
+                                &mut plan_last_dist,
+                                &mut plan_last_length,
+                                distance,
+                                length,
+                            );
+                        }
+                        payloads.push(token);
                         continue;
                     }
                 }
@@ -185,12 +207,93 @@ impl Unpack15Encoder {
             }
 
             self.emit_flags_byte(flags)?;
-            self.emit_payloads(payloads, pos < input.len())?;
+            if self.emit_payloads(payloads)? && pos < input.len() {
+                self.emit_stmode_literals(input, &mut pos)?;
+                if pos < input.len() {
+                    self.emit_stmode_exit()?;
+                }
+            }
         }
         Ok(std::mem::take(&mut self.bits).finish())
     }
 
-    fn emit_payloads(&mut self, payloads: Vec<EncodedToken>, more_input: bool) -> Result<()> {
+    fn choose_lz_token(
+        &self,
+        input: &[u8],
+        pos: usize,
+        state: LzPlanState,
+    ) -> Option<EncodedToken> {
+        let candidates = find_lz_tokens(
+            input,
+            pos,
+            state.last_dist,
+            state.last_length,
+            state.old_dist,
+            state.old_dist_ptr,
+            self.max_dist3,
+        );
+        candidates
+            .into_iter()
+            .filter_map(|token| {
+                self.token_bit_cost(token, state.nlzb, state.nhfb)
+                    .map(|cost| (token, cost))
+            })
+            .min_by(|(left, left_cost), (right, right_cost)| {
+                let left_score = left_cost * 256 / left.length() as usize;
+                let right_score = right_cost * 256 / right.length() as usize;
+                left_score
+                    .cmp(&right_score)
+                    .then_with(|| right.length().cmp(&left.length()))
+            })
+            .map(|(token, _)| token)
+    }
+
+    fn token_bit_cost(&self, token: EncodedToken, nlzb: u32, nhfb: u32) -> Option<usize> {
+        let flag_cost = token.flag_bits(nlzb, nhfb).len();
+        match token {
+            EncodedToken::Literal(byte) => {
+                let place = self
+                    .ch_set
+                    .iter()
+                    .position(|&value| (value >> 8) as u8 == byte)?;
+                Some(flag_cost + self.literal_place_bit_cost(place)?)
+            }
+            EncodedToken::RepeatLast(_) => Some(flag_cost + self.repeat_last_bit_cost()),
+            EncodedToken::ShortLz(token) => {
+                let distance_value = token.distance.checked_sub(1)?;
+                let distance_place = self
+                    .ch_set_a
+                    .iter()
+                    .position(|&value| value as u32 == distance_value)?;
+                Some(
+                    flag_cost
+                        + self.short_lz_prefix_bit_cost(token.length - 2)?
+                        + decode_num_bit_cost(distance_place as u32, 5, DEC_HF2, POS_HF2)?,
+                )
+            }
+            EncodedToken::OldDist(token) => {
+                let length_code =
+                    old_dist_lz_length_code(token.length, token.distance, self.max_dist3)?;
+                Some(
+                    flag_cost
+                        + self.short_lz_prefix_bit_cost(token.short_code)?
+                        + decode_num_bit_cost(length_code, 2, DEC_L1, POS_L1)?,
+                )
+            }
+            EncodedToken::LongLz(token) => {
+                let length_code = self.long_lz_length_code(token)?;
+                let distance_place = self.long_lz_distance_place(token.distance).ok()?;
+                Some(
+                    flag_cost
+                        + self.long_lz_length_bit_cost(length_code)?
+                        + self.long_lz_distance_bit_cost(distance_place)?
+                        + 7,
+                )
+            }
+        }
+    }
+
+    fn emit_payloads(&mut self, payloads: Vec<EncodedToken>) -> Result<bool> {
         let mut consumed_flag_bits = 0usize;
         let mut decoder_enters_stmode = false;
         for payload in payloads {
@@ -206,6 +309,14 @@ impl Unpack15Encoder {
                     consumed_flag_bits += 2;
                     self.emit_short_lz(short_lz)?;
                 }
+                EncodedToken::RepeatLast(repeat) => {
+                    consumed_flag_bits += 2;
+                    self.emit_repeat_last(repeat)?;
+                }
+                EncodedToken::OldDist(old_lz) => {
+                    consumed_flag_bits += 2;
+                    self.emit_old_dist_lz(old_lz)?;
+                }
                 EncodedToken::LongLz(long_lz) => {
                     consumed_flag_bits += long_lz_flag_bits(self.nlzb > self.nhfb).len();
                     self.emit_long_lz(long_lz)?;
@@ -213,10 +324,7 @@ impl Unpack15Encoder {
             }
         }
 
-        if decoder_enters_stmode && more_input {
-            self.emit_stmode_exit()?;
-        }
-        Ok(())
+        Ok(decoder_enters_stmode)
     }
 
     fn emit_flags_byte(&mut self, flags: u8) -> Result<()> {
@@ -253,6 +361,53 @@ impl Unpack15Encoder {
             .iter()
             .position(|&value| (value >> 8) as u8 == byte)
             .ok_or(Error::InvalidData("RAR 1.3 literal is not encodable"))?;
+        self.emit_literal_place(byte_place, byte_place, true)
+    }
+
+    fn emit_stmode_literals(&mut self, input: &[u8], pos: &mut usize) -> Result<()> {
+        while *pos < input.len() {
+            if find_repeat_last_lz(input, *pos, self.last_dist, self.last_length).is_some()
+                || find_old_dist_lz(
+                    input,
+                    *pos,
+                    self.old_dist,
+                    self.old_dist_ptr,
+                    self.max_dist3,
+                )
+                .is_some()
+                || find_short_lz(input, *pos).is_some()
+                || find_long_lz(input, *pos)
+                    .filter(|long_lz| self.long_lz_length_code(*long_lz).is_some())
+                    .is_some()
+            {
+                break;
+            }
+
+            let Some(byte_place) = self
+                .ch_set
+                .iter()
+                .position(|&value| (value >> 8) as u8 == input[*pos])
+            else {
+                return Err(Error::InvalidData("RAR 1.3 literal is not encodable"));
+            };
+            if byte_place == 255 {
+                break;
+            }
+            self.emit_literal_place(byte_place + 1, byte_place, false)?;
+            *pos += 1;
+        }
+        Ok(())
+    }
+
+    fn emit_literal_place(
+        &mut self,
+        encoded_place: usize,
+        decoded_place: usize,
+        update_num_huf: bool,
+    ) -> Result<()> {
+        if encoded_place > self.ch_set.len() || decoded_place >= self.ch_set.len() {
+            return Err(Error::InvalidData("RAR 1.3 literal is not encodable"));
+        }
 
         let (start_pos, dec_tab, pos_tab) = if self.avr_plc > 0x75ff {
             (8, DEC_HF4, POS_HF4)
@@ -267,22 +422,24 @@ impl Unpack15Encoder {
         };
         emit_decode_num(
             &mut self.bits,
-            byte_place as u32,
+            encoded_place as u32,
             start_pos,
             dec_tab,
             pos_tab,
         )?;
 
-        self.avr_plc += byte_place as u32;
+        self.avr_plc += decoded_place as u32;
         self.avr_plc -= self.avr_plc >> 8;
         self.nhfb += 16;
         if self.nhfb > 0xff {
             self.nhfb = 0x90;
             self.nlzb >>= 1;
         }
-        self.num_huf += 1;
+        if update_num_huf {
+            self.num_huf += 1;
+        }
 
-        let idx = byte_place;
+        let idx = decoded_place;
         let mut cur_byte;
         let mut new_byte_place;
         loop {
@@ -305,19 +462,13 @@ impl Unpack15Encoder {
 
     fn emit_short_lz(&mut self, short_lz: ShortLz) -> Result<()> {
         self.num_huf = 0;
+        if self.l_count == 2 {
+            self.bits.write_bits(0, 1);
+            self.l_count = 0;
+        }
         let length_place = short_lz.length - 2;
-        let code_len = if self.avr_ln1 < 37 {
-            self.short_len1(length_place as usize)
-        } else {
-            self.short_len2(length_place as usize)
-        };
-        let code_byte = if self.avr_ln1 < 37 {
-            SHORT_XOR1[length_place as usize]
-        } else {
-            SHORT_XOR2[length_place as usize]
-        };
-        self.bits
-            .write_bits((code_byte >> (8 - code_len)) as u32, code_len as usize);
+        self.emit_short_lz_code(length_place as usize)?;
+        self.l_count = 0;
 
         self.avr_ln1 += length_place;
         self.avr_ln1 -= self.avr_ln1 >> 4;
@@ -338,6 +489,81 @@ impl Unpack15Encoder {
         }
         self.remember_match(short_lz.distance, short_lz.length);
         Ok(())
+    }
+
+    fn emit_repeat_last(&mut self, repeat: RepeatLastLz) -> Result<()> {
+        if self.last_dist != repeat.distance || self.last_length != repeat.length {
+            return Err(Error::InvalidData(
+                "RAR 1.3 repeat-last state is not encodable",
+            ));
+        }
+        self.num_huf = 0;
+        if self.l_count == 2 {
+            self.bits.write_bits(1, 1);
+        } else {
+            self.emit_short_lz_code(9)?;
+            self.l_count += 1;
+        }
+        Ok(())
+    }
+
+    fn emit_old_dist_lz(&mut self, old_lz: OldDistLz) -> Result<()> {
+        self.num_huf = 0;
+        if self.l_count == 2 {
+            self.bits.write_bits(0, 1);
+            self.l_count = 0;
+        }
+        self.emit_short_lz_code(old_lz.short_code as usize)?;
+        self.l_count = 0;
+
+        let expected_distance = self.old_dist[(self
+            .old_dist_ptr
+            .wrapping_sub((old_lz.short_code - 9) as usize))
+            & 3];
+        if expected_distance != old_lz.distance {
+            return Err(Error::InvalidData(
+                "RAR 1.3 old-distance state is not encodable",
+            ));
+        }
+        let length_code = old_dist_lz_length_code(old_lz.length, old_lz.distance, self.max_dist3)
+            .ok_or(Error::InvalidData(
+            "RAR 1.3 old-distance length is not encodable",
+        ))?;
+        emit_decode_num(&mut self.bits, length_code, 2, DEC_L1, POS_L1)?;
+        self.remember_match(old_lz.distance, old_lz.length);
+        Ok(())
+    }
+
+    fn emit_short_lz_code(&mut self, code: usize) -> Result<()> {
+        let (code_len, code_byte) = if self.avr_ln1 < 37 {
+            (self.short_len1(code), SHORT_XOR1[code])
+        } else {
+            (self.short_len2(code), SHORT_XOR2[code])
+        };
+        self.bits
+            .write_bits((code_byte >> (8 - code_len)) as u32, code_len as usize);
+        Ok(())
+    }
+
+    fn short_lz_prefix_bit_cost(&self, code: u32) -> Option<usize> {
+        let code = usize::try_from(code).ok()?;
+        if code >= SHORT_XOR1.len() {
+            return None;
+        }
+        Some(if self.avr_ln1 < 37 {
+            self.short_len1(code)
+        } else {
+            self.short_len2(code)
+        } as usize)
+    }
+
+    fn repeat_last_bit_cost(&self) -> usize {
+        if self.l_count == 2 {
+            1
+        } else {
+            self.short_lz_prefix_bit_cost(9)
+                .expect("repeat-last code is encodable")
+        }
     }
 
     fn emit_long_lz(&mut self, long_lz: LongLz) -> Result<()> {
@@ -416,9 +642,7 @@ impl Unpack15Encoder {
     }
 
     fn long_lz_length_code(&self, long_lz: LongLz) -> Option<u32> {
-        let decoded_bonus =
-            u32::from(long_lz.distance >= self.max_dist3) + u32::from(long_lz.distance <= 256);
-        long_lz.length.checked_sub(3 + decoded_bonus)
+        long_lz_length_code_for_distance(long_lz, self.max_dist3)
     }
 
     fn long_lz_distance_place(&self, target_distance: u32) -> Result<usize> {
@@ -429,6 +653,44 @@ impl Unpack15Encoder {
             .ok_or(Error::InvalidData(
                 "RAR 1.3 LongLZ distance is not encodable",
             ))
+    }
+
+    fn literal_place_bit_cost(&self, place: usize) -> Option<usize> {
+        if self.avr_plc > 0x75ff {
+            decode_num_bit_cost(place as u32, 8, DEC_HF4, POS_HF4)
+        } else if self.avr_plc > 0x5dff {
+            decode_num_bit_cost(place as u32, 6, DEC_HF3, POS_HF3)
+        } else if self.avr_plc > 0x35ff {
+            decode_num_bit_cost(place as u32, 5, DEC_HF2, POS_HF2)
+        } else if self.avr_plc > 0x0dff {
+            decode_num_bit_cost(place as u32, 5, DEC_HF1, POS_HF1)
+        } else {
+            decode_num_bit_cost(place as u32, 4, DEC_HF0, POS_HF0)
+        }
+    }
+
+    fn long_lz_length_bit_cost(&self, length_code: u32) -> Option<usize> {
+        if self.avr_ln2 >= 122 {
+            decode_num_bit_cost(length_code, 3, DEC_L2, POS_L2)
+        } else if self.avr_ln2 >= 64 {
+            decode_num_bit_cost(length_code, 2, DEC_L1, POS_L1)
+        } else if length_code <= 7 {
+            Some(length_code as usize + 1)
+        } else if length_code < 0x100 {
+            Some(16)
+        } else {
+            None
+        }
+    }
+
+    fn long_lz_distance_bit_cost(&self, distance_place: usize) -> Option<usize> {
+        if self.avr_plc_b > 0x28ff {
+            decode_num_bit_cost(distance_place as u32, 5, DEC_HF2, POS_HF2)
+        } else if self.avr_plc_b > 0x06ff {
+            decode_num_bit_cost(distance_place as u32, 5, DEC_HF1, POS_HF1)
+        } else {
+            decode_num_bit_cost(distance_place as u32, 4, DEC_HF0, POS_HF0)
+        }
     }
 
     fn emit_stmode_exit(&mut self) -> Result<()> {
@@ -494,17 +756,79 @@ impl Default for Unpack15Encoder {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct LzPlanState {
+    last_dist: u32,
+    last_length: u32,
+    old_dist: [u32; 4],
+    old_dist_ptr: usize,
+    nlzb: u32,
+    nhfb: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EncodedToken {
     Literal(u8),
     ShortLz(ShortLz),
+    RepeatLast(RepeatLastLz),
+    OldDist(OldDistLz),
     LongLz(LongLz),
+}
+
+impl EncodedToken {
+    fn length(self) -> u32 {
+        match self {
+            Self::Literal(_) => 1,
+            Self::ShortLz(token) => token.length,
+            Self::RepeatLast(token) => token.length,
+            Self::OldDist(token) => token.length,
+            Self::LongLz(token) => token.length,
+        }
+    }
+
+    fn flag_bits(self, nlzb: u32, nhfb: u32) -> &'static [bool] {
+        match self {
+            Self::Literal(_) => huff_flag_bits(nlzb <= nhfb),
+            Self::LongLz(_) => long_lz_flag_bits(nlzb > nhfb),
+            Self::ShortLz(_) | Self::RepeatLast(_) | Self::OldDist(_) => &[false, false],
+        }
+    }
+
+    fn plan_effect(self, nhfb: &mut u32, nlzb: &mut u32) {
+        match self {
+            Self::Literal(_) => plan_huff_effect(nhfb, nlzb),
+            Self::LongLz(_) => plan_long_lz_effect(nhfb, nlzb),
+            Self::ShortLz(_) | Self::RepeatLast(_) | Self::OldDist(_) => {}
+        }
+    }
+
+    fn match_state(self) -> Option<(u32, u32)> {
+        match self {
+            Self::Literal(_) | Self::RepeatLast(_) => None,
+            Self::ShortLz(token) => Some((token.distance, token.length)),
+            Self::OldDist(token) => Some((token.distance, token.length)),
+            Self::LongLz(token) => Some((token.distance, token.length)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ShortLz {
     pub distance: u32,
     pub length: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RepeatLastLz {
+    pub distance: u32,
+    pub length: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OldDistLz {
+    pub distance: u32,
+    pub length: u32,
+    pub short_code: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -553,6 +877,88 @@ fn plan_long_lz_effect(nhfb: &mut u32, nlzb: &mut u32) {
     }
 }
 
+fn plan_remember_match(
+    old_dist: &mut [u32; 4],
+    old_dist_ptr: &mut usize,
+    last_dist: &mut u32,
+    last_length: &mut u32,
+    distance: u32,
+    length: u32,
+) {
+    old_dist[*old_dist_ptr] = distance;
+    *old_dist_ptr = (*old_dist_ptr + 1) & 3;
+    *last_dist = distance;
+    *last_length = length;
+}
+
+fn find_lz_token(
+    input: &[u8],
+    pos: usize,
+    last_dist: u32,
+    last_length: u32,
+    old_dist: [u32; 4],
+    old_dist_ptr: usize,
+    max_dist3: u32,
+) -> Option<EncodedToken> {
+    find_lz_tokens(
+        input,
+        pos,
+        last_dist,
+        last_length,
+        old_dist,
+        old_dist_ptr,
+        max_dist3,
+    )
+    .into_iter()
+    .next()
+}
+
+fn find_lz_tokens(
+    input: &[u8],
+    pos: usize,
+    last_dist: u32,
+    last_length: u32,
+    old_dist: [u32; 4],
+    old_dist_ptr: usize,
+    max_dist3: u32,
+) -> Vec<EncodedToken> {
+    let mut tokens = Vec::with_capacity(4);
+    if let Some(repeat) = find_repeat_last_lz(input, pos, last_dist, last_length) {
+        tokens.push(EncodedToken::RepeatLast(repeat));
+    }
+    if let Some(old_lz) = find_old_dist_lz(input, pos, old_dist, old_dist_ptr, max_dist3) {
+        tokens.push(EncodedToken::OldDist(old_lz));
+    }
+    if let Some(short_lz) = find_short_lz(input, pos) {
+        tokens.push(EncodedToken::ShortLz(short_lz));
+    }
+    if let Some(long_lz) = find_long_lz(input, pos)
+        .filter(|long_lz| long_lz_length_code_for_distance(*long_lz, max_dist3).is_some())
+    {
+        tokens.push(EncodedToken::LongLz(long_lz));
+    }
+    tokens
+}
+
+fn should_lazy_emit_literal(
+    input: &[u8],
+    pos: usize,
+    current: EncodedToken,
+    max_dist3: u32,
+) -> bool {
+    if !matches!(current, EncodedToken::ShortLz(_) | EncodedToken::LongLz(_))
+        || pos + 1 >= input.len()
+    {
+        return false;
+    }
+
+    let next = find_lz_token(input, pos + 1, u32::MAX, 0, [u32::MAX; 4], 0, max_dist3);
+    next.is_some_and(|next| {
+        matches!(next, EncodedToken::ShortLz(_) | EncodedToken::LongLz(_))
+            && next.length() >= current.length() + 2
+    })
+}
+
 fn find_short_lz(input: &[u8], pos: usize) -> Option<ShortLz> {
     if pos < 2 {
         return None;
@@ -580,6 +986,83 @@ fn find_short_lz(input: &[u8], pos: usize) -> Option<ShortLz> {
     }
 
     (best.length >= 3).then_some(best)
+}
+
+fn find_repeat_last_lz(
+    input: &[u8],
+    pos: usize,
+    last_dist: u32,
+    last_length: u32,
+) -> Option<RepeatLastLz> {
+    if last_dist == u32::MAX || last_dist == 0 || last_length == 0 {
+        return None;
+    }
+    let distance = usize::try_from(last_dist).ok()?;
+    let length = usize::try_from(last_length).ok()?;
+    if distance > pos || pos.checked_add(length)? > input.len() {
+        return None;
+    }
+    let matches = (0..length).all(|offset| input[pos + offset] == input[pos + offset - distance]);
+    matches.then_some(RepeatLastLz {
+        distance: last_dist,
+        length: last_length,
+    })
+}
+
+fn find_old_dist_lz(
+    input: &[u8],
+    pos: usize,
+    old_dist: [u32; 4],
+    old_dist_ptr: usize,
+    max_dist3: u32,
+) -> Option<OldDistLz> {
+    let mut best = OldDistLz {
+        distance: 0,
+        length: 0,
+        short_code: 0,
+    };
+    for short_code in 10..=13 {
+        let distance = old_dist[(old_dist_ptr.wrapping_sub((short_code - 9) as usize)) & 3];
+        if distance == u32::MAX || distance == 0 {
+            continue;
+        }
+        let Ok(distance_usize) = usize::try_from(distance) else {
+            continue;
+        };
+        if distance_usize > pos {
+            continue;
+        }
+        let mut length = 0usize;
+        while length < 258
+            && pos + length < input.len()
+            && input[pos + length] == input[pos + length - distance_usize]
+        {
+            length += 1;
+        }
+        if length >= 3
+            && old_dist_lz_length_code(length as u32, distance, max_dist3).is_some()
+            && length > best.length as usize
+        {
+            best = OldDistLz {
+                distance,
+                length: length as u32,
+                short_code,
+            };
+        }
+    }
+
+    (best.length >= 3).then_some(best)
+}
+
+fn old_dist_lz_length_code(length: u32, distance: u32, max_dist3: u32) -> Option<u32> {
+    let decoded_bonus = u32::from(distance > 256) + u32::from(distance >= max_dist3);
+    length.checked_sub(2 + decoded_bonus)
+}
+
+fn long_lz_length_code_for_distance(long_lz: LongLz, max_dist3: u32) -> Option<u32> {
+    let decoded_bonus =
+        u32::from(long_lz.distance >= max_dist3) + u32::from(long_lz.distance <= 256);
+    long_lz.length.checked_sub(3 + decoded_bonus)
 }
 
 pub fn find_long_lz(input: &[u8], pos: usize) -> Option<LongLz> {
@@ -651,6 +1134,24 @@ fn emit_decode_num(
     Err(Error::InvalidData(
         "RAR 1.3 DecodeNum value is not encodable",
     ))
+}
+
+fn decode_num_bit_cost(
+    target: u32,
+    start_pos: u32,
+    dec_tab: &[u16],
+    pos_tab: &[u16],
+) -> Option<usize> {
+    for len in start_pos as usize..=16 {
+        for code in 0..(1u32 << len) {
+            let bit_field = code << (16 - len);
+            let (decoded, consumed) = simulate_decode_num(bit_field, start_pos, dec_tab, pos_tab);
+            if decoded == target && consumed == len {
+                return Some(len);
+            }
+        }
+    }
+    None
 }
 
 fn simulate_decode_num(
@@ -1297,7 +1798,11 @@ fn corr_huff(char_set: &mut [u16; 256], num_to_place: &mut [u8; 256]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{find_long_lz, unpack15_decode, unpack15_encode, LongLz, Unpack15};
+    use super::{
+        find_long_lz, find_lz_token, find_old_dist_lz, should_lazy_emit_literal, unpack15_decode,
+        unpack15_encode, EncodedToken, LongLz, LzPlanState, OldDistLz, ShortLz, Unpack15,
+        Unpack15Encoder,
+    };
 
     #[test]
     fn decode_member_from_reader_accepts_incremental_input() {
@@ -1361,6 +1866,102 @@ mod tests {
         let packed = unpack15_encode(&input).unwrap();
 
         assert_eq!(unpack15_decode(&packed, input.len()).unwrap(), input);
+    }
+
+    #[test]
+    fn encoder_reuses_rar15_repeat_last_token() {
+        let input = b"abcdefghijklmnop".repeat(64);
+        let packed = unpack15_encode(&input).unwrap();
+
+        assert!(
+            packed.len() < 100,
+            "repeat-last tokens should keep a simple repeated pattern compact, got {} bytes",
+            packed.len()
+        );
+        assert_eq!(unpack15_decode(&packed, input.len()).unwrap(), input);
+    }
+
+    #[test]
+    fn old_distance_finder_maps_ring_entries_to_short_lz_codes() {
+        let mut input: Vec<_> = (0..80).map(|index| (index * 37 + 11) as u8).collect();
+        let pos = input.len();
+        input.extend_from_within(pos - 33..pos - 13);
+
+        assert_eq!(
+            find_old_dist_lz(&input, pos, [11, 22, 33, 44], 0, 0x2001),
+            Some(OldDistLz {
+                distance: 33,
+                length: 20,
+                short_code: 11,
+            })
+        );
+    }
+
+    #[test]
+    fn encoder_uses_stmode_for_long_literal_runs() {
+        let input: Vec<_> = (0..96).map(|index| (index * 73 + 19) as u8).collect();
+        let packed = unpack15_encode(&input).unwrap();
+        let literal_only = super::Unpack15Encoder::new()
+            .encode_literals_only(&input)
+            .unwrap();
+
+        assert!(
+            packed.len() < literal_only.len(),
+            "StMode should make literal-heavy payloads smaller than immediate-exit literal coding"
+        );
+        assert_eq!(unpack15_decode(&packed, input.len()).unwrap(), input);
+    }
+
+    #[test]
+    fn lazy_match_prefers_longer_next_position_match() {
+        let input = b"abcXbcQRSTabcQRSTUV";
+        let token = find_lz_token(input, 10, u32::MAX, 0, [u32::MAX; 4], 0, 0x2001).unwrap();
+
+        assert!(matches!(
+            token,
+            EncodedToken::ShortLz(super::ShortLz { length: 3, .. })
+        ));
+        assert!(should_lazy_emit_literal(input, 10, token, 0x2001));
+
+        let packed = unpack15_encode(input).unwrap();
+        assert_eq!(unpack15_decode(&packed, input.len()).unwrap(), input);
+    }
+
+    #[test]
+    fn cost_aware_selection_prefers_better_bits_per_byte_token() {
+        let mut input = vec![b'Z'; 40];
+        input[7] = b'A';
+        input[8] = b'A';
+        input[9] = b'A';
+        input[10] = b'B';
+        input[39] = b'A';
+        let pos = input.len();
+        input.extend_from_slice(b"AAAAAAAAAA");
+
+        let mut encoder = Unpack15Encoder::new();
+        encoder.old_dist = [u32::MAX, u32::MAX, u32::MAX, 33];
+        let token = encoder
+            .choose_lz_token(
+                &input,
+                pos,
+                LzPlanState {
+                    last_dist: u32::MAX,
+                    last_length: 0,
+                    old_dist: encoder.old_dist,
+                    old_dist_ptr: encoder.old_dist_ptr,
+                    nlzb: encoder.nlzb,
+                    nhfb: encoder.nhfb,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            token,
+            EncodedToken::ShortLz(ShortLz {
+                distance: 1,
+                length: 10,
+            })
+        );
     }
 }
 

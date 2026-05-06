@@ -1664,12 +1664,13 @@ fn decrypt_encrypted_header_at(
     let encrypted_end = encrypted_start
         .checked_add(encrypted_header_size)
         .ok_or(Error::InvalidHeader("RAR 1.5 block size overflows usize"))?;
-    let encrypted = archive
-        .get(encrypted_start..encrypted_end)
+    let encrypted_rest = archive
+        .get(offset + 24..encrypted_end)
         .ok_or(Error::TooShort)?;
-    let mut header = encrypted.to_vec();
-    let mut cipher = Rar30Cipher::new(password, Some(salt));
-    cipher.decrypt_in_place(&mut header);
+    let mut header = Vec::with_capacity(encrypted_header_size);
+    header.extend_from_slice(&first_block);
+    header.extend_from_slice(encrypted_rest);
+    cipher.decrypt_in_place(&mut header[16..]);
     header.truncate(head_size);
 
     let mut block = parse_block_header(&header, 0)?;
@@ -1718,9 +1719,11 @@ fn read_encrypted_header_at(
     if encrypted_start as u64 + encrypted_header_size as u64 > file_len {
         return Err(Error::TooShort);
     }
-    let mut header = read_exact_at(file, encrypted_start, encrypted_header_size)?;
-    let mut cipher = Rar30Cipher::new(password, Some(salt));
-    cipher.decrypt_in_place(&mut header);
+    let encrypted_rest = read_exact_at(file, encrypted_start + 16, encrypted_header_size - 16)?;
+    let mut header = Vec::with_capacity(encrypted_header_size);
+    header.extend_from_slice(&first_block);
+    header.extend_from_slice(&encrypted_rest);
+    cipher.decrypt_in_place(&mut header[16..]);
     header.truncate(head_size);
 
     let mut block = parse_block_header(&header, 0)?;

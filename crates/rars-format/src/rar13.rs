@@ -26,6 +26,7 @@ const LHD_PASSWORD: u8 = 0x04;
 const LHD_COMMENT: u8 = 0x08;
 const LHD_SOLID: u8 = 0x10;
 const METHOD_STORE: u8 = 0;
+const METHOD_BEST: u8 = 5;
 const DEFAULT_UNP_VER: u8 = 2;
 const MIN_STORE_FALLBACK_SIZE: usize = 1024;
 
@@ -1314,7 +1315,7 @@ pub fn write_compressed_archive_with_comment(
             packed = entry.data.to_vec();
             METHOD_STORE
         } else {
-            3
+            METHOD_BEST
         };
         if let Some(password) = entry.password {
             Rar13Cipher::new(password).encrypt_in_place(&mut packed);
@@ -1407,7 +1408,7 @@ pub fn write_compressed_volumes(
         packed: &packed,
         file_time: entry.file_time,
         file_attr: entry.file_attr,
-        method: 3,
+        method: METHOD_BEST,
         base_flags: 0,
         features: options.features,
         max_packed_per_volume,
@@ -2039,7 +2040,7 @@ mod tests {
         assert_eq!(archive.entries.len(), 1);
         assert_eq!(archive.entries[0].name, b"tiny.txt");
         assert!(!archive.entries[0].is_stored());
-        assert_eq!(archive.entries[0].header.method, 3);
+        assert_eq!(archive.entries[0].header.method, METHOD_BEST);
         assert!(archive.entries[0].header.pack_size > 0);
 
         let extracted = archive.extract(None).unwrap();
@@ -2061,7 +2062,7 @@ mod tests {
 
         let bytes = write_compressed_archive(&input, WriterOptions::default()).unwrap();
         let archive = Archive::parse(&bytes).unwrap();
-        assert_eq!(archive.entries[0].header.method, 3);
+        assert_eq!(archive.entries[0].header.method, METHOD_BEST);
 
         let extracted = archive.extract(None).unwrap();
         assert_eq!(extracted[0].data, data);
@@ -2081,7 +2082,7 @@ mod tests {
 
         let bytes = write_compressed_archive(&input, WriterOptions::default()).unwrap();
         let archive = Archive::parse(&bytes).unwrap();
-        assert_eq!(archive.entries[0].header.method, 3);
+        assert_eq!(archive.entries[0].header.method, METHOD_BEST);
         assert!(
             archive.entries[0].header.pack_size < data.len() as u32,
             "ShortLZ should make the repeated payload smaller than stored data"
@@ -2117,7 +2118,7 @@ mod tests {
             .len();
         let bytes = write_compressed_archive(&input, WriterOptions::default()).unwrap();
         let archive = Archive::parse(&bytes).unwrap();
-        assert_eq!(archive.entries[0].header.method, 3);
+        assert_eq!(archive.entries[0].header.method, METHOD_BEST);
         assert!(
             (archive.entries[0].header.pack_size as usize) < literal_only,
             "LongLZ should make a >256-byte-distance repeat smaller than literal-only output"
@@ -2210,7 +2211,7 @@ mod tests {
         let bytes = write_compressed_archive(&input, WriterOptions::default()).unwrap();
         let archive = Archive::parse(&bytes).unwrap();
         assert!(archive.entries[0].is_encrypted());
-        assert_eq!(archive.entries[0].header.method, 3);
+        assert_eq!(archive.entries[0].header.method, METHOD_BEST);
         assert!(matches!(archive.extract(None), Err(Error::NeedPassword)));
 
         let extracted = archive.extract(Some(b"pass")).unwrap();
@@ -2333,7 +2334,7 @@ mod tests {
 
         let bytes = write_compressed_archive(&input, WriterOptions::default()).unwrap();
         let archive = Archive::parse(&bytes).unwrap();
-        assert_eq!(archive.entries[0].header.method, 3);
+        assert_eq!(archive.entries[0].header.method, METHOD_BEST);
         assert_eq!(archive.entries[0].header.pack_size, 0);
 
         let extracted = archive.extract(None).unwrap();
