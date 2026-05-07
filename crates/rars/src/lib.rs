@@ -168,10 +168,10 @@ impl Archive {
         match self {
             Self::Rar13(archive) => archive.extract_to(password, |meta| open(&rar13_meta(meta))),
             Self::Rar15To40(archive) => {
-                archive.extract_to_with_password(password, |meta| open(&rar15_40_meta(meta)))
+                archive.extract_to(read_options(password), |meta| open(&rar15_40_meta(meta)))
             }
             Self::Rar50Plus(archive) => {
-                archive.extract_to_with_password(password, |meta| open(&rar50_meta(meta)?))
+                archive.extract_to(read_options(password), |meta| open(&rar50_meta(meta)?))
             }
         }
     }
@@ -391,13 +391,13 @@ where
         }
         ArchiveFamily::Rar15To40 => {
             let typed = rar15_40_volumes(archives)?;
-            rar15_40::extract_volumes_to_with_options(&typed, read_options(password), |meta| {
+            rar15_40::extract_volumes_to(&typed, read_options(password), |meta| {
                 open(&rar15_40_meta(meta))
             })
         }
         ArchiveFamily::Rar50Plus => {
             let typed = rar50_volumes(archives)?;
-            rar50::extract_volumes_to_with_options(&typed, read_options(password), |meta| {
+            rar50::extract_volumes_to(&typed, read_options(password), |meta| {
                 open(&rar50_meta(meta)?)
             })
         }
@@ -681,7 +681,7 @@ mod tests {
 
     fn collect_rar15_40(archive: &rar15_40::Archive) -> Result<Vec<CollectedEntry>> {
         let entries = RefCell::new(Vec::new());
-        archive.extract_to(|meta| {
+        archive.extract_to(ArchiveReadOptions::default(), |meta| {
             let data = Rc::new(RefCell::new(Vec::new()));
             entries.borrow_mut().push((meta.clone(), Rc::clone(&data)));
             Ok(Box::new(CollectWriter { data }))
@@ -704,7 +704,7 @@ mod tests {
         password: Option<&[u8]>,
     ) -> Result<Vec<CollectedEntry>> {
         let entries = RefCell::new(Vec::new());
-        rar15_40::extract_volumes_to_with_password(archives, password, |meta| {
+        rar15_40::extract_volumes_to(archives, read_options(password), |meta| {
             let data = Rc::new(RefCell::new(Vec::new()));
             entries.borrow_mut().push((meta.clone(), Rc::clone(&data)));
             Ok(Box::new(CollectWriter { data }))
@@ -727,7 +727,7 @@ mod tests {
         password: Option<&[u8]>,
     ) -> Result<Vec<CollectedEntry>> {
         let entries = RefCell::new(Vec::new());
-        rar50::extract_volumes_to_with_password(archives, password, |meta| {
+        rar50::extract_volumes_to(archives, read_options(password), |meta| {
             let data = Rc::new(RefCell::new(Vec::new()));
             entries.borrow_mut().push((meta.clone(), Rc::clone(&data)));
             Ok(Box::new(CollectWriter { data }))

@@ -13,9 +13,7 @@ mod blake2sp;
 mod extract;
 mod write;
 
-pub use extract::{
-    extract_volumes_to, extract_volumes_to_with_options, extract_volumes_to_with_password,
-};
+pub use extract::extract_volumes_to;
 pub use write::{
     ArchiveMetadataEntry, CompressedEntry, EncryptedArchiveCommentEntry, EncryptedCompressedEntry,
     EncryptedStoredEntry, EncryptedStoredEntryWithServices, EncryptedStoredServiceEntry,

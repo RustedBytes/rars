@@ -224,27 +224,9 @@ impl<'a> DecoderSession<'a> {
 }
 
 /// Streams a multivolume archive set to caller-provided writers.
-pub fn extract_volumes_to<F>(volumes: &[Archive], open: F) -> Result<()>
-where
-    F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
-{
-    extract_volumes_to_with_options(volumes, crate::ArchiveReadOptions::default(), open)
-}
-
-pub fn extract_volumes_to_with_options<F>(
+pub fn extract_volumes_to<F>(
     volumes: &[Archive],
     options: crate::ArchiveReadOptions<'_>,
-    open: F,
-) -> Result<()>
-where
-    F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
-{
-    extract_volumes_to_with_password(volumes, options.password, open)
-}
-
-pub fn extract_volumes_to_with_password<F>(
-    volumes: &[Archive],
-    password: Option<&[u8]>,
     mut open: F,
 ) -> Result<()>
 where
@@ -254,6 +236,7 @@ where
         return Err(Error::InvalidHeader("RAR 1.5 volume set is empty"));
     }
 
+    let password = options.password;
     let mut split = SplitVolumeState::new();
     let mut session = DecoderSession::new_with_password(
         volumes

@@ -338,18 +338,11 @@ fn map_rar50_crypto_error(error: rars_crypto::rar50::Error) -> Error {
 }
 
 impl Archive {
-    pub fn extract_to<F>(&self, open: F) -> Result<()>
+    pub fn extract_to<F>(&self, options: crate::ArchiveReadOptions<'_>, mut open: F) -> Result<()>
     where
         F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
     {
-        self.extract_to_with_password(None, open)
-    }
-
-    pub fn extract_to_with_password<F>(&self, password: Option<&[u8]>, mut open: F) -> Result<()>
-    where
-        F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
-    {
-        let mut session = DecoderSession::new_with_password(password);
+        let mut session = DecoderSession::new_with_password(options.password);
         for file in self.files() {
             if file.is_split_before() || file.is_split_after() {
                 return Err(Error::InvalidHeader(
@@ -496,27 +489,9 @@ impl FileHeader {
 }
 
 /// Streams a RAR 5 multivolume archive set to caller-provided writers.
-pub fn extract_volumes_to<F>(volumes: &[Archive], open: F) -> Result<()>
-where
-    F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
-{
-    extract_volumes_to_with_options(volumes, crate::ArchiveReadOptions::default(), open)
-}
-
-pub fn extract_volumes_to_with_options<F>(
+pub fn extract_volumes_to<F>(
     volumes: &[Archive],
     options: crate::ArchiveReadOptions<'_>,
-    open: F,
-) -> Result<()>
-where
-    F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
-{
-    extract_volumes_to_with_password(volumes, options.password, open)
-}
-
-pub fn extract_volumes_to_with_password<F>(
-    volumes: &[Archive],
-    password: Option<&[u8]>,
     mut open: F,
 ) -> Result<()>
 where
@@ -526,6 +501,7 @@ where
         return Err(Error::InvalidHeader("RAR 5 volume set is empty"));
     }
 
+    let password = options.password;
     let mut split = SplitVolumeState::new();
     let mut session = DecoderSession::new_with_password(password);
 
@@ -1080,9 +1056,11 @@ mod tests {
         let captured = Rc::new(RefCell::new(Vec::new()));
         let sink = captured.clone();
 
-        extract_volumes_to(&volumes, move |_meta| {
-            Ok(Box::new(SharedWriter(sink.clone())))
-        })
+        extract_volumes_to(
+            &volumes,
+            crate::ArchiveReadOptions::default(),
+            move |_meta| Ok(Box::new(SharedWriter(sink.clone()))),
+        )
         .unwrap();
 
         assert_eq!(&*captured.borrow(), &full);

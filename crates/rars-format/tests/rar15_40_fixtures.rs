@@ -1,11 +1,13 @@
 use rars_format::rar15_40::{
-    crc32, extract_volumes_to_with_password, repair_rev3_volumes_to, write_compressed_archive,
+    crc32, extract_volumes_to, repair_rev3_volumes_to, write_compressed_archive,
     write_compressed_archive_with_comment, write_compressed_volumes,
     write_rar29_compressed_archive_with_filter_policy, write_stored_archive,
     write_stored_archive_with_comment, write_stored_volumes, Archive, Block, FileEntry, FilterKind,
     FilterPolicy, FilterSpec, NewSubKind, ProtectHeader, StoredEntry, WriterOptions,
 };
-use rars_format::{detect_archive_family, ArchiveFamily, ArchiveVersion, Error, FeatureSet};
+use rars_format::{
+    detect_archive_family, ArchiveFamily, ArchiveReadOptions, ArchiveVersion, Error, FeatureSet,
+};
 use std::cell::RefCell;
 use std::io::{Result as IoResult, Write};
 use std::path::{Path, PathBuf};
@@ -69,7 +71,7 @@ fn collect_extract_with_password(
     password: Option<&[u8]>,
 ) -> Result<Vec<CollectedEntry>, Error> {
     let entries = RefCell::new(Vec::new());
-    archive.extract_to_with_password(password, |meta| {
+    archive.extract_to(read_options(password), |meta| {
         let data = Rc::new(RefCell::new(Vec::new()));
         entries.borrow_mut().push((meta.clone(), Rc::clone(&data)));
         Ok(Box::new(CollectWriter { data }))
@@ -129,7 +131,7 @@ fn collect_extract_volumes_with_password(
     password: Option<&[u8]>,
 ) -> Result<Vec<CollectedEntry>, Error> {
     let entries = RefCell::new(Vec::new());
-    extract_volumes_to_with_password(archives, password, |meta| {
+    extract_volumes_to(archives, read_options(password), |meta| {
         let data = Rc::new(RefCell::new(Vec::new()));
         entries.borrow_mut().push((meta.clone(), Rc::clone(&data)));
         Ok(Box::new(CollectWriter { data }))
@@ -146,6 +148,13 @@ fn collect_extract_volumes_with_password(
             is_directory: meta.is_directory,
         })
         .collect())
+}
+
+fn read_options(password: Option<&[u8]>) -> ArchiveReadOptions<'_> {
+    match password {
+        Some(password) => ArchiveReadOptions::with_password(password),
+        None => ArchiveReadOptions::default(),
+    }
 }
 
 fn repair_rev3_volumes(
@@ -1552,7 +1561,9 @@ fn extract_to_reports_rar15_entry_context_on_write_failure() {
     let bytes = std::fs::read(fixture("rars_generated/stored.rar")).unwrap();
     let archive = Archive::parse(&bytes).unwrap();
     let error = archive
-        .extract_to_with_password(None, |_meta| Ok(Box::new(FailWriter)))
+        .extract_to(ArchiveReadOptions::default(), |_meta| {
+            Ok(Box::new(FailWriter))
+        })
         .unwrap_err();
 
     match error {

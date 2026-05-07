@@ -1,12 +1,15 @@
 use rars_codec::rar50::{decode_lz, parse_compressed_block, read_table_lengths, DecodeTables};
 use rars_format::rar50::{
-    extract_volumes_to_with_password, repair_inline_recovery_bytes, repair_rev5_volumes_to,
-    Archive, ArchiveMetadataEntry, EncryptedArchiveCommentEntry, EncryptedCompressedEntry,
+    extract_volumes_to, repair_inline_recovery_bytes, repair_rev5_volumes_to, Archive,
+    ArchiveMetadataEntry, EncryptedArchiveCommentEntry, EncryptedCompressedEntry,
     EncryptedStoredEntry, EncryptedStoredEntryWithServices, EncryptedStoredServiceEntry,
     FilterKind, FilterPolicy, Rev5Volume, Rev5VolumeMeta, StoredEntryWithServices,
     StoredServiceEntry,
 };
-use rars_format::{detect_archive_family, rar50, ArchiveFamily, ArchiveVersion, Error, FeatureSet};
+use rars_format::{
+    detect_archive_family, rar50, ArchiveFamily, ArchiveReadOptions, ArchiveVersion, Error,
+    FeatureSet,
+};
 use rars_recovery::rar5::crc64_xz;
 use std::cell::RefCell;
 use std::fs;
@@ -62,7 +65,7 @@ fn collect_extract_with_password(
     password: Option<&[u8]>,
 ) -> Result<Vec<CollectedEntry>, Error> {
     let entries = RefCell::new(Vec::new());
-    archive.extract_to_with_password(password, |meta| {
+    archive.extract_to(read_options(password), |meta| {
         let data = Rc::new(RefCell::new(Vec::new()));
         entries.borrow_mut().push((meta.clone(), Rc::clone(&data)));
         Ok(Box::new(CollectWriter { data }))
@@ -111,7 +114,7 @@ fn collect_extract_volumes_with_password(
     password: Option<&[u8]>,
 ) -> Result<Vec<CollectedEntry>, Error> {
     let entries = RefCell::new(Vec::new());
-    extract_volumes_to_with_password(archives, password, |meta| {
+    extract_volumes_to(archives, read_options(password), |meta| {
         let data = Rc::new(RefCell::new(Vec::new()));
         entries.borrow_mut().push((meta.clone(), Rc::clone(&data)));
         Ok(Box::new(CollectWriter { data }))
@@ -128,6 +131,13 @@ fn collect_extract_volumes_with_password(
             is_directory: meta.is_directory,
         })
         .collect())
+}
+
+fn read_options(password: Option<&[u8]>) -> ArchiveReadOptions<'_> {
+    match password {
+        Some(password) => ArchiveReadOptions::with_password(password),
+        None => ArchiveReadOptions::default(),
+    }
 }
 
 fn repair_rev5_volumes(
@@ -3579,7 +3589,7 @@ fn extract_to_reports_rar50_entry_context_on_write_failure() {
     let archive = Archive::parse(&bytes).unwrap();
 
     assert!(matches!(
-        archive.extract_to(|_| Ok(Box::new(FailingWriter))),
+        archive.extract_to(ArchiveReadOptions::default(), |_| Ok(Box::new(FailingWriter))),
         Err(Error::AtEntry {
             name,
             operation: "writing",

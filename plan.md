@@ -19,9 +19,12 @@ serialization.
 
 ### 1. Pre-release Hardening
 
-- Audit extraction paths that still buffer decoded output despite the streaming
-  API: bounded-buffer RAR5 compressed members, RAR 1.5-4.x compressed members,
-  encrypted entries, and compressed split-volume reassembly.
+- Add streaming decryptors for encrypted payload paths. RAR15/20/30 and RAR5
+  currently decrypt payload bytes into bounded in-memory buffers before feeding
+  codecs because the cipher APIs are in-place.
+- Reduce remaining codec-level buffers where the decoder state machines still
+  require whole-member decode paths: encrypted RAR15/RAR20/RAR29 entries and
+  any compressed split-volume path that must decrypt before chaining.
 
 ### 2. Compression Quality
 
@@ -49,7 +52,6 @@ serialization.
 
 ### 5. API And Error Model
 
-- Pick one `extract_to` shape across the facade and per-version modules.
 - Decide whether the umbrella `ArchiveWriter` should remain public or whether
   callers should use per-version writer builders directly.
 - Apply the RAR5 builder pattern to RAR 1.5-4.x writing if another independent

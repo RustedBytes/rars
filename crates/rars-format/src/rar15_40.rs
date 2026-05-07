@@ -17,10 +17,8 @@ use std::sync::Arc;
 
 mod extract;
 mod write;
+pub use extract::extract_volumes_to;
 use extract::DecoderSession;
-pub use extract::{
-    extract_volumes_to, extract_volumes_to_with_options, extract_volumes_to_with_password,
-};
 pub use write::{
     write_compressed_archive, write_compressed_archive_with_comment, write_compressed_volumes,
     write_rar29_compressed_archive_with_filter_policy, write_stored_archive,
@@ -1083,17 +1081,11 @@ impl Archive {
     }
 
     /// Streams extracted entries to caller-provided writers.
-    pub fn extract_to<F>(&self, open: F) -> Result<()>
+    pub fn extract_to<F>(&self, options: crate::ArchiveReadOptions<'_>, mut open: F) -> Result<()>
     where
         F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
     {
-        self.extract_to_with_password(None, open)
-    }
-
-    pub fn extract_to_with_password<F>(&self, password: Option<&[u8]>, mut open: F) -> Result<()>
-    where
-        F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
-    {
+        let password = options.password;
         let mut session = DecoderSession::new_with_password(self.main.is_solid(), password);
         for file in self.files() {
             if file.is_split_before() || file.is_split_after() {

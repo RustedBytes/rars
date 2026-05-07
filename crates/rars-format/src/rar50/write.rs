@@ -2787,7 +2787,7 @@ mod tests {
 
     fn collect_extract(archive: &Archive) -> Result<Vec<CollectedEntry>> {
         let entries = RefCell::new(Vec::new());
-        archive.extract_to(|meta| {
+        archive.extract_to(crate::ArchiveReadOptions::default(), |meta| {
             let data = Rc::new(RefCell::new(Vec::new()));
             entries.borrow_mut().push((meta.clone(), Rc::clone(&data)));
             Ok(Box::new(CollectWriter(data)))

@@ -1,5 +1,5 @@
 use rars_format::rar15_40::Archive;
-use rars_format::Result;
+use rars_format::{ArchiveReadOptions, Result};
 use std::cell::RefCell;
 use std::io::{Result as IoResult, Write};
 use std::path::{Path, PathBuf};
@@ -33,7 +33,7 @@ impl Write for CollectWriter {
 
 fn collect_extract(archive: &Archive) -> Result<Vec<CollectedEntry>> {
     let entries = RefCell::new(Vec::new());
-    archive.extract_to(|meta| {
+    archive.extract_to(ArchiveReadOptions::default(), |meta| {
         let data = Rc::new(RefCell::new(Vec::new()));
         entries.borrow_mut().push((meta.clone(), Rc::clone(&data)));
         Ok(Box::new(CollectWriter { data }))
@@ -80,7 +80,7 @@ fn vm_filter_control_stream_accepts_32_bit_encoded_integers() {
 
     let mut extracted = Vec::new();
     archive
-        .extract_to(|meta| {
+        .extract_to(ArchiveReadOptions::default(), |meta| {
             extracted.push(meta.name.clone());
             Ok(Box::new(std::io::sink()))
         })
