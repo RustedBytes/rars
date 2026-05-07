@@ -600,3 +600,189 @@ impl<R: Read> Read for DecryptingReader<R> {
         Ok(count)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::{
+        ArchiveSource, Block, BlockHeader, MainHeader, FHD_DIRECTORY_MASK, FHD_PASSWORD,
+        FHD_SPLIT_AFTER, FHD_SPLIT_BEFORE,
+    };
+    use super::*;
+    use std::sync::Arc;
+
+    fn block(flags: u16) -> BlockHeader {
+        BlockHeader {
+            head_crc: 0,
+            head_type: 0x74,
+            flags,
+            head_size: 0,
+            add_size: Some(0),
+            offset: 0,
+        }
+    }
+
+    fn file(name: &[u8], flags: u16) -> FileHeader {
+        FileHeader {
+            block: block(flags),
+            pack_size: 0,
+            unp_size: 0,
+            host_os: 2,
+            file_crc: 0,
+            file_time: 0,
+            unp_ver: 29,
+            method: 0x30,
+            name: name.to_vec(),
+            attr: 0x20,
+            salt: None,
+            file_comment: Vec::new(),
+            ext_time: Vec::new(),
+            packed_range: 0..0,
+        }
+    }
+
+    #[test]
+    fn validate_split_fragment_rejects_directories_and_demands_password_for_encrypted() {
+        let dir = file(b"d", FHD_DIRECTORY_MASK | FHD_SPLIT_AFTER);
+        assert!(matches!(
+            validate_split_fragment(&dir, None),
+            Err(Error::InvalidHeader(_))
+        ));
+
+        let encrypted = file(b"a", FHD_PASSWORD | FHD_SPLIT_AFTER);
+        assert!(matches!(
+            validate_split_fragment(&encrypted, None),
+            Err(Error::NeedPassword)
+        ));
+        validate_split_fragment(&encrypted, Some(b"pw")).unwrap();
+
+        let plain = file(b"a", FHD_SPLIT_AFTER);
+        validate_split_fragment(&plain, None).unwrap();
+    }
+
+    #[test]
+    fn validate_split_continuation_refs_rejects_property_drift_between_fragments() {
+        let first = file(b"a.txt", FHD_SPLIT_AFTER);
+        let pending = PendingSplitRefs::new(&first, 0, 0);
+
+        let renamed = file(b"b.txt", FHD_SPLIT_BEFORE);
+        assert!(matches!(
+            validate_split_continuation_refs(&pending, &renamed, None),
+            Err(Error::InvalidHeader(_))
+        ));
+
+        let mut new_method = file(b"a.txt", FHD_SPLIT_BEFORE);
+        new_method.method = 0x35;
+        assert!(matches!(
+            validate_split_continuation_refs(&pending, &new_method, None),
+            Err(Error::InvalidHeader(_))
+        ));
+
+        let mut new_version = file(b"a.txt", FHD_SPLIT_BEFORE);
+        new_version.unp_ver = 20;
+        assert!(matches!(
+            validate_split_continuation_refs(&pending, &new_version, None),
+            Err(Error::InvalidHeader(_))
+        ));
+
+        let new_encryption = file(b"a.txt", FHD_PASSWORD | FHD_SPLIT_BEFORE);
+        assert!(matches!(
+            validate_split_continuation_refs(&pending, &new_encryption, Some(b"pw")),
+            Err(Error::InvalidHeader(_))
+        ));
+
+        let same = file(b"a.txt", FHD_SPLIT_BEFORE);
+        validate_split_continuation_refs(&pending, &same, None).unwrap();
+    }
+
+    #[test]
+    fn validate_split_continuation_refs_rejects_salt_drift_for_rar3_encrypted_entries() {
+        let mut first = file(b"a.txt", FHD_PASSWORD | FHD_SPLIT_AFTER);
+        first.salt = Some([1u8; 8]);
+        let pending = PendingSplitRefs::new(&first, 0, 0);
+
+        let mut other_salt = file(b"a.txt", FHD_PASSWORD | FHD_SPLIT_BEFORE);
+        other_salt.salt = Some([2u8; 8]);
+        assert!(matches!(
+            validate_split_continuation_refs(&pending, &other_salt, Some(b"pw")),
+            Err(Error::InvalidHeader(_))
+        ));
+
+        let mut same_salt = file(b"a.txt", FHD_PASSWORD | FHD_SPLIT_BEFORE);
+        same_salt.salt = Some([1u8; 8]);
+        validate_split_continuation_refs(&pending, &same_salt, Some(b"pw")).unwrap();
+    }
+
+    fn empty_archive() -> Archive {
+        Archive {
+            sfx_offset: 0,
+            main: MainHeader {
+                head_crc: 0,
+                flags: 0,
+                head_size: 0,
+                reserved1: 0,
+                reserved2: 0,
+                encrypt_version: None,
+            },
+            blocks: Vec::new(),
+            source: ArchiveSource::Memory(Arc::from(Vec::new().into_boxed_slice())),
+        }
+    }
+
+    fn archive_with(blocks: Vec<Block>) -> Archive {
+        let mut archive = empty_archive();
+        archive.blocks = blocks;
+        archive
+    }
+
+    fn never_open(_meta: &ExtractedEntryMeta) -> Result<Box<dyn Write>> {
+        panic!("open should not be invoked for this test");
+    }
+
+    #[test]
+    fn extract_volumes_to_rejects_split_state_violations() {
+        let empty: Vec<Archive> = Vec::new();
+        assert!(matches!(
+            extract_volumes_to(&empty, crate::ArchiveReadOptions::default(), never_open),
+            Err(Error::InvalidHeader(_))
+        ));
+
+        let only_continuation = vec![archive_with(vec![Block::File(file(
+            b"a.txt",
+            FHD_SPLIT_BEFORE,
+        ))])];
+        assert!(matches!(
+            extract_volumes_to(
+                &only_continuation,
+                crate::ArchiveReadOptions::default(),
+                never_open,
+            ),
+            Err(Error::InvalidHeader(_))
+        ));
+
+        let interrupted = vec![archive_with(vec![
+            Block::File(file(b"a.txt", FHD_SPLIT_AFTER)),
+            Block::File(file(b"unrelated", 0)),
+        ])];
+        assert!(matches!(
+            extract_volumes_to(
+                &interrupted,
+                crate::ArchiveReadOptions::default(),
+                never_open,
+            ),
+            Err(Error::InvalidHeader(_))
+        ));
+
+        let incomplete = vec![archive_with(vec![Block::File(file(
+            b"a.txt",
+            FHD_SPLIT_AFTER,
+        ))])];
+        assert!(matches!(
+            extract_volumes_to(
+                &incomplete,
+                crate::ArchiveReadOptions::default(),
+                never_open,
+            ),
+            Err(Error::InvalidHeader(_))
+        ));
+    }
+}

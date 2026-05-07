@@ -331,4 +331,119 @@ mod tests {
             "RAR 5 recovery data cannot repair this many damaged shards"
         );
     }
+
+    #[test]
+    fn simple_display_variants_render_their_messages() {
+        assert_eq!(Error::TooShort.to_string(), "input is too short");
+        assert_eq!(
+            Error::UnsupportedSignature.to_string(),
+            "unsupported archive signature"
+        );
+        assert_eq!(Error::NeedPassword.to_string(), "a password is required");
+        assert_eq!(
+            Error::WrongPasswordOrCorruptData.to_string(),
+            "wrong password or corrupt encrypted data"
+        );
+        assert_eq!(
+            Error::HashMismatch { hash_type: 7 }.to_string(),
+            "hash mismatch for hash type 7"
+        );
+        assert_eq!(
+            Error::CrcMismatch {
+                expected: 0xabcd,
+                actual: 0x1234
+            }
+            .to_string(),
+            "checksum mismatch: expected 0xabcd, got 0x1234"
+        );
+        assert_eq!(
+            Error::UnsupportedVersion(ArchiveVersion::Rar50).to_string(),
+            "unsupported version: Rar50"
+        );
+        assert_eq!(
+            Error::UnsupportedFeature {
+                version: ArchiveVersion::Rar50,
+                feature: "quantum compression",
+            }
+            .to_string(),
+            "feature quantum compression is not supported by Rar50"
+        );
+    }
+
+    #[test]
+    fn rar3_recovery_errors_render_messages_through_from_conversion() {
+        assert_eq!(
+            Error::from(rars_recovery::rar3::Error::InvalidParitySize).to_string(),
+            "RAR 3 recovery parity size is invalid"
+        );
+        assert_eq!(
+            Error::from(rars_recovery::rar3::Error::InvalidCodewordSize).to_string(),
+            "RAR 3 recovery codeword size is invalid"
+        );
+        assert_eq!(
+            Error::from(rars_recovery::rar3::Error::TooManyErasures).to_string(),
+            "RAR 3 recovery data cannot repair this many erasures"
+        );
+        assert_eq!(
+            Error::from(rars_recovery::rar3::Error::DecodeFailed).to_string(),
+            "RAR 3 recovery decode failed"
+        );
+    }
+
+    #[test]
+    fn rar5_recovery_errors_render_messages_for_every_named_variant() {
+        let cases = [
+            (
+                rars_recovery::rar5::Error::BadRecoveryChunk,
+                "RAR 5 recovery chunk is invalid",
+            ),
+            (
+                rars_recovery::rar5::Error::OddShardSize,
+                "RAR 5 recovery shard size is odd",
+            ),
+            (
+                rars_recovery::rar5::Error::PlanOverflow,
+                "RAR 5 recovery plan overflows",
+            ),
+            (
+                rars_recovery::rar5::Error::PrefixExceedsPlan,
+                "RAR 5 recovery prefix exceeds planned shard capacity",
+            ),
+            (
+                rars_recovery::rar5::Error::ShardSizeMismatch,
+                "RAR 5 recovery shard sizes differ",
+            ),
+            (
+                rars_recovery::rar5::Error::TooManyShards,
+                "RAR 5 recovery shard count is invalid",
+            ),
+            (
+                rars_recovery::rar5::Error::SingularElement,
+                "RAR 5 recovery matrix is singular",
+            ),
+        ];
+        for (variant, expected) in cases {
+            assert_eq!(Error::from(variant).to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn rar50_crypto_errors_render_messages_through_from_conversion() {
+        assert_eq!(
+            Error::from(rars_crypto::rar50::Error::KdfCountTooLarge).to_string(),
+            "RAR 5 KDF count is too large"
+        );
+        assert_eq!(
+            Error::from(rars_crypto::rar50::Error::BadPassword).to_string(),
+            "wrong password or corrupt encrypted data"
+        );
+    }
+
+    #[test]
+    fn codec_invalid_data_display_uses_inner_message() {
+        assert_eq!(
+            Error::from(rars_codec::Error::InvalidData("bad symbol")).to_string(),
+            "bad symbol"
+        );
+    }
 }
