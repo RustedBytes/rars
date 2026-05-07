@@ -48,6 +48,10 @@ pub enum Error {
     HashMismatch {
         hash_type: u64,
     },
+    Codec(rars_codec::Error),
+    Rar3Recovery(rars_recovery::rar3::Error),
+    Rar5Recovery(rars_recovery::rar5::Error),
+    Rar50Crypto(rars_crypto::rar50::Error),
 }
 
 impl std::fmt::Display for Error {
@@ -109,6 +113,10 @@ impl std::fmt::Display for Error {
             Self::HashMismatch { hash_type } => {
                 write!(f, "hash mismatch for hash type {hash_type}")
             }
+            Self::Codec(error) => write!(f, "{}", display_codec_error(error)),
+            Self::Rar3Recovery(error) => write!(f, "{}", display_rar3_recovery_error(error)),
+            Self::Rar5Recovery(error) => write!(f, "{}", display_rar5_recovery_error(error)),
+            Self::Rar50Crypto(error) => write!(f, "{}", display_rar50_crypto_error(error)),
         }
     }
 }
@@ -126,6 +134,7 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::AtArchiveOffset { source, .. } | Self::AtEntry { source, .. } => Some(source),
+            Self::Codec(source) => Some(source),
             _ => None,
         }
     }
@@ -150,63 +159,73 @@ impl Error {
 
 impl From<rars_codec::Error> for Error {
     fn from(error: rars_codec::Error) -> Self {
-        match error {
-            rars_codec::Error::InvalidData(message) => Self::InvalidHeader(message),
-            rars_codec::Error::NeedMoreInput => Self::InvalidHeader("codec input is truncated"),
-            _ => Self::InvalidHeader("codec error"),
-        }
+        Self::Codec(error)
     }
 }
 
 impl From<rars_recovery::rar5::Error> for Error {
     fn from(error: rars_recovery::rar5::Error) -> Self {
-        match error {
-            rars_recovery::rar5::Error::BadRecoveryChunk => {
-                Self::InvalidHeader("RAR 5 recovery chunk is invalid")
-            }
-            rars_recovery::rar5::Error::OddShardSize => {
-                Self::InvalidHeader("RAR 5 recovery shard size is odd")
-            }
-            rars_recovery::rar5::Error::PlanOverflow => {
-                Self::InvalidHeader("RAR 5 recovery plan overflows")
-            }
-            rars_recovery::rar5::Error::PrefixExceedsPlan => {
-                Self::InvalidHeader("RAR 5 recovery prefix exceeds planned shard capacity")
-            }
-            rars_recovery::rar5::Error::TooManyDamagedShards => {
-                Self::InvalidHeader("RAR 5 recovery data cannot repair this many damaged shards")
-            }
-            rars_recovery::rar5::Error::ShardSizeMismatch => {
-                Self::InvalidHeader("RAR 5 recovery shard sizes differ")
-            }
-            rars_recovery::rar5::Error::TooManyShards => {
-                Self::InvalidHeader("RAR 5 recovery shard count is invalid")
-            }
-            rars_recovery::rar5::Error::SingularElement => {
-                Self::InvalidHeader("RAR 5 recovery matrix is singular")
-            }
-            _ => Self::InvalidHeader("RAR 5 recovery error"),
-        }
+        Self::Rar5Recovery(error)
     }
 }
 
 impl From<rars_recovery::rar3::Error> for Error {
     fn from(error: rars_recovery::rar3::Error) -> Self {
-        match error {
-            rars_recovery::rar3::Error::InvalidParitySize => {
-                Self::InvalidHeader("RAR 3 recovery parity size is invalid")
-            }
-            rars_recovery::rar3::Error::InvalidCodewordSize => {
-                Self::InvalidHeader("RAR 3 recovery codeword size is invalid")
-            }
-            rars_recovery::rar3::Error::TooManyErasures => {
-                Self::InvalidHeader("RAR 3 recovery data cannot repair this many erasures")
-            }
-            rars_recovery::rar3::Error::DecodeFailed => {
-                Self::InvalidHeader("RAR 3 recovery decode failed")
-            }
-            _ => Self::InvalidHeader("RAR 3 recovery error"),
+        Self::Rar3Recovery(error)
+    }
+}
+
+impl From<rars_crypto::rar50::Error> for Error {
+    fn from(error: rars_crypto::rar50::Error) -> Self {
+        Self::Rar50Crypto(error)
+    }
+}
+
+fn display_codec_error(error: &rars_codec::Error) -> &'static str {
+    match error {
+        rars_codec::Error::InvalidData(message) => message,
+        rars_codec::Error::NeedMoreInput => "codec input is truncated",
+        _ => "codec error",
+    }
+}
+
+fn display_rar5_recovery_error(error: &rars_recovery::rar5::Error) -> &'static str {
+    match error {
+        rars_recovery::rar5::Error::BadRecoveryChunk => "RAR 5 recovery chunk is invalid",
+        rars_recovery::rar5::Error::OddShardSize => "RAR 5 recovery shard size is odd",
+        rars_recovery::rar5::Error::PlanOverflow => "RAR 5 recovery plan overflows",
+        rars_recovery::rar5::Error::PrefixExceedsPlan => {
+            "RAR 5 recovery prefix exceeds planned shard capacity"
         }
+        rars_recovery::rar5::Error::TooManyDamagedShards => {
+            "RAR 5 recovery data cannot repair this many damaged shards"
+        }
+        rars_recovery::rar5::Error::ShardSizeMismatch => "RAR 5 recovery shard sizes differ",
+        rars_recovery::rar5::Error::TooManyShards => "RAR 5 recovery shard count is invalid",
+        rars_recovery::rar5::Error::SingularElement => "RAR 5 recovery matrix is singular",
+        _ => "RAR 5 recovery error",
+    }
+}
+
+fn display_rar3_recovery_error(error: &rars_recovery::rar3::Error) -> &'static str {
+    match error {
+        rars_recovery::rar3::Error::InvalidParitySize => "RAR 3 recovery parity size is invalid",
+        rars_recovery::rar3::Error::InvalidCodewordSize => {
+            "RAR 3 recovery codeword size is invalid"
+        }
+        rars_recovery::rar3::Error::TooManyErasures => {
+            "RAR 3 recovery data cannot repair this many erasures"
+        }
+        rars_recovery::rar3::Error::DecodeFailed => "RAR 3 recovery decode failed",
+        _ => "RAR 3 recovery error",
+    }
+}
+
+fn display_rar50_crypto_error(error: &rars_crypto::rar50::Error) -> &'static str {
+    match error {
+        rars_crypto::rar50::Error::KdfCountTooLarge => "RAR 5 KDF count is too large",
+        rars_crypto::rar50::Error::BadPassword => "wrong password or corrupt encrypted data",
+        _ => "RAR 5 crypto error",
     }
 }
 
@@ -281,6 +300,35 @@ mod tests {
             }
             .to_string(),
             "RAR 1.5-4.x encryption is not supported: unpack version 14"
+        );
+    }
+
+    #[test]
+    fn codec_errors_remain_inspectable_without_changing_display_text() {
+        let error = Error::from(rars_codec::Error::NeedMoreInput);
+
+        assert!(matches!(
+            error,
+            Error::Codec(rars_codec::Error::NeedMoreInput)
+        ));
+        assert_eq!(error.to_string(), "codec input is truncated");
+        assert_eq!(
+            std::error::Error::source(&error).map(ToString::to_string),
+            Some("more input is required".to_string())
+        );
+    }
+
+    #[test]
+    fn recovery_errors_remain_inspectable_without_changing_display_text() {
+        let error = Error::from(rars_recovery::rar5::Error::TooManyDamagedShards);
+
+        assert!(matches!(
+            error,
+            Error::Rar5Recovery(rars_recovery::rar5::Error::TooManyDamagedShards)
+        ));
+        assert_eq!(
+            error.to_string(),
+            "RAR 5 recovery data cannot repair this many damaged shards"
         );
     }
 }

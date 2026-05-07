@@ -177,8 +177,8 @@ fn parses_rar140_inline_av_shape_fixture() {
     assert_eq!(av.prefix, *b"\x1ai\x6d\x02\xda\xae");
     assert_eq!(av.cipher_body.len(), 38);
     assert_eq!(
-        archive.verify_authenticity_verification().unwrap(),
-        rars_format::rar13::AuthenticityVerificationStatus::StructurallyValid
+        archive.authenticity_verification_status().unwrap(),
+        rars_format::rar13::AuthenticityVerificationStatus::StructurallyPresent
     );
 
     let extracted = collect_extract(&archive, None).expect("extract AV-bearing archive");
@@ -192,7 +192,7 @@ fn reports_absent_av_on_rar140_control_fixture() {
     assert!(!archive.main.has_authenticity_verification());
     assert!(archive.authenticity_verification().unwrap().is_none());
     assert_eq!(
-        archive.verify_authenticity_verification().unwrap(),
+        archive.authenticity_verification_status().unwrap(),
         rars_format::rar13::AuthenticityVerificationStatus::Absent
     );
 }

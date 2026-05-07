@@ -405,7 +405,7 @@ fn rejects_wrong_password() {
     assert!(!output.status.success());
     let stderr = stderr(&output);
     assert!(stderr.contains("failed to test archive"));
-    assert!(stderr.contains("invalid header") || stderr.contains("checksum mismatch"));
+    assert!(stderr.contains("wrong password or corrupt encrypted data"));
 }
 
 #[test]

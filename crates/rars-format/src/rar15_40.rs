@@ -514,6 +514,10 @@ impl FileHeader {
             | Error::AtArchiveOffset { .. }
             | Error::AtEntry { .. } => error,
             Error::InvalidHeader(_)
+            | Error::Codec(_)
+            | Error::Rar3Recovery(_)
+            | Error::Rar5Recovery(_)
+            | Error::Rar50Crypto(_)
             | Error::CrcMismatch { .. }
             | Error::Crc32Mismatch { .. }
             | Error::HashMismatch { .. }

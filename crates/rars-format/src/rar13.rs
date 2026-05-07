@@ -88,7 +88,7 @@ pub struct AuthenticityVerification {
 #[non_exhaustive]
 pub enum AuthenticityVerificationStatus {
     Absent,
-    StructurallyValid,
+    StructurallyPresent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -522,9 +522,9 @@ impl Archive {
         }))
     }
 
-    pub fn verify_authenticity_verification(&self) -> Result<AuthenticityVerificationStatus> {
+    pub fn authenticity_verification_status(&self) -> Result<AuthenticityVerificationStatus> {
         Ok(if self.authenticity_verification()?.is_some() {
-            AuthenticityVerificationStatus::StructurallyValid
+            AuthenticityVerificationStatus::StructurallyPresent
         } else {
             AuthenticityVerificationStatus::Absent
         })
@@ -720,6 +720,18 @@ impl Entry {
             Error::NeedPassword | Error::WrongPasswordOrCorruptData
         ) {
             return error;
+        }
+        if self.is_encrypted()
+            && matches!(
+                error,
+                Error::InvalidHeader(_)
+                    | Error::Codec(_)
+                    | Error::CrcMismatch { .. }
+                    | Error::Crc32Mismatch { .. }
+                    | Error::HashMismatch { .. }
+            )
+        {
+            return Error::WrongPasswordOrCorruptData;
         }
         error.at_entry(self.name.clone(), operation)
     }

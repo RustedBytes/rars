@@ -4403,7 +4403,10 @@ fn rejects_corrupt_compressed_rar300_newsub_recovery_record_fixture() {
     let err = archive.repair_protect_head().unwrap_err();
     assert!(matches!(
         err,
-        Error::InvalidHeader(_) | Error::Crc32Mismatch { .. } | Error::CrcMismatch { .. }
+        Error::InvalidHeader(_)
+            | Error::Codec(_)
+            | Error::Crc32Mismatch { .. }
+            | Error::CrcMismatch { .. }
     ));
 }
 

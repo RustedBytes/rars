@@ -49,8 +49,6 @@ serialization.
 - Add adversarial PPMd fixtures as corpus bugs appear.
 - Keep the libarchive mixed encrypted fixture as a partial oracle only for the
   RAR 3.93-validated `b.txt` member.
-- Rename or reshape authenticity-verification APIs so structural AV presence is
-  not confused with cryptographic verification.
 
 ### 5. RAR 5.0/7.x Reader And Recovery
 
@@ -64,8 +62,6 @@ serialization.
 ### 6. API And Error Model
 
 - Pick one `extract_to` shape across the facade and per-version modules.
-- Consider preserving structured codec/recovery/crypto errors instead of
-  flattening them all to `InvalidHeader`.
 - Decide whether the umbrella `ArchiveWriter` should remain public or whether
   callers should use per-version writer builders directly.
 - Apply the RAR5 builder pattern to RAR 1.5-4.x writing if another independent
@@ -90,7 +86,6 @@ serialization.
   corpus.
 - Add rustdoc for the public `rars`, `rars-format`, and CLI-facing API before
   publishing.
-- Confirm the workspace `repository` field before publishing.
 - Add comments/provenance for transliterated Unpack15 state names and embedded
   RAR3 standard-filter bytecode blobs.
 - Split `rars-recovery/src/lib.rs` into `rar3.rs` and `rar5.rs` modules.
