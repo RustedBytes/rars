@@ -251,24 +251,6 @@ fn map_rar50_crypto_error(error: rars_crypto::rar50::Error) -> Error {
 }
 
 impl Archive {
-    pub fn extract(&self) -> Result<Vec<ExtractedEntry>> {
-        self.extract_with_password(None)
-    }
-
-    pub fn extract_with_password(&self, password: Option<&[u8]>) -> Result<Vec<ExtractedEntry>> {
-        let mut out = Vec::new();
-        let mut session = DecoderSession::new_with_password(password);
-        for file in self.files() {
-            if file.is_split_before() || file.is_split_after() {
-                return Err(Error::InvalidHeader(
-                    "RAR 5 split entry requires multivolume extraction",
-                ));
-            }
-            out.push(session.extract_file(self, file)?);
-        }
-        Ok(out)
-    }
-
     pub fn extract_to<F>(&self, open: F) -> Result<()>
     where
         F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
@@ -357,59 +339,6 @@ impl<'a> DecoderSession<'a> {
     ) -> Result<Vec<u8>> {
         final_file.decode_split_with_decoder(volumes, split, &mut self.decoder, decryptor)
     }
-}
-
-/// Convenience multivolume extraction API that buffers each extracted entry in
-/// memory. Prefer [`extract_volumes_to`] for large archives.
-pub fn extract_volumes(volumes: &[Archive]) -> Result<Vec<ExtractedEntry>> {
-    extract_volumes_with_options(volumes, crate::ArchiveReadOptions::default())
-}
-
-pub fn extract_volumes_with_options(
-    volumes: &[Archive],
-    options: crate::ArchiveReadOptions<'_>,
-) -> Result<Vec<ExtractedEntry>> {
-    extract_volumes_with_password(volumes, options.password)
-}
-
-pub fn extract_volumes_with_password(
-    volumes: &[Archive],
-    password: Option<&[u8]>,
-) -> Result<Vec<ExtractedEntry>> {
-    use std::cell::RefCell;
-    use std::rc::Rc;
-
-    struct SharedWriter(Rc<RefCell<Vec<u8>>>);
-
-    impl Write for SharedWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.borrow_mut().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    let mut captured: Vec<(ExtractedEntryMeta, Rc<RefCell<Vec<u8>>>)> = Vec::new();
-    extract_volumes_to_with_password(volumes, password, |meta| {
-        let data = Rc::new(RefCell::new(Vec::new()));
-        captured.push((meta.clone(), data.clone()));
-        Ok(Box::new(SharedWriter(data)))
-    })?;
-
-    Ok(captured
-        .into_iter()
-        .map(|(meta, data)| ExtractedEntry {
-            name: meta.name,
-            data: data.borrow().clone(),
-            file_time: meta.file_time,
-            attr: meta.attr,
-            host_os: meta.host_os,
-            is_directory: meta.is_directory,
-        })
-        .collect())
 }
 
 /// Streams a RAR 5 multivolume archive set to caller-provided writers.

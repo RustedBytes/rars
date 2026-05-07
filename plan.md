@@ -36,15 +36,14 @@ serialization.
 
 - True Unpack70 remains fixture-blocked until a practical >4 GiB dictionary
   fixture is worth carrying.
-- Decide whether REV repair needs a streaming output API instead of returning
-  all repaired volume files as `Vec<Vec<u8>>`.
 
 ### 4. API And Error Quality
 
 - Continue enriching library errors with block type and operation context before
   treating the public API as stable.
-- Consider deprecating Vec-returning extraction APIs once integration tests and
-  examples primarily use streaming APIs.
+- Audit format-module convenience helpers that return decoded member payloads
+  as `Vec<u8>`. Keep only narrow inspection/test helpers that cannot be confused
+  with production extraction paths.
 
 ### 5. Fixtures And Oracles
 

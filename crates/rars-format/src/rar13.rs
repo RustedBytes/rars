@@ -432,41 +432,6 @@ impl Archive {
         Ok(())
     }
 
-    pub fn extract_stored(&self, password: Option<&[u8]>) -> Result<Vec<ExtractedEntry>> {
-        let mut out = Vec::new();
-        for entry in &self.entries {
-            if entry.is_split_before() || entry.is_split_after() {
-                return Err(Error::InvalidHeader(
-                    "RAR 1.3 split entry requires multivolume extraction",
-                ));
-            }
-            out.push(entry.extract_stored(self, password)?);
-        }
-        Ok(out)
-    }
-
-    /// Convenience extraction API that buffers each extracted entry in memory.
-    ///
-    /// Prefer [`Archive::extract_to`] for large archives.
-    pub fn extract(&self, password: Option<&[u8]>) -> Result<Vec<ExtractedEntry>> {
-        let mut out = Vec::new();
-        let mut unpack15 = Unpack15::new();
-        for entry in &self.entries {
-            if entry.is_split_before() || entry.is_split_after() {
-                return Err(Error::InvalidHeader(
-                    "RAR 1.3 split entry requires multivolume extraction",
-                ));
-            }
-            out.push(entry.extract_with_context(
-                self,
-                password,
-                Some(&mut unpack15),
-                self.main.is_solid() && !out.is_empty(),
-            )?);
-        }
-        Ok(out)
-    }
-
     /// Streams extracted entries to caller-provided writers.
     pub fn extract_to<F>(&self, password: Option<&[u8]>, mut open: F) -> Result<()>
     where
@@ -853,68 +818,6 @@ impl Entry {
     }
 }
 
-/// Convenience multivolume extraction API that buffers each extracted entry in
-/// memory. Prefer [`extract_volumes_to`] for large archives.
-pub fn extract_volumes(
-    volumes: &[Archive],
-    password: Option<&[u8]>,
-) -> Result<Vec<ExtractedEntry>> {
-    let mut out = Vec::new();
-    let mut pending: Option<PendingSplit> = None;
-    let mut unpack15 = Unpack15::new();
-
-    for archive in volumes {
-        for entry in &archive.entries {
-            if !entry.is_split_before() && !entry.is_split_after() {
-                if pending.is_some() {
-                    return Err(Error::InvalidHeader(
-                        "RAR 1.3 split entry is interrupted by a regular entry",
-                    ));
-                }
-                let solid = archive.main.is_solid() && !out.is_empty();
-                out.push(entry.extract_with_context(
-                    archive,
-                    password,
-                    Some(&mut unpack15),
-                    solid,
-                )?);
-                continue;
-            }
-
-            let data = entry.decrypt_packed_data(archive, password)?;
-            match (
-                &mut pending,
-                entry.is_split_before(),
-                entry.is_split_after(),
-            ) {
-                (None, false, true) => {
-                    pending = Some(PendingSplit::new(entry, data));
-                }
-                (Some(current), true, true) => {
-                    current.append(entry, data)?;
-                }
-                (Some(current), true, false) => {
-                    current.append(entry, data)?;
-                    let completed = pending.take().expect("pending split");
-                    let solid = archive.main.is_solid() && !out.is_empty();
-                    out.push(completed.finish(entry, &mut unpack15, solid)?);
-                }
-                _ => {
-                    return Err(Error::InvalidHeader(
-                        "RAR 1.3 split entry flags are inconsistent",
-                    ));
-                }
-            }
-        }
-    }
-
-    if pending.is_some() {
-        return Err(Error::InvalidHeader("RAR 1.3 split entry is incomplete"));
-    }
-
-    Ok(out)
-}
-
 /// Streams a multivolume archive set to caller-provided writers.
 pub fn extract_volumes_to<F>(
     volumes: &[Archive],
@@ -992,13 +895,6 @@ where
     Ok(())
 }
 
-pub fn extract_stored_volumes(
-    volumes: &[Archive],
-    password: Option<&[u8]>,
-) -> Result<Vec<ExtractedEntry>> {
-    extract_volumes(volumes, password)
-}
-
 fn read_exact_at(file: &mut File, offset: usize, len: usize) -> Result<Vec<u8>> {
     file.seek(SeekFrom::Start(offset as u64))?;
     let mut data = vec![0; len];
@@ -1041,17 +937,6 @@ impl Rar13Checksum {
     fn finish(self) -> u16 {
         self.value
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PendingSplit {
-    name: Vec<u8>,
-    packed_data: Vec<u8>,
-    file_time: u32,
-    file_attr: u8,
-    method: u8,
-    unp_ver: u8,
-    was_encrypted: bool,
 }
 
 struct PendingSplitRefs {
@@ -1190,63 +1075,6 @@ impl Read for ChainedReader<'_> {
             self.index += 1;
         }
         Ok(0)
-    }
-}
-
-impl PendingSplit {
-    fn new(entry: &Entry, packed_data: Vec<u8>) -> Self {
-        Self {
-            name: entry.name.clone(),
-            packed_data,
-            file_time: entry.header.file_time,
-            file_attr: entry.header.file_attr,
-            method: entry.header.method,
-            unp_ver: entry.header.unp_ver,
-            was_encrypted: entry.is_encrypted(),
-        }
-    }
-
-    fn append(&mut self, entry: &Entry, packed_data: Vec<u8>) -> Result<()> {
-        if entry.name != self.name {
-            return Err(Error::InvalidHeader("RAR 1.3 split entry name changed"));
-        }
-        if entry.header.method != self.method {
-            return Err(Error::InvalidHeader(
-                "RAR 1.3 split entry compression method changed",
-            ));
-        }
-        if entry.is_encrypted() != self.was_encrypted {
-            return Err(Error::InvalidHeader(
-                "RAR 1.3 split entry encryption flag changed",
-            ));
-        }
-        self.packed_data.extend_from_slice(&packed_data);
-        Ok(())
-    }
-
-    fn finish(
-        self,
-        final_entry: &Entry,
-        unpack15: &mut Unpack15,
-        solid: bool,
-    ) -> Result<ExtractedEntry> {
-        let data = if self.method == METHOD_STORE {
-            self.packed_data
-        } else {
-            unpack15.decode_member(
-                &self.packed_data,
-                final_entry.header.unp_size as usize,
-                solid,
-            )?
-        };
-        final_entry.verify_checksum(&data)?;
-        Ok(ExtractedEntry {
-            name: self.name,
-            data,
-            file_time: self.file_time,
-            file_attr: self.file_attr,
-            is_directory: false,
-        })
     }
 }
 
@@ -1741,6 +1569,64 @@ pub fn file_checksum(input: &[u8]) -> u16 {
 mod tests {
     use super::*;
     use rars_codec::rar13::{find_long_lz, LongLz};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    struct CollectWriter(Rc<RefCell<Vec<u8>>>);
+
+    impl Write for CollectWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn collect_extract(archive: &Archive, password: Option<&[u8]>) -> Result<Vec<ExtractedEntry>> {
+        let entries = RefCell::new(Vec::new());
+        archive.extract_to(password, |meta| {
+            let data = Rc::new(RefCell::new(Vec::new()));
+            entries.borrow_mut().push((meta.clone(), Rc::clone(&data)));
+            Ok(Box::new(CollectWriter(data)))
+        })?;
+        Ok(entries
+            .into_inner()
+            .into_iter()
+            .map(|(meta, data)| ExtractedEntry {
+                name: meta.name,
+                data: data.borrow().clone(),
+                file_time: meta.file_time,
+                file_attr: meta.file_attr,
+                is_directory: meta.is_directory,
+            })
+            .collect())
+    }
+
+    fn collect_extract_volumes(
+        volumes: &[Archive],
+        password: Option<&[u8]>,
+    ) -> Result<Vec<ExtractedEntry>> {
+        let entries = RefCell::new(Vec::new());
+        extract_volumes_to(volumes, password, |meta| {
+            let data = Rc::new(RefCell::new(Vec::new()));
+            entries.borrow_mut().push((meta.clone(), Rc::clone(&data)));
+            Ok(Box::new(CollectWriter(data)))
+        })?;
+        Ok(entries
+            .into_inner()
+            .into_iter()
+            .map(|(meta, data)| ExtractedEntry {
+                name: meta.name,
+                data: data.borrow().clone(),
+                file_time: meta.file_time,
+                file_attr: meta.file_attr,
+                is_directory: meta.is_directory,
+            })
+            .collect())
+    }
 
     #[test]
     fn writes_and_reads_stored_archive() {
@@ -1774,7 +1660,7 @@ mod tests {
         );
         assert!(archive.entries[1].is_directory());
 
-        let extracted = archive.extract_stored(None).unwrap();
+        let extracted = collect_extract(&archive, None).unwrap();
         assert_eq!(extracted[0].data, b"hello rar 1.3");
         assert!(extracted[1].is_directory);
     }
@@ -1866,13 +1752,13 @@ mod tests {
         let first = Archive::parse(&volumes[0]).unwrap();
 
         assert_eq!(
-            first.extract(None),
+            collect_extract(&first, None),
             Err(Error::InvalidHeader(
                 "RAR 1.3 split entry requires multivolume extraction"
             ))
         );
         assert_eq!(
-            first.extract_stored(None),
+            collect_extract(&first, None),
             Err(Error::InvalidHeader(
                 "RAR 1.3 split entry requires multivolume extraction"
             ))
@@ -1973,7 +1859,7 @@ mod tests {
             b"secret bytes"
         );
 
-        let extracted = archive.extract_stored(Some(b"pass")).unwrap();
+        let extracted = collect_extract(&archive, Some(b"pass")).unwrap();
         assert_eq!(extracted[0].data, b"secret bytes");
     }
 
@@ -2001,7 +1887,10 @@ mod tests {
             archive.archive_comment().unwrap().as_deref(),
             Some(&b"This is an archive comment."[..])
         );
-        assert_eq!(archive.extract(None).unwrap()[0].data, b"hello rar 1.3");
+        assert_eq!(
+            collect_extract(&archive, None).unwrap()[0].data,
+            b"hello rar 1.3"
+        );
     }
 
     #[test]
@@ -2022,7 +1911,10 @@ mod tests {
             archive.entries[0].file_comment().unwrap().as_deref(),
             Some(&b"file comment\r\n"[..])
         );
-        assert_eq!(archive.extract(None).unwrap()[0].data, b"hello rar 1.3");
+        assert_eq!(
+            collect_extract(&archive, None).unwrap()[0].data,
+            b"hello rar 1.3"
+        );
     }
 
     #[test]
@@ -2045,7 +1937,7 @@ mod tests {
         assert_eq!(archive.entries[0].header.method, METHOD_BEST);
         assert!(archive.entries[0].header.pack_size > 0);
 
-        let extracted = archive.extract(None).unwrap();
+        let extracted = collect_extract(&archive, None).unwrap();
         assert_eq!(extracted[0].data, b"literal bytes over sixteen");
     }
 
@@ -2066,7 +1958,7 @@ mod tests {
         let archive = Archive::parse(&bytes).unwrap();
         assert_eq!(archive.entries[0].header.method, METHOD_BEST);
 
-        let extracted = archive.extract(None).unwrap();
+        let extracted = collect_extract(&archive, None).unwrap();
         assert_eq!(extracted[0].data, data);
     }
 
@@ -2090,7 +1982,7 @@ mod tests {
             "ShortLZ should make the repeated payload smaller than stored data"
         );
 
-        let extracted = archive.extract(None).unwrap();
+        let extracted = collect_extract(&archive, None).unwrap();
         assert_eq!(extracted[0].data, data);
     }
 
@@ -2126,7 +2018,7 @@ mod tests {
             "LongLZ should make a >256-byte-distance repeat smaller than literal-only output"
         );
 
-        let extracted = archive.extract(None).unwrap();
+        let extracted = collect_extract(&archive, None).unwrap();
         assert_eq!(extracted[0].data, data);
     }
 
@@ -2155,7 +2047,7 @@ mod tests {
 
         assert_eq!(archive.entries[0].header.method, METHOD_STORE);
         assert_eq!(archive.entries[0].header.pack_size, data.len() as u32);
-        assert_eq!(archive.extract(None).unwrap()[0].data, data);
+        assert_eq!(collect_extract(&archive, None).unwrap()[0].data, data);
     }
 
     #[test]
@@ -2194,7 +2086,7 @@ mod tests {
             .iter()
             .all(|entry| entry.header.flags & LHD_SOLID != 0));
 
-        let extracted = archive.extract(None).unwrap();
+        let extracted = collect_extract(&archive, None).unwrap();
         assert_eq!(extracted[0].data, input[0].data);
         assert_eq!(extracted[1].data, input[1].data);
     }
@@ -2214,9 +2106,12 @@ mod tests {
         let archive = Archive::parse(&bytes).unwrap();
         assert!(archive.entries[0].is_encrypted());
         assert_eq!(archive.entries[0].header.method, METHOD_BEST);
-        assert!(matches!(archive.extract(None), Err(Error::NeedPassword)));
+        assert!(matches!(
+            collect_extract(&archive, None),
+            Err(Error::NeedPassword)
+        ));
 
-        let extracted = archive.extract(Some(b"pass")).unwrap();
+        let extracted = collect_extract(&archive, Some(b"pass")).unwrap();
         assert_eq!(extracted[0].data, input[0].data);
     }
 
@@ -2238,7 +2133,7 @@ mod tests {
             Some(&b"compressed file comment"[..])
         );
 
-        let extracted = archive.extract(None).unwrap();
+        let extracted = collect_extract(&archive, None).unwrap();
         assert_eq!(extracted[0].data, input[0].data);
     }
 
@@ -2268,7 +2163,7 @@ mod tests {
         assert!(!volumes[3].entries[0].is_split_after());
         assert!(volumes.iter().all(|archive| archive.entries[0].is_stored()));
 
-        let extracted = extract_volumes(&volumes, None).unwrap();
+        let extracted = collect_extract_volumes(&volumes, None).unwrap();
         assert_eq!(extracted.len(), 1);
         assert_eq!(extracted[0].name, b"random.bin");
         assert_eq!(extracted[0].data, entry.data);
@@ -2298,7 +2193,7 @@ mod tests {
         assert!(volumes.last().unwrap().entries[0].is_split_before());
         assert!(!volumes.last().unwrap().entries[0].is_split_after());
 
-        let extracted = extract_volumes(&volumes, None).unwrap();
+        let extracted = collect_extract_volumes(&volumes, None).unwrap();
         assert_eq!(extracted.len(), 1);
         assert_eq!(extracted[0].name, b"repeat.txt");
         assert_eq!(extracted[0].data, data);
@@ -2339,7 +2234,7 @@ mod tests {
         assert_eq!(archive.entries[0].header.method, METHOD_BEST);
         assert_eq!(archive.entries[0].header.pack_size, 0);
 
-        let extracted = archive.extract(None).unwrap();
+        let extracted = collect_extract(&archive, None).unwrap();
         assert_eq!(extracted[0].data, b"");
     }
 

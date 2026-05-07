@@ -373,13 +373,13 @@ fn cmd_repair_rev5(paths: &[String]) -> CliResult<()> {
         }
     }
 
-    let repaired = rars::rar50::repair_rev5_volumes(&slots, &recovery)
-        .map_err(|err| format!("failed to repair RAR 5 REV volume set: {err}"))?;
-    for (index, bytes) in repaired.iter().enumerate() {
+    rars::rar50::repair_rev5_volumes_to(&slots, &recovery, |index, bytes| {
         let path = out_dir.join(format!("repaired.part{}.rar", index + 1));
         fs::write(&path, bytes)?;
         println!("repaired {}", path.display());
-    }
+        Ok(())
+    })
+    .map_err(|err| format!("failed to repair RAR 5 REV volume set: {err}"))?;
     Ok(())
 }
 
@@ -426,13 +426,13 @@ fn cmd_repair_rev3(paths: &[String]) -> CliResult<()> {
         .iter()
         .map(|(index, bytes)| (*index, bytes.as_slice()))
         .collect();
-    let repaired = rars::rar15_40::repair_rev3_volumes(&slots, recovery_count, &recovery)
-        .map_err(|err| format!("failed to repair RAR 3 REV volume set: {err}"))?;
-    for (index, bytes) in repaired.iter().enumerate() {
+    rars::rar15_40::repair_rev3_volumes_to(&slots, recovery_count, &recovery, |index, bytes| {
         let path = out_dir.join(format!("repaired.part{}.rar", index + 1));
         fs::write(&path, bytes)?;
         println!("repaired {}", path.display());
-    }
+        Ok(())
+    })
+    .map_err(|err| format!("failed to repair RAR 3 REV volume set: {err}"))?;
     Ok(())
 }
 

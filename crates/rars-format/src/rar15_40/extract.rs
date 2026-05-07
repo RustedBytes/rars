@@ -1,8 +1,6 @@
 use super::*;
 use crate::volume_extract::{ChainedReader, SplitVolumeState, SplitVolumeStep};
-use std::cell::RefCell;
 use std::io::{Read, Write};
-use std::rc::Rc;
 
 enum CodecState {
     Unpack15(Box<Unpack15>),
@@ -169,30 +167,6 @@ impl<'a> DecoderSession<'a> {
         }
     }
 
-    pub(super) fn extract_file(
-        &mut self,
-        archive: &Archive,
-        file: &FileHeader,
-    ) -> Result<ExtractedEntry> {
-        if file.is_directory() || file.is_stored() {
-            return file.extract_with_password(archive, self.password);
-        }
-        let data = self
-            .decode_file_data(archive, file)
-            .map_err(|error| file.map_encrypted_payload_error(self.password, error))?;
-        file.verify_crc32(&data)
-            .map_err(|error| file.map_encrypted_payload_error(self.password, error))?;
-        self.decoded_files += 1;
-        Ok(ExtractedEntry {
-            name: file.name.clone(),
-            data,
-            file_time: file.file_time,
-            attr: file.attr,
-            host_os: file.host_os,
-            is_directory: false,
-        })
-    }
-
     pub(super) fn write_file_to(
         &mut self,
         archive: &Archive,
@@ -245,57 +219,6 @@ impl<'a> DecoderSession<'a> {
             .as_mut()
             .ok_or(Error::InvalidHeader("RAR 1.5 codec state is missing"))
     }
-}
-
-/// Convenience multivolume extraction API that buffers each extracted entry in
-/// memory. Prefer [`extract_volumes_to`] for large archives.
-pub fn extract_volumes(volumes: &[Archive]) -> Result<Vec<ExtractedEntry>> {
-    extract_volumes_with_options(volumes, crate::ArchiveReadOptions::default())
-}
-
-pub fn extract_volumes_with_options(
-    volumes: &[Archive],
-    options: crate::ArchiveReadOptions<'_>,
-) -> Result<Vec<ExtractedEntry>> {
-    extract_volumes_with_password(volumes, options.password)
-}
-
-pub fn extract_volumes_with_password(
-    volumes: &[Archive],
-    password: Option<&[u8]>,
-) -> Result<Vec<ExtractedEntry>> {
-    struct SharedWriter(Rc<RefCell<Vec<u8>>>);
-
-    impl Write for SharedWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.borrow_mut().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    let mut captured: Vec<(ExtractedEntryMeta, Rc<RefCell<Vec<u8>>>)> = Vec::new();
-    extract_volumes_to_with_password(volumes, password, |meta| {
-        let data = Rc::new(RefCell::new(Vec::new()));
-        captured.push((meta.clone(), data.clone()));
-        Ok(Box::new(SharedWriter(data)))
-    })?;
-
-    let out = captured
-        .into_iter()
-        .map(|(meta, data)| ExtractedEntry {
-            name: meta.name,
-            data: data.borrow().clone(),
-            file_time: meta.file_time,
-            attr: meta.attr,
-            host_os: meta.host_os,
-            is_directory: meta.is_directory,
-        })
-        .collect();
-    Ok(out)
 }
 
 /// Streams a multivolume archive set to caller-provided writers.

@@ -1,6 +1,8 @@
-use rars_format::rar13::{extract_volumes, file_checksum, Archive};
+use rars_format::rar13::{extract_volumes_to, file_checksum, Archive};
 use rars_format::{detect_archive_family, find_archive_start, ArchiveFamily, Error};
-use std::io::Write;
+use std::cell::RefCell;
+use std::io::{Result as IoResult, Write};
+use std::rc::Rc;
 
 const EMPTY: &[u8] = include_bytes!("fixtures/rar13/EMPTY.RAR");
 const BIG80K: &[u8] = include_bytes!("fixtures/rar13/BIG80K.RAR");
@@ -31,6 +33,76 @@ const CMULTIV_R05: &[u8] = include_bytes!("fixtures/rar13/CMULTIV.R05");
 const CMULTIV_R06: &[u8] = include_bytes!("fixtures/rar13/CMULTIV.R06");
 const RAR140_NOAV: &[u8] = include_bytes!("fixtures/rar13/rar140_av/rar140_noav_baseline.rar");
 const RAR140_AV: &[u8] = include_bytes!("fixtures/rar13/rar140_av/rar140_av_patched.rar");
+
+struct CollectWriter {
+    data: Rc<RefCell<Vec<u8>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CollectedEntry {
+    name: Vec<u8>,
+    data: Vec<u8>,
+    file_time: u32,
+    file_attr: u8,
+    is_directory: bool,
+}
+
+impl Write for CollectWriter {
+    fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
+        self.data.borrow_mut().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> IoResult<()> {
+        Ok(())
+    }
+}
+
+fn collect_extract(
+    archive: &Archive,
+    password: Option<&[u8]>,
+) -> Result<Vec<CollectedEntry>, Error> {
+    let entries = RefCell::new(Vec::new());
+    archive.extract_to(password, |meta| {
+        let data = Rc::new(RefCell::new(Vec::new()));
+        entries.borrow_mut().push((meta.clone(), Rc::clone(&data)));
+        Ok(Box::new(CollectWriter { data }))
+    })?;
+    Ok(entries
+        .into_inner()
+        .into_iter()
+        .map(|(meta, data)| CollectedEntry {
+            name: meta.name,
+            data: data.borrow().clone(),
+            file_time: meta.file_time,
+            file_attr: meta.file_attr,
+            is_directory: meta.is_directory,
+        })
+        .collect())
+}
+
+fn collect_extract_volumes(
+    archives: &[Archive],
+    password: Option<&[u8]>,
+) -> Result<Vec<CollectedEntry>, Error> {
+    let entries = RefCell::new(Vec::new());
+    extract_volumes_to(archives, password, |meta| {
+        let data = Rc::new(RefCell::new(Vec::new()));
+        entries.borrow_mut().push((meta.clone(), Rc::clone(&data)));
+        Ok(Box::new(CollectWriter { data }))
+    })?;
+    Ok(entries
+        .into_inner()
+        .into_iter()
+        .map(|(meta, data)| CollectedEntry {
+            name: meta.name,
+            data: data.borrow().clone(),
+            file_time: meta.file_time,
+            file_attr: meta.file_attr,
+            is_directory: meta.is_directory,
+        })
+        .collect())
+}
 
 #[test]
 fn detects_real_rar1402_archive() {
@@ -92,7 +164,7 @@ fn parses_rar140_inline_av_shape_fixture() {
         rars_format::rar13::AuthenticityVerificationStatus::StructurallyValid
     );
 
-    let extracted = archive.extract(None).expect("extract AV-bearing archive");
+    let extracted = collect_extract(&archive, None).expect("extract AV-bearing archive");
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].data, b"hello\n");
 }
@@ -128,9 +200,7 @@ fn decodes_real_rar1402_stored_file() {
     let decoded = entry.stored_data(&archive, None).expect("stored data");
     assert_eq!(decoded, README_EXPECTED);
 
-    let extracted = archive
-        .extract_stored(None)
-        .expect("extract stored archive");
+    let extracted = collect_extract(&archive, None).expect("extract stored archive");
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"README");
     assert_eq!(extracted[0].data, README_EXPECTED);
@@ -162,7 +232,7 @@ fn decodes_real_rar1402_compressed_file() {
     assert_eq!(entry.header.method, 3);
     assert!(!entry.is_stored());
 
-    let extracted = archive.extract(None).expect("extract compressed archive");
+    let extracted = collect_extract(&archive, None).expect("extract compressed archive");
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"README");
     assert_eq!(extracted[0].data, README_EXPECTED);
@@ -172,7 +242,7 @@ fn decodes_real_rar1402_compressed_file() {
 #[test]
 fn decodes_real_rar1402_compressed_window_wrap_file() {
     let archive = Archive::parse(BIG80K).expect("parse BIG80K RAR 1.402 archive");
-    let extracted = archive.extract(None).expect("extract BIG80K archive");
+    let extracted = collect_extract(&archive, None).expect("extract BIG80K archive");
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"BIG80K.TXT");
     assert_eq!(extracted[0].data.len(), 80 * 1024);
@@ -185,7 +255,7 @@ fn decodes_real_rar1402_compressed_window_wrap_file() {
 #[test]
 fn decodes_real_rar1402_repeating_pattern_file() {
     let archive = Archive::parse(REPEATB).expect("parse REPEATB RAR 1.402 archive");
-    let extracted = archive.extract(None).expect("extract REPEATB archive");
+    let extracted = collect_extract(&archive, None).expect("extract REPEATB archive");
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"REPEATB.BIN");
     assert_eq!(extracted[0].data, expected_repeatb());
@@ -198,7 +268,7 @@ fn decodes_real_rar1402_solid_archive() {
     assert!(archive.main.is_solid());
     assert_eq!(archive.entries.len(), 3);
 
-    let extracted = archive.extract(None).expect("extract solid archive");
+    let extracted = collect_extract(&archive, None).expect("extract solid archive");
     assert_eq!(extracted.len(), 3);
     assert_eq!(extracted[0].name, b"BIG80K.TXT");
     assert_eq!(extracted[0].data.len(), 80 * 1024);
@@ -227,7 +297,7 @@ fn parses_empty_stored_file() {
     assert_eq!(entry.stored_data(&archive, None).expect("empty data"), b"");
     entry.verify_checksum(b"").expect("empty checksum");
 
-    let extracted = archive.extract_stored(None).expect("extract empty archive");
+    let extracted = collect_extract(&archive, None).expect("extract empty archive");
     assert_eq!(extracted[0].name, b"EMPTY.BIN");
     assert!(extracted[0].data.is_empty());
 }
@@ -263,7 +333,7 @@ fn parses_multiple_file_headers() {
         Err(Error::InvalidHeader("RAR 1.3 entry is not stored"))
     ));
 
-    let extracted = archive.extract(None).expect("extract mixed archive");
+    let extracted = collect_extract(&archive, None).expect("extract mixed archive");
     assert_eq!(extracted.len(), 2);
     assert_eq!(extracted[0].name, b"HELLO.TXT");
     assert_eq!(extracted[0].data, b"Hello, RAR 1.402 fixture world.\r\n");
@@ -294,9 +364,7 @@ fn parses_directory_entry_and_following_file() {
     file.verify_checksum(b"Inside subdir.\r\n")
         .expect("inner file checksum");
 
-    let extracted = archive
-        .extract_stored(None)
-        .expect("extract directory archive");
+    let extracted = collect_extract(&archive, None).expect("extract directory archive");
     assert_eq!(extracted.len(), 2);
     assert_eq!(extracted[0].name, b"SUBDIR");
     assert!(extracted[0].is_directory);
@@ -325,11 +393,10 @@ fn parses_encrypted_compressed_file_metadata() {
 fn decodes_real_rar1402_encrypted_compressed_file() {
     let archive =
         Archive::parse(README_PASSWORD).expect("parse encrypted compressed RAR 1.402 archive");
-    assert!(archive.extract(None).is_err());
+    assert!(collect_extract(&archive, None).is_err());
 
-    let extracted = archive
-        .extract(Some(b"password"))
-        .expect("extract encrypted compressed archive");
+    let extracted =
+        collect_extract(&archive, Some(b"password")).expect("extract encrypted compressed archive");
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"README");
     assert_eq!(extracted[0].data, README_EXPECTED);
@@ -371,7 +438,7 @@ fn extract_to_decodes_real_rar1402_encrypted_compressed_file() {
 fn rejects_wrong_password_for_encrypted_compressed_file() {
     let archive =
         Archive::parse(README_PASSWORD).expect("parse encrypted compressed RAR 1.402 archive");
-    assert!(archive.extract(Some(b"wrong-password")).is_err());
+    assert!(collect_extract(&archive, Some(b"wrong-password")).is_err());
 }
 
 #[test]
@@ -381,10 +448,11 @@ fn rejects_corrupt_stored_payload_checksum() {
     *last ^= 0x01;
 
     let archive = Archive::parse(&corrupt).expect("parse corrupt stored archive");
-    assert!(matches!(
-        archive.extract(None),
-        Err(Error::CrcMismatch { .. })
-    ));
+    match collect_extract(&archive, None) {
+        Err(Error::CrcMismatch { .. }) => {}
+        Err(Error::AtEntry { source, .. }) if matches!(*source, Error::CrcMismatch { .. }) => {}
+        other => panic!("expected checksum error, got {other:?}"),
+    }
 }
 
 #[test]
@@ -421,9 +489,8 @@ fn decodes_real_rar1402_encrypted_stored_file() {
         .verify_checksum(&decoded)
         .expect("encrypted stored checksum");
 
-    let extracted = archive
-        .extract_stored(Some(b"password"))
-        .expect("extract encrypted stored archive");
+    let extracted =
+        collect_extract(&archive, Some(b"password")).expect("extract encrypted stored archive");
     assert_eq!(extracted[0].name, b"SECRET.TXT");
     assert_eq!(extracted[0].data, b"Stored encrypted fixture.\r\n");
 }
@@ -483,7 +550,7 @@ fn reassembles_old_style_stored_multivolume_file() {
         Archive::parse(MULTIVOL_R02).expect("parse fourth volume"),
     ];
 
-    let extracted = extract_volumes(&volumes, None).expect("join stored volumes");
+    let extracted = collect_extract_volumes(&volumes, None).expect("join stored volumes");
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"RANDOM.BIN");
     assert_eq!(extracted[0].data.len(), 65_536);
@@ -533,7 +600,7 @@ fn reassembles_old_style_compressed_multivolume_file() {
         Archive::parse(CMULTIV_R06).expect("parse eighth compressed volume"),
     ];
 
-    let extracted = extract_volumes(&volumes, None).expect("join compressed volumes");
+    let extracted = collect_extract_volumes(&volumes, None).expect("join compressed volumes");
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"CMULTI.TXT");
     assert_eq!(extracted[0].data, CMULTI_EXPECTED);

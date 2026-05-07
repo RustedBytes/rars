@@ -19,8 +19,7 @@ mod extract;
 mod write;
 use extract::DecoderSession;
 pub use extract::{
-    extract_volumes, extract_volumes_to, extract_volumes_to_with_options,
-    extract_volumes_to_with_password, extract_volumes_with_options, extract_volumes_with_password,
+    extract_volumes_to, extract_volumes_to_with_options, extract_volumes_to_with_password,
 };
 pub use write::{
     write_compressed_archive, write_compressed_archive_with_comment, write_compressed_volumes,
@@ -1164,40 +1163,6 @@ impl Archive {
         repair_protect_head_bytes(&self.source_bytes()?, self.sfx_offset, protect)
     }
 
-    pub fn extract_stored(&self) -> Result<Vec<ExtractedEntry>> {
-        let mut out = Vec::new();
-        for file in self.files() {
-            if file.is_split_before() || file.is_split_after() {
-                return Err(Error::InvalidHeader(
-                    "RAR 1.5 split entry requires multivolume extraction",
-                ));
-            }
-            out.push(file.extract_stored(self)?);
-        }
-        Ok(out)
-    }
-
-    /// Convenience extraction API that buffers each extracted entry in memory.
-    ///
-    /// Prefer [`Archive::extract_to`] for large archives.
-    pub fn extract(&self) -> Result<Vec<ExtractedEntry>> {
-        self.extract_with_password(None)
-    }
-
-    pub fn extract_with_password(&self, password: Option<&[u8]>) -> Result<Vec<ExtractedEntry>> {
-        let mut out = Vec::new();
-        let mut session = DecoderSession::new_with_password(self.main.is_solid(), password);
-        for file in self.files() {
-            if file.is_split_before() || file.is_split_after() {
-                return Err(Error::InvalidHeader(
-                    "RAR 1.5 split entry requires multivolume extraction",
-                ));
-            }
-            out.push(session.extract_file(self, file)?);
-        }
-        Ok(out)
-    }
-
     /// Streams extracted entries to caller-provided writers.
     pub fn extract_to<F>(&self, open: F) -> Result<()>
     where
@@ -1632,16 +1597,28 @@ fn protected_sector(
     Ok(sector)
 }
 
-pub fn repair_rev3_volumes(
+pub fn repair_rev3_volumes_to<F>(
     data_volumes: &[Option<&[u8]>],
     recovery_count: usize,
     recovery_volumes: &[(usize, &[u8])],
-) -> Result<Vec<Vec<u8>>> {
-    rars_recovery::rar3::reconstruct_data_volumes(data_volumes, recovery_count, recovery_volumes)
-        .map_err(Error::from)?
-        .into_iter()
-        .map(truncate_repaired_rev3_volume)
-        .collect()
+    mut write: F,
+) -> Result<()>
+where
+    F: FnMut(usize, &[u8]) -> Result<()>,
+{
+    for (index, bytes) in rars_recovery::rar3::reconstruct_data_volumes(
+        data_volumes,
+        recovery_count,
+        recovery_volumes,
+    )
+    .map_err(Error::from)?
+    .into_iter()
+    .enumerate()
+    {
+        let bytes = truncate_repaired_rev3_volume(bytes)?;
+        write(index, &bytes)?;
+    }
+    Ok(())
 }
 
 fn truncate_repaired_rev3_volume(mut bytes: Vec<u8>) -> Result<Vec<u8>> {

@@ -1,10 +1,51 @@
 use rars_format::rar15_40::Archive;
+use rars_format::Result;
+use std::cell::RefCell;
+use std::io::{Result as IoResult, Write};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/rar15_40/rarvm")
         .join(name)
+}
+
+struct CollectWriter {
+    data: Rc<RefCell<Vec<u8>>>,
+}
+
+struct CollectedEntry {
+    name: Vec<u8>,
+    data: Vec<u8>,
+}
+
+impl Write for CollectWriter {
+    fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
+        self.data.borrow_mut().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> IoResult<()> {
+        Ok(())
+    }
+}
+
+fn collect_extract(archive: &Archive) -> Result<Vec<CollectedEntry>> {
+    let entries = RefCell::new(Vec::new());
+    archive.extract_to(|meta| {
+        let data = Rc::new(RefCell::new(Vec::new()));
+        entries.borrow_mut().push((meta.clone(), Rc::clone(&data)));
+        Ok(Box::new(CollectWriter { data }))
+    })?;
+    Ok(entries
+        .into_inner()
+        .into_iter()
+        .map(|(meta, data)| CollectedEntry {
+            name: meta.name,
+            data: data.borrow().clone(),
+        })
+        .collect())
 }
 
 #[test]
@@ -24,7 +65,7 @@ fn solid_e8_filters_use_member_relative_offsets() {
     assert_eq!(files[1].unp_size, 5_884);
     assert!(files[1].is_solid());
 
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted.len(), 2);
     assert_eq!(extracted[0].data, expected_lead);
     assert_eq!(extracted[1].data, expected_exe);
@@ -57,7 +98,7 @@ fn non_standard_vm_filter_uses_generic_executor() {
     assert_eq!(files[0].unp_size, 1_048_576);
     assert_eq!(files[0].file_crc, 0x3908_6451);
 
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].data.len(), 1_048_576);
     assert_eq!(crc32(&extracted[0].data), 0x3908_6451);
@@ -76,7 +117,7 @@ fn ppmd_embedded_vm_filter_is_applied() {
     assert_eq!(files[0].unp_size, 710_400);
     assert_eq!(files[0].file_crc, 0xa0fa_ad59);
 
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].data.len(), 710_400);
     assert_eq!(crc32(&extracted[0].data), 0xa0fa_ad59);
@@ -85,7 +126,7 @@ fn ppmd_embedded_vm_filter_is_applied() {
 #[test]
 fn real_executable_filter_archive_decodes() {
     let archive = Archive::parse_path(fixture("filter_bsdcat_exe.rar")).unwrap();
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
 
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"bsdcat.exe");

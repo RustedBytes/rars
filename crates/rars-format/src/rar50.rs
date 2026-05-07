@@ -14,8 +14,7 @@ mod extract;
 mod write;
 
 pub use extract::{
-    extract_volumes, extract_volumes_to, extract_volumes_to_with_options,
-    extract_volumes_to_with_password, extract_volumes_with_options, extract_volumes_with_password,
+    extract_volumes_to, extract_volumes_to_with_options, extract_volumes_to_with_password,
 };
 pub use write::{
     ArchiveMetadataEntry, CompressedEntry, EncryptedArchiveCommentEntry, EncryptedCompressedEntry,
@@ -736,10 +735,14 @@ impl From<Rev5Volume> for Rev5VolumeMeta {
     }
 }
 
-pub fn repair_rev5_volumes(
+pub fn repair_rev5_volumes_to<F>(
     data_volumes: &[Option<&[u8]>],
     recovery_volumes: &[Rev5Volume],
-) -> Result<Vec<Vec<u8>>> {
+    mut write: F,
+) -> Result<()>
+where
+    F: FnMut(usize, &[u8]) -> Result<()>,
+{
     let first = recovery_volumes.first().ok_or(Error::InvalidHeader(
         "RAR 5 REV recovery volume set is empty",
     ))?;
@@ -795,28 +798,25 @@ pub fn repair_rev5_volumes(
     }
     let repaired = rars_recovery::rar5::reconstruct_data_shards(&shards, &recovery_rows)?;
 
-    repaired
-        .into_iter()
-        .zip(&first.data_volumes)
-        .map(|(mut shard, meta)| {
-            let file_size = usize::try_from(meta.file_size)
-                .map_err(|_| Error::InvalidHeader("RAR 5 REV data volume size overflows usize"))?;
-            if shard.len() < file_size {
-                return Err(Error::InvalidHeader(
-                    "RAR 5 REV repaired shard is shorter than data volume size",
-                ));
-            }
-            shard.truncate(file_size);
-            let actual = crc32(&shard);
-            if actual != meta.crc32 {
-                return Err(Error::Crc32Mismatch {
-                    expected: meta.crc32,
-                    actual,
-                });
-            }
-            Ok(shard)
-        })
-        .collect()
+    for (index, (mut shard, meta)) in repaired.into_iter().zip(&first.data_volumes).enumerate() {
+        let file_size = usize::try_from(meta.file_size)
+            .map_err(|_| Error::InvalidHeader("RAR 5 REV data volume size overflows usize"))?;
+        if shard.len() < file_size {
+            return Err(Error::InvalidHeader(
+                "RAR 5 REV repaired shard is shorter than data volume size",
+            ));
+        }
+        shard.truncate(file_size);
+        let actual = crc32(&shard);
+        if actual != meta.crc32 {
+            return Err(Error::Crc32Mismatch {
+                expected: meta.crc32,
+                actual,
+            });
+        }
+        write(index, &shard)?;
+    }
+    Ok(())
 }
 
 pub fn repair_inline_recovery_bytes(input: &[u8]) -> Result<Vec<u8>> {

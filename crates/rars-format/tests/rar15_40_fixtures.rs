@@ -1,14 +1,16 @@
 use rars_format::rar15_40::{
-    crc32, extract_volumes, repair_rev3_volumes, write_compressed_archive,
+    crc32, extract_volumes_to_with_password, repair_rev3_volumes_to, write_compressed_archive,
     write_compressed_archive_with_comment, write_compressed_volumes,
     write_rar29_compressed_archive_with_filter_policy, write_stored_archive,
     write_stored_archive_with_comment, write_stored_volumes, Archive, Block, FileEntry, FilterKind,
     FilterPolicy, FilterSpec, NewSubKind, ProtectHeader, StoredEntry, WriterOptions,
 };
 use rars_format::{detect_archive_family, ArchiveFamily, ArchiveVersion, Error, FeatureSet};
-use std::io::Write;
+use std::cell::RefCell;
+use std::io::{Result as IoResult, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::rc::Rc;
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -32,6 +34,105 @@ const RARS_GENERATED_FIXTURE_BYTES: &[(&str, usize, u32)] = &[
     ("split-store.rar", 73, 0x5440_b247),
     ("stored.rar", 84, 0x470d_272b),
 ];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CollectedEntry {
+    name: Vec<u8>,
+    data: Vec<u8>,
+    file_time: u32,
+    attr: u32,
+    host_os: u8,
+    is_directory: bool,
+}
+
+struct CollectWriter {
+    data: Rc<RefCell<Vec<u8>>>,
+}
+
+impl Write for CollectWriter {
+    fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
+        self.data.borrow_mut().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> IoResult<()> {
+        Ok(())
+    }
+}
+
+fn collect_extract(archive: &Archive) -> Result<Vec<CollectedEntry>, Error> {
+    collect_extract_with_password(archive, None)
+}
+
+fn collect_extract_with_password(
+    archive: &Archive,
+    password: Option<&[u8]>,
+) -> Result<Vec<CollectedEntry>, Error> {
+    let entries = RefCell::new(Vec::new());
+    archive.extract_to_with_password(password, |meta| {
+        let data = Rc::new(RefCell::new(Vec::new()));
+        entries.borrow_mut().push((meta.clone(), Rc::clone(&data)));
+        Ok(Box::new(CollectWriter { data }))
+    })?;
+    Ok(entries
+        .into_inner()
+        .into_iter()
+        .map(|(meta, data)| CollectedEntry {
+            name: meta.name,
+            data: data.borrow().clone(),
+            file_time: meta.file_time,
+            attr: meta.attr,
+            host_os: meta.host_os,
+            is_directory: meta.is_directory,
+        })
+        .collect())
+}
+
+fn collect_extract_volumes(archives: &[Archive]) -> Result<Vec<CollectedEntry>, Error> {
+    collect_extract_volumes_with_password(archives, None)
+}
+
+fn collect_extract_volumes_with_password(
+    archives: &[Archive],
+    password: Option<&[u8]>,
+) -> Result<Vec<CollectedEntry>, Error> {
+    let entries = RefCell::new(Vec::new());
+    extract_volumes_to_with_password(archives, password, |meta| {
+        let data = Rc::new(RefCell::new(Vec::new()));
+        entries.borrow_mut().push((meta.clone(), Rc::clone(&data)));
+        Ok(Box::new(CollectWriter { data }))
+    })?;
+    Ok(entries
+        .into_inner()
+        .into_iter()
+        .map(|(meta, data)| CollectedEntry {
+            name: meta.name,
+            data: data.borrow().clone(),
+            file_time: meta.file_time,
+            attr: meta.attr,
+            host_os: meta.host_os,
+            is_directory: meta.is_directory,
+        })
+        .collect())
+}
+
+fn repair_rev3_volumes(
+    data_volumes: &[Option<&[u8]>],
+    recovery_count: usize,
+    recovery_volumes: &[(usize, &[u8])],
+) -> Result<Vec<Vec<u8>>, Error> {
+    let mut repaired = Vec::new();
+    repair_rev3_volumes_to(
+        data_volumes,
+        recovery_count,
+        recovery_volumes,
+        |_, bytes| {
+            repaired.push(bytes.to_vec());
+            Ok(())
+        },
+    )?;
+    Ok(repaired)
+}
 
 fn write_rar29_auto(entries: &[FileEntry<'_>], options: WriterOptions) -> Vec<u8> {
     write_rar29_compressed_archive_with_filter_policy(entries, options, FilterPolicy::Auto).unwrap()
@@ -101,7 +202,7 @@ fn generated_rar29_e8_filtered_archive_round_trips() {
     assert_eq!(file.unp_ver, 29);
     assert_eq!(file.method, 0x33);
     assert!(file.pack_size < file.unp_size);
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted[0].name, b"rar29-e8-filtered.bin");
     assert_eq!(extracted[0].data, payload);
 }
@@ -141,7 +242,7 @@ fn generated_rar29_auto_filtered_archive_round_trips() {
     let plain_archive = Archive::parse(&plain).unwrap();
     let plain_file = plain_archive.files().next().unwrap();
     assert!(file.pack_size <= plain_file.pack_size);
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted[0].name, b"rar29-auto-filtered.bin");
     assert_eq!(extracted[0].data, payload);
 }
@@ -171,7 +272,7 @@ fn generated_rar29_auto_filtered_archive_considers_delta_candidates() {
     let explicit_file = explicit_archive.files().next().unwrap();
 
     assert!(auto_file.pack_size <= explicit_file.pack_size);
-    let extracted = auto_archive.extract().unwrap();
+    let extracted = collect_extract(&auto_archive).unwrap();
     assert_eq!(extracted[0].name, b"rar29-auto-delta-candidate.bin");
     assert_eq!(extracted[0].data, payload);
 }
@@ -203,7 +304,7 @@ fn generated_rar29_auto_filtered_archive_considers_audio_candidates() {
     let explicit_file = explicit_archive.files().next().unwrap();
 
     assert!(auto_file.pack_size <= explicit_file.pack_size);
-    let extracted = auto_archive.extract().unwrap();
+    let extracted = collect_extract(&auto_archive).unwrap();
     assert_eq!(extracted[0].name, b"rar29-auto-audio-candidate.bin");
     assert_eq!(extracted[0].data, payload);
 }
@@ -243,7 +344,7 @@ fn generated_rar29_auto_filtered_archive_considers_rgb_candidates() {
     let explicit_file = explicit_archive.files().next().unwrap();
 
     assert!(auto_file.pack_size <= explicit_file.pack_size);
-    let extracted = auto_archive.extract().unwrap();
+    let extracted = collect_extract(&auto_archive).unwrap();
     assert_eq!(extracted[0].name, b"rar29-auto-rgb-candidate.bin");
     assert_eq!(extracted[0].data, payload);
 }
@@ -273,7 +374,7 @@ fn generated_rar29_auto_filtered_archive_considers_itanium_candidates() {
     let explicit_file = explicit_archive.files().next().unwrap();
 
     assert!(auto_file.pack_size <= explicit_file.pack_size);
-    let extracted = auto_archive.extract().unwrap();
+    let extracted = collect_extract(&auto_archive).unwrap();
     assert_eq!(extracted[0].name, b"rar29-auto-itanium-candidate.bin");
     assert_eq!(extracted[0].data, payload);
 }
@@ -323,7 +424,7 @@ fn generated_rar29_segmented_e8_filtered_archive_round_trips() {
 
     assert_eq!(file.unp_ver, 29);
     assert_eq!(file.method, 0x33);
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted[0].name, b"rar29-segmented-e8-filtered.bin");
     assert_eq!(extracted[0].data, payload);
 }
@@ -369,7 +470,7 @@ fn generated_rar29_solid_e8_filtered_archive_round_trips() {
     assert!(archive.main.is_solid());
     assert!(!files[0].is_solid());
     assert!(files[1].is_solid());
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted[0].name, b"rar29-solid-e8-first.bin");
     assert_eq!(extracted[0].data, first);
     assert_eq!(extracted[1].name, b"rar29-solid-e8-second.bin");
@@ -405,10 +506,10 @@ fn generated_rar29_encrypted_e8_filtered_archive_round_trips() {
     assert!(file.is_encrypted());
     assert!(file.salt.is_some());
     assert!(matches!(
-        archive.extract_with_password(Some(b"wrong")),
+        collect_extract_with_password(&archive, Some(b"wrong")),
         Err(Error::WrongPasswordOrCorruptData)
     ));
-    let extracted = archive.extract_with_password(Some(b"password")).unwrap();
+    let extracted = collect_extract_with_password(&archive, Some(b"password")).unwrap();
     assert_eq!(extracted[0].name, b"rar29-encrypted-e8-filtered.bin");
     assert_eq!(extracted[0].data, payload);
 }
@@ -445,7 +546,7 @@ fn generated_rar30_header_encrypted_e8_filtered_archive_round_trips() {
     assert_eq!(file.name, b"rar30-header-encrypted-e8-filtered.bin");
     assert!(file.is_encrypted());
     assert!(file.salt.is_some());
-    let extracted = archive.extract_with_password(Some(b"password")).unwrap();
+    let extracted = collect_extract_with_password(&archive, Some(b"password")).unwrap();
     assert_eq!(extracted[0].data, payload);
 }
 
@@ -672,7 +773,7 @@ fn generated_rar29_e8e9_filtered_archive_round_trips() {
     assert_eq!(file.unp_ver, 29);
     assert_eq!(file.method, 0x33);
     assert!(file.pack_size < file.unp_size);
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted[0].name, b"rar29-e8e9-filtered.bin");
     assert_eq!(extracted[0].data, payload);
 }
@@ -703,7 +804,7 @@ fn generated_rar29_delta_filtered_archive_round_trips() {
 
     assert_eq!(file.unp_ver, 29);
     assert_eq!(file.method, 0x33);
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted[0].name, b"rar29-delta-filtered.bin");
     assert_eq!(extracted[0].data, payload);
 }
@@ -739,7 +840,7 @@ fn generated_rar29_segmented_delta_filtered_archive_round_trips() {
 
     assert_eq!(file.unp_ver, 29);
     assert_eq!(file.method, 0x33);
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted[0].name, b"rar29-segmented-delta-filtered.bin");
     assert_eq!(extracted[0].data, payload);
 }
@@ -834,7 +935,7 @@ fn generated_rar29_itanium_filtered_archive_round_trips() {
 
     assert_eq!(file.unp_ver, 29);
     assert_eq!(file.method, 0x33);
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted[0].name, b"rar29-itanium-filtered.bin");
     assert_eq!(extracted[0].data, payload);
 }
@@ -873,7 +974,7 @@ fn generated_rar29_segmented_itanium_filtered_archive_round_trips() {
 
     assert_eq!(file.unp_ver, 29);
     assert_eq!(file.method, 0x33);
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted[0].name, b"rar29-segmented-itanium-filtered.bin");
     assert_eq!(extracted[0].data, payload);
 }
@@ -969,7 +1070,7 @@ fn generated_rar29_rgb_filtered_archive_round_trips() {
 
     assert_eq!(file.unp_ver, 29);
     assert_eq!(file.method, 0x33);
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted[0].name, b"rar29-rgb-filtered.bin");
     assert_eq!(extracted[0].data, payload);
 }
@@ -1006,7 +1107,7 @@ fn generated_rar29_segmented_rgb_filtered_archive_round_trips() {
 
     assert_eq!(file.unp_ver, 29);
     assert_eq!(file.method, 0x33);
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted[0].name, b"rar29-segmented-rgb-filtered.bin");
     assert_eq!(extracted[0].data, payload);
 }
@@ -1101,7 +1202,7 @@ fn generated_rar29_audio_filtered_archive_round_trips() {
 
     assert_eq!(file.unp_ver, 29);
     assert_eq!(file.method, 0x33);
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted[0].name, b"rar29-audio-filtered.bin");
     assert_eq!(extracted[0].data, payload);
 }
@@ -1137,7 +1238,7 @@ fn generated_rar29_segmented_audio_filtered_archive_round_trips() {
 
     assert_eq!(file.unp_ver, 29);
     assert_eq!(file.method, 0x33);
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted[0].name, b"rar29-segmented-audio-filtered.bin");
     assert_eq!(extracted[0].data, payload);
 }
@@ -1469,7 +1570,7 @@ fn writes_store_only_rar15_archive_that_reader_extracts() {
     assert_eq!(files[0].method, 0x30);
     assert_eq!(files[0].file_crc, crc32(entries[0].data));
 
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted.len(), 2);
     assert_eq!(extracted[0].data, entries[0].data);
     assert_eq!(extracted[1].data, entries[1].data);
@@ -1505,7 +1606,7 @@ fn writes_stored_rar15_archive_comment_that_reader_decodes() {
         archive.archive_comment().unwrap().as_deref(),
         Some(&b"archive note\n"[..])
     );
-    assert_eq!(archive.extract().unwrap()[0].data, entries[0].data);
+    assert_eq!(collect_extract(&archive).unwrap()[0].data, entries[0].data);
 }
 
 #[test]
@@ -1537,7 +1638,10 @@ fn writes_rar15_file_comments_that_reader_decodes() {
         stored_file.file_comment().unwrap().as_deref(),
         Some(&b"stored note\r\n"[..])
     );
-    assert_eq!(stored_archive.extract().unwrap()[0].data, stored[0].data);
+    assert_eq!(
+        collect_extract(&stored_archive).unwrap()[0].data,
+        stored[0].data
+    );
 
     let compressed = [FileEntry {
         name: b"compressed-comment.txt",
@@ -1564,7 +1668,7 @@ fn writes_rar15_file_comments_that_reader_decodes() {
         Some(&b"compressed note"[..])
     );
     assert_eq!(
-        compressed_archive.extract().unwrap()[0].data,
+        collect_extract(&compressed_archive).unwrap()[0].data,
         compressed[0].data
     );
 }
@@ -1597,7 +1701,7 @@ fn writes_rar20_old_style_comments_that_reader_decodes() {
         archive.archive_comment().unwrap().as_deref(),
         Some(b"rar20 archive note\r\n".as_slice())
     );
-    assert_eq!(archive.extract().unwrap()[0].data, stored[0].data);
+    assert_eq!(collect_extract(&archive).unwrap()[0].data, stored[0].data);
 
     let mut file_features = FeatureSet::store_only();
     file_features.file_comment = true;
@@ -1627,7 +1731,10 @@ fn writes_rar20_old_style_comments_that_reader_decodes() {
         file.file_comment().unwrap().as_deref(),
         Some(b"rar20 file note".as_slice())
     );
-    assert_eq!(archive.extract().unwrap()[0].data, compressed[0].data);
+    assert_eq!(
+        collect_extract(&archive).unwrap()[0].data,
+        compressed[0].data
+    );
 }
 
 #[test]
@@ -1658,7 +1765,7 @@ fn writes_rar29_old_style_comments_that_reader_decodes() {
         archive.archive_comment().unwrap().as_deref(),
         Some(b"rar29 archive note\r\n".as_slice())
     );
-    assert_eq!(archive.extract().unwrap()[0].data, stored[0].data);
+    assert_eq!(collect_extract(&archive).unwrap()[0].data, stored[0].data);
 
     let mut file_features = FeatureSet::store_only();
     file_features.file_comment = true;
@@ -1688,7 +1795,10 @@ fn writes_rar29_old_style_comments_that_reader_decodes() {
         file.file_comment().unwrap().as_deref(),
         Some(b"rar29 file note".as_slice())
     );
-    assert_eq!(archive.extract().unwrap()[0].data, compressed[0].data);
+    assert_eq!(
+        collect_extract(&archive).unwrap()[0].data,
+        compressed[0].data
+    );
 }
 
 #[test]
@@ -1724,7 +1834,7 @@ fn writes_rar3_newsub_archive_comment_that_reader_decodes() {
             archive.archive_comment().unwrap().as_deref(),
             Some(b"rar3 NEWSUB archive note\r\n".as_slice())
         );
-        assert_eq!(archive.extract().unwrap()[0].data, entries[0].data);
+        assert_eq!(collect_extract(&archive).unwrap()[0].data, entries[0].data);
     }
 }
 
@@ -1761,7 +1871,7 @@ fn writes_compressed_rar15_archive_that_reader_extracts() {
     assert_eq!(files[0].method, 0x33);
     assert_eq!(files[0].file_crc, crc32(entries[0].data));
 
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted.len(), 2);
     assert_eq!(extracted[0].data, entries[0].data);
     assert_eq!(extracted[1].data, entries[1].data);
@@ -1829,7 +1939,7 @@ fn writes_literal_compressed_rar20_archive_that_reader_extracts() {
     assert!(files[2].pack_size < files[2].unp_size / 4);
     assert!(files[3].pack_size < files[3].unp_size / 2);
 
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted.len(), 4);
     assert_eq!(extracted[0].data, entries[0].data);
     assert_eq!(extracted[1].data, entries[1].data);
@@ -1861,14 +1971,15 @@ fn writes_encrypted_rar20_archives_that_reader_extracts_with_password() {
     assert_eq!(stored_file.unp_ver, 20);
     assert!(stored_file.is_encrypted());
     assert_eq!(stored_file.pack_size % 16, 0);
-    assert!(matches!(stored_archive.extract(), Err(Error::NeedPassword)));
     assert!(matches!(
-        stored_archive.extract_with_password(Some(b"wrong")),
+        collect_extract(&stored_archive),
+        Err(Error::NeedPassword)
+    ));
+    assert!(matches!(
+        collect_extract_with_password(&stored_archive, Some(b"wrong")),
         Err(Error::WrongPasswordOrCorruptData)
     ));
-    let extracted = stored_archive
-        .extract_with_password(Some(b"password"))
-        .unwrap();
+    let extracted = collect_extract_with_password(&stored_archive, Some(b"password")).unwrap();
     assert_eq!(extracted[0].data, stored[0].data);
 
     let compressed = [FileEntry {
@@ -1887,16 +1998,14 @@ fn writes_encrypted_rar20_archives_that_reader_extracts_with_password() {
     assert!(compressed_file.is_encrypted());
     assert_eq!(compressed_file.pack_size % 16, 0);
     assert!(matches!(
-        compressed_archive.extract(),
+        collect_extract(&compressed_archive),
         Err(Error::NeedPassword)
     ));
     assert!(matches!(
-        compressed_archive.extract_with_password(Some(b"wrong")),
+        collect_extract_with_password(&compressed_archive, Some(b"wrong")),
         Err(Error::WrongPasswordOrCorruptData)
     ));
-    let extracted = compressed_archive
-        .extract_with_password(Some(b"password"))
-        .unwrap();
+    let extracted = collect_extract_with_password(&compressed_archive, Some(b"password")).unwrap();
     assert_eq!(extracted[0].data, compressed[0].data);
 }
 
@@ -1925,14 +2034,15 @@ fn writes_encrypted_rar29_archives_that_reader_extracts_with_password() {
     assert!(stored_file.is_encrypted());
     assert!(stored_file.salt.is_some());
     assert_eq!(stored_file.pack_size % 16, 0);
-    assert!(matches!(stored_archive.extract(), Err(Error::NeedPassword)));
     assert!(matches!(
-        stored_archive.extract_with_password(Some(b"wrong")),
+        collect_extract(&stored_archive),
+        Err(Error::NeedPassword)
+    ));
+    assert!(matches!(
+        collect_extract_with_password(&stored_archive, Some(b"wrong")),
         Err(Error::WrongPasswordOrCorruptData)
     ));
-    let extracted = stored_archive
-        .extract_with_password(Some(b"password"))
-        .unwrap();
+    let extracted = collect_extract_with_password(&stored_archive, Some(b"password")).unwrap();
     assert_eq!(extracted[0].data, stored[0].data);
 
     let compressed = [FileEntry {
@@ -1952,16 +2062,14 @@ fn writes_encrypted_rar29_archives_that_reader_extracts_with_password() {
     assert!(compressed_file.salt.is_some());
     assert_eq!(compressed_file.pack_size % 16, 0);
     assert!(matches!(
-        compressed_archive.extract(),
+        collect_extract(&compressed_archive),
         Err(Error::NeedPassword)
     ));
     assert!(matches!(
-        compressed_archive.extract_with_password(Some(b"wrong")),
+        collect_extract_with_password(&compressed_archive, Some(b"wrong")),
         Err(Error::WrongPasswordOrCorruptData)
     ));
-    let extracted = compressed_archive
-        .extract_with_password(Some(b"password"))
-        .unwrap();
+    let extracted = collect_extract_with_password(&compressed_archive, Some(b"password")).unwrap();
     assert_eq!(extracted[0].data, compressed[0].data);
 }
 
@@ -2029,7 +2137,7 @@ fn writes_literal_compressed_rar29_archive_that_reader_extracts() {
     assert!(files[2].pack_size < files[2].unp_size / 4);
     assert!(files[3].pack_size < files[3].unp_size / 2);
 
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted.len(), 4);
     assert_eq!(extracted[0].data, entries[0].data);
     assert_eq!(extracted[1].data, entries[1].data);
@@ -2077,7 +2185,7 @@ fn writes_solid_compressed_rar29_rar30_and_rar40_archives_that_reader_extracts()
         let independent_lz = rars_codec::rar29::unpack29_encode_literals(entries[1].data).unwrap();
         assert!(files[1].pack_size < independent_lz.len() as u64);
 
-        let extracted = archive.extract().unwrap();
+        let extracted = collect_extract(&archive).unwrap();
         assert_eq!(extracted.len(), 2);
         assert_eq!(extracted[0].data, entries[0].data);
         assert_eq!(extracted[1].data, entries[1].data);
@@ -2131,7 +2239,7 @@ fn writes_solid_compressed_rar20_archive_that_reader_extracts() {
     assert!(files.iter().all(|file| file.unp_ver == 20));
     assert!(files[1].pack_size < files[0].pack_size);
 
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted.len(), 2);
     assert_eq!(extracted[0].data, first_data);
     assert_eq!(extracted[1].data, second_data);
@@ -2206,7 +2314,7 @@ fn writes_solid_rar20_archive_across_table_boundary_and_multiple_history_members
     let independent_third = independent_third.files().next().unwrap();
     assert!(files[2].pack_size < independent_third.pack_size);
 
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted.len(), 3);
     assert_eq!(extracted[0].data, first_data);
     assert_eq!(extracted[1].data, second_data);
@@ -2247,7 +2355,7 @@ fn compressed_rar29_writer_stores_incompressible_member_when_smaller() {
 
     assert_eq!(file.method, 0x30);
     assert_eq!(file.pack_size, data.len() as u64);
-    assert_eq!(archive.extract().unwrap()[0].data, data);
+    assert_eq!(collect_extract(&archive).unwrap()[0].data, data);
 }
 
 #[test]
@@ -2314,7 +2422,7 @@ fn solid_rar29_writer_stores_incompressible_member_and_resets_solid_run() {
     assert!(!files[1].is_solid());
     assert!(!files[2].is_solid());
 
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted[0].data, first_data);
     assert_eq!(extracted[1].data, randomish);
     assert_eq!(extracted[2].data, second_data);
@@ -2355,7 +2463,7 @@ fn auto_filtered_rar29_writer_stores_incompressible_member_when_smaller() {
 
     assert_eq!(file.method, 0x30);
     assert_eq!(file.pack_size, data.len() as u64);
-    assert_eq!(archive.extract().unwrap()[0].data, data);
+    assert_eq!(collect_extract(&archive).unwrap()[0].data, data);
 }
 
 #[test]
@@ -2398,7 +2506,7 @@ fn auto_filtered_rar29_writer_chooses_ppmd_for_text_when_smaller() {
 
     assert_eq!(file.method, 0x35);
     assert_eq!(file.pack_size, ppmd_packed.len() as u64);
-    assert_eq!(archive.extract().unwrap()[0].data, payload);
+    assert_eq!(collect_extract(&archive).unwrap()[0].data, payload);
 }
 
 #[test]
@@ -2428,7 +2536,7 @@ fn default_rar29_writer_uses_auto_policy_for_text() {
 
     assert_eq!(file.method, 0x35);
     assert_eq!(file.pack_size, ppmd_packed.len() as u64);
-    assert_eq!(archive.extract().unwrap()[0].data, payload);
+    assert_eq!(collect_extract(&archive).unwrap()[0].data, payload);
 }
 
 #[test]
@@ -2475,7 +2583,7 @@ fn auto_filtered_rar29_writer_improves_x86_relative_calls() {
         auto_file.pack_size * 2 < plain_packed.len() as u64,
         "auto-filtered x86 payload should be much smaller than plain RAR29 LZ"
     );
-    assert_eq!(auto.extract().unwrap()[0].data, payload);
+    assert_eq!(collect_extract(&auto).unwrap()[0].data, payload);
 }
 
 #[test]
@@ -2517,7 +2625,7 @@ fn default_rar29_writer_uses_auto_policy_for_x86() {
 
     assert_eq!(default, explicit_auto);
     assert_eq!(default_archive.files().next().unwrap().method, 0x33);
-    assert_eq!(auto_archive.extract().unwrap()[0].data, payload);
+    assert_eq!(collect_extract(&auto_archive).unwrap()[0].data, payload);
 }
 
 #[test]
@@ -2563,7 +2671,7 @@ fn default_rar29_writer_uses_auto_policy_for_audio_shaped_data() {
     assert_eq!(default_file.method, 0x33);
     assert!(default_file.pack_size <= audio_file.pack_size);
     assert!(default_file.pack_size < ppmd_file.pack_size);
-    assert_eq!(default_archive.extract().unwrap()[0].data, payload);
+    assert_eq!(collect_extract(&default_archive).unwrap()[0].data, payload);
 }
 
 #[test]
@@ -2626,7 +2734,7 @@ fn auto_filtered_rar29_writer_spans_separated_x86_call_clusters() {
         auto_file.pack_size <= span_file.pack_size,
         "auto filter should consider the whole code-section span"
     );
-    assert_eq!(auto.extract().unwrap()[0].data, payload);
+    assert_eq!(collect_extract(&auto).unwrap()[0].data, payload);
 }
 
 #[test]
@@ -2657,7 +2765,7 @@ fn ppmd_rar29_writer_emits_method_35_member() {
 
     assert_eq!(file.method, 0x35);
     assert_eq!(file.unp_ver, 29);
-    assert_eq!(archive.extract().unwrap()[0].data, payload);
+    assert_eq!(collect_extract(&archive).unwrap()[0].data, payload);
 }
 
 #[test]
@@ -2695,7 +2803,7 @@ fn ppmd_rar29_writer_uses_lz_escapes_for_repeated_data() {
 
     assert_eq!(file.method, 0x35);
     assert_eq!(file.pack_size, codec_packed.len() as u64);
-    assert_eq!(archive.extract().unwrap()[0].data, payload);
+    assert_eq!(collect_extract(&archive).unwrap()[0].data, payload);
 }
 
 #[test]
@@ -2724,7 +2832,7 @@ fn ppmd_rar29_writer_embeds_vm_filter_record() {
     let file = archive.files().next().unwrap();
 
     assert_eq!(file.method, 0x35);
-    assert_eq!(archive.extract().unwrap()[0].data, payload);
+    assert_eq!(collect_extract(&archive).unwrap()[0].data, payload);
 }
 
 #[test]
@@ -2767,7 +2875,7 @@ fn writes_solid_compressed_rar15_archive_that_reader_extracts() {
     assert!(!files[0].is_solid());
     assert!(files[1].is_solid());
 
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted.len(), 2);
     assert_eq!(extracted[0].data, entries[0].data);
     assert_eq!(extracted[1].data, entries[1].data);
@@ -2798,10 +2906,11 @@ fn writes_encrypted_rar15_archives_that_reader_extracts_with_password() {
     let stored_archive = Archive::parse(&stored_bytes).unwrap();
     let stored_file = stored_archive.files().next().unwrap();
     assert!(stored_file.is_encrypted());
-    assert!(matches!(stored_archive.extract(), Err(Error::NeedPassword)));
-    let extracted = stored_archive
-        .extract_with_password(Some(b"password"))
-        .unwrap();
+    assert!(matches!(
+        collect_extract(&stored_archive),
+        Err(Error::NeedPassword)
+    ));
+    let extracted = collect_extract_with_password(&stored_archive, Some(b"password")).unwrap();
     assert_eq!(extracted[0].data, stored[0].data);
 
     let compressed = [FileEntry {
@@ -2825,12 +2934,10 @@ fn writes_encrypted_rar15_archives_that_reader_extracts_with_password() {
     let compressed_file = compressed_archive.files().next().unwrap();
     assert!(compressed_file.is_encrypted());
     assert!(matches!(
-        compressed_archive.extract_with_password(Some(b"wrong")),
+        collect_extract_with_password(&compressed_archive, Some(b"wrong")),
         Err(Error::WrongPasswordOrCorruptData)
     ));
-    let extracted = compressed_archive
-        .extract_with_password(Some(b"password"))
-        .unwrap();
+    let extracted = collect_extract_with_password(&compressed_archive, Some(b"password")).unwrap();
     assert_eq!(extracted[0].data, compressed[0].data);
 }
 
@@ -2857,14 +2964,15 @@ fn writes_aes_encrypted_rar3_and_rar4_archives_that_reader_extracts_with_passwor
         assert_eq!(stored_file.unp_ver, 29);
         assert!(stored_file.salt.is_some());
         assert_eq!(stored_file.pack_size % 16, 0);
-        assert!(matches!(stored_archive.extract(), Err(Error::NeedPassword)));
         assert!(matches!(
-            stored_archive.extract_with_password(Some(b"wrong")),
+            collect_extract(&stored_archive),
+            Err(Error::NeedPassword)
+        ));
+        assert!(matches!(
+            collect_extract_with_password(&stored_archive, Some(b"wrong")),
             Err(Error::WrongPasswordOrCorruptData)
         ));
-        let extracted = stored_archive
-            .extract_with_password(Some(b"password"))
-            .unwrap();
+        let extracted = collect_extract_with_password(&stored_archive, Some(b"password")).unwrap();
         assert_eq!(extracted[0].data, stored[0].data);
 
         let compressed = [FileEntry {
@@ -2886,16 +2994,15 @@ fn writes_aes_encrypted_rar3_and_rar4_archives_that_reader_extracts_with_passwor
         assert!(compressed_file.salt.is_some());
         assert_eq!(compressed_file.pack_size % 16, 0);
         assert!(matches!(
-            compressed_archive.extract(),
+            collect_extract(&compressed_archive),
             Err(Error::NeedPassword)
         ));
         assert!(matches!(
-            compressed_archive.extract_with_password(Some(b"wrong")),
+            collect_extract_with_password(&compressed_archive, Some(b"wrong")),
             Err(Error::WrongPasswordOrCorruptData)
         ));
-        let extracted = compressed_archive
-            .extract_with_password(Some(b"password"))
-            .unwrap();
+        let extracted =
+            collect_extract_with_password(&compressed_archive, Some(b"password")).unwrap();
         assert_eq!(extracted[0].data, compressed[0].data);
     }
 }
@@ -2925,7 +3032,7 @@ fn writes_header_encrypted_rar3_and_rar4_archives_that_reader_extracts_with_pass
         assert_eq!(files[0].name, b"header-secret.txt");
         assert!(files[0].is_encrypted());
 
-        let extracted = archive.extract_with_password(Some(b"password")).unwrap();
+        let extracted = collect_extract_with_password(&archive, Some(b"password")).unwrap();
         assert_eq!(extracted.len(), 1);
         assert_eq!(extracted[0].data, entries[0].data);
     }
@@ -2970,7 +3077,7 @@ fn writes_solid_header_encrypted_rar3_and_rar4_archives_that_reader_extracts_wit
         assert!(files[1].is_solid());
         assert!(files.iter().all(|file| file.is_encrypted()));
 
-        let extracted = archive.extract_with_password(Some(b"password")).unwrap();
+        let extracted = collect_extract_with_password(&archive, Some(b"password")).unwrap();
         assert_eq!(extracted[0].data, entries[0].data);
         assert_eq!(extracted[1].data, entries[1].data);
     }
@@ -3014,17 +3121,11 @@ fn rar3_and_rar4_aes_writer_uses_fresh_salts() {
     assert_ne!(first, second);
     assert_ne!(first_file.salt, second_file.salt);
     assert_eq!(
-        first_archive
-            .extract_with_password(Some(b"password"))
-            .unwrap()[0]
-            .data,
+        collect_extract_with_password(&first_archive, Some(b"password")).unwrap()[0].data,
         entry[0].data
     );
     assert_eq!(
-        second_archive
-            .extract_with_password(Some(b"password"))
-            .unwrap()[0]
-            .data,
+        collect_extract_with_password(&second_archive, Some(b"password")).unwrap()[0].data,
         entry[0].data
     );
 }
@@ -3056,7 +3157,7 @@ fn writes_stored_rar15_volume_set_that_reader_reassembles() {
     assert!(archives[3].files().next().unwrap().is_split_before());
     assert!(!archives[3].files().next().unwrap().is_split_after());
 
-    let extracted = extract_volumes(&archives).unwrap();
+    let extracted = collect_extract_volumes(&archives).unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, entry.name);
     assert_eq!(extracted[0].data, entry.data);
@@ -3085,7 +3186,7 @@ fn writes_compressed_rar15_volume_set_that_reader_reassembles() {
     assert!(archives[0].main.is_first_volume());
     assert!(archives[0].files().next().unwrap().is_split_after());
 
-    let extracted = extract_volumes(&archives).unwrap();
+    let extracted = collect_extract_volumes(&archives).unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, entry.name);
     assert_eq!(extracted[0].data, entry.data);
@@ -3120,7 +3221,7 @@ fn writes_compressed_rar20_volume_set_that_reader_reassembles() {
     assert_eq!(first_file.unp_ver, 20);
     assert!(first_file.is_split_after());
 
-    let extracted = extract_volumes(&archives).unwrap();
+    let extracted = collect_extract_volumes(&archives).unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, entry.name);
     assert_eq!(extracted[0].data, entry.data);
@@ -3155,7 +3256,7 @@ fn writes_compressed_rar29_volume_set_that_reader_reassembles() {
     assert_eq!(first_file.unp_ver, 29);
     assert!(first_file.is_split_after());
 
-    let extracted = extract_volumes(&archives).unwrap();
+    let extracted = collect_extract_volumes(&archives).unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, entry.name);
     assert_eq!(extracted[0].data, entry.data);
@@ -3186,12 +3287,11 @@ fn writes_encrypted_rar15_volume_sets_that_reader_reassembles_with_password() {
         .collect();
     assert!(stored_archives[0].files().next().unwrap().is_encrypted());
     assert!(matches!(
-        extract_volumes(&stored_archives),
+        collect_extract_volumes(&stored_archives),
         Err(Error::NeedPassword)
     ));
     let extracted =
-        rars_format::rar15_40::extract_volumes_with_password(&stored_archives, Some(b"password"))
-            .unwrap();
+        collect_extract_volumes_with_password(&stored_archives, Some(b"password")).unwrap();
     assert_eq!(extracted[0].data, stored.data);
 
     let compressed = FileEntry {
@@ -3214,14 +3314,11 @@ fn writes_encrypted_rar15_volume_sets_that_reader_reassembles_with_password() {
         .unwrap()
         .is_encrypted());
     assert!(matches!(
-        rars_format::rar15_40::extract_volumes_with_password(&compressed_archives, Some(b"wrong")),
+        collect_extract_volumes_with_password(&compressed_archives, Some(b"wrong")),
         Err(Error::WrongPasswordOrCorruptData)
     ));
-    let extracted = rars_format::rar15_40::extract_volumes_with_password(
-        &compressed_archives,
-        Some(b"password"),
-    )
-    .unwrap();
+    let extracted =
+        collect_extract_volumes_with_password(&compressed_archives, Some(b"password")).unwrap();
     assert_eq!(extracted[0].data, compressed.data);
 }
 
@@ -3252,16 +3349,15 @@ fn writes_encrypted_rar20_volume_sets_that_reader_reassembles_with_password() {
     assert_eq!(first_stored.unp_ver, 20);
     assert!(first_stored.is_encrypted());
     assert!(matches!(
-        extract_volumes(&stored_archives),
+        collect_extract_volumes(&stored_archives),
         Err(Error::NeedPassword)
     ));
     assert!(matches!(
-        rars_format::rar15_40::extract_volumes_with_password(&stored_archives, Some(b"wrong")),
+        collect_extract_volumes_with_password(&stored_archives, Some(b"wrong")),
         Err(Error::WrongPasswordOrCorruptData)
     ));
     let extracted =
-        rars_format::rar15_40::extract_volumes_with_password(&stored_archives, Some(b"password"))
-            .unwrap();
+        collect_extract_volumes_with_password(&stored_archives, Some(b"password")).unwrap();
     assert_eq!(extracted[0].data, stored.data);
 
     let compressed = FileEntry {
@@ -3282,14 +3378,11 @@ fn writes_encrypted_rar20_volume_sets_that_reader_reassembles_with_password() {
     assert_eq!(first_compressed.unp_ver, 20);
     assert!(first_compressed.is_encrypted());
     assert!(matches!(
-        rars_format::rar15_40::extract_volumes_with_password(&compressed_archives, Some(b"wrong")),
+        collect_extract_volumes_with_password(&compressed_archives, Some(b"wrong")),
         Err(Error::WrongPasswordOrCorruptData)
     ));
-    let extracted = rars_format::rar15_40::extract_volumes_with_password(
-        &compressed_archives,
-        Some(b"password"),
-    )
-    .unwrap();
+    let extracted =
+        collect_extract_volumes_with_password(&compressed_archives, Some(b"password")).unwrap();
     assert_eq!(extracted[0].data, compressed.data);
 }
 
@@ -3324,16 +3417,15 @@ fn writes_encrypted_rar29_volume_sets_that_reader_reassembles_with_password() {
         assert_eq!(archive.files().next().unwrap().salt, first_stored.salt);
     }
     assert!(matches!(
-        extract_volumes(&stored_archives),
+        collect_extract_volumes(&stored_archives),
         Err(Error::NeedPassword)
     ));
     assert!(matches!(
-        rars_format::rar15_40::extract_volumes_with_password(&stored_archives, Some(b"wrong")),
+        collect_extract_volumes_with_password(&stored_archives, Some(b"wrong")),
         Err(Error::WrongPasswordOrCorruptData)
     ));
     let extracted =
-        rars_format::rar15_40::extract_volumes_with_password(&stored_archives, Some(b"password"))
-            .unwrap();
+        collect_extract_volumes_with_password(&stored_archives, Some(b"password")).unwrap();
     assert_eq!(extracted[0].data, stored.data);
 
     let compressed = FileEntry {
@@ -3358,14 +3450,11 @@ fn writes_encrypted_rar29_volume_sets_that_reader_reassembles_with_password() {
         assert_eq!(archive.files().next().unwrap().salt, first_compressed.salt);
     }
     assert!(matches!(
-        rars_format::rar15_40::extract_volumes_with_password(&compressed_archives, Some(b"wrong")),
+        collect_extract_volumes_with_password(&compressed_archives, Some(b"wrong")),
         Err(Error::WrongPasswordOrCorruptData)
     ));
-    let extracted = rars_format::rar15_40::extract_volumes_with_password(
-        &compressed_archives,
-        Some(b"password"),
-    )
-    .unwrap();
+    let extracted =
+        collect_extract_volumes_with_password(&compressed_archives, Some(b"password")).unwrap();
     assert_eq!(extracted[0].data, compressed.data);
 }
 
@@ -3413,16 +3502,15 @@ fn assert_encrypted_rar3_volume_sets_round_trip(target: ArchiveVersion) {
         assert_eq!(archive.files().next().unwrap().salt, first_stored.salt);
     }
     assert!(matches!(
-        extract_volumes(&stored_archives),
+        collect_extract_volumes(&stored_archives),
         Err(Error::NeedPassword)
     ));
     assert!(matches!(
-        rars_format::rar15_40::extract_volumes_with_password(&stored_archives, Some(b"wrong")),
+        collect_extract_volumes_with_password(&stored_archives, Some(b"wrong")),
         Err(Error::WrongPasswordOrCorruptData)
     ));
     let extracted =
-        rars_format::rar15_40::extract_volumes_with_password(&stored_archives, Some(b"password"))
-            .unwrap();
+        collect_extract_volumes_with_password(&stored_archives, Some(b"password")).unwrap();
     assert_eq!(extracted[0].data, stored.data);
 
     let compressed = FileEntry {
@@ -3454,14 +3542,11 @@ fn assert_encrypted_rar3_volume_sets_round_trip(target: ArchiveVersion) {
         assert_eq!(archive.files().next().unwrap().salt, first_compressed.salt);
     }
     assert!(matches!(
-        rars_format::rar15_40::extract_volumes_with_password(&compressed_archives, Some(b"wrong")),
+        collect_extract_volumes_with_password(&compressed_archives, Some(b"wrong")),
         Err(Error::WrongPasswordOrCorruptData)
     ));
-    let extracted = rars_format::rar15_40::extract_volumes_with_password(
-        &compressed_archives,
-        Some(b"password"),
-    )
-    .unwrap();
+    let extracted =
+        collect_extract_volumes_with_password(&compressed_archives, Some(b"password")).unwrap();
     assert_eq!(extracted[0].data, compressed.data);
 }
 
@@ -3492,12 +3577,11 @@ fn assert_header_encrypted_rar3_volume_sets_round_trip(target: ArchiveVersion) {
     assert!(stored_archives[0].main.has_encrypted_headers());
     assert!(stored_archives[0].files().next().unwrap().is_encrypted());
     assert!(matches!(
-        rars_format::rar15_40::extract_volumes_with_password(&stored_archives, Some(b"wrong")),
+        collect_extract_volumes_with_password(&stored_archives, Some(b"wrong")),
         Err(Error::WrongPasswordOrCorruptData)
     ));
     let extracted =
-        rars_format::rar15_40::extract_volumes_with_password(&stored_archives, Some(b"password"))
-            .unwrap();
+        collect_extract_volumes_with_password(&stored_archives, Some(b"password")).unwrap();
     assert_eq!(extracted[0].data, stored.data);
 
     let compressed = FileEntry {
@@ -3525,14 +3609,11 @@ fn assert_header_encrypted_rar3_volume_sets_round_trip(target: ArchiveVersion) {
         .unwrap()
         .is_encrypted());
     assert!(matches!(
-        rars_format::rar15_40::extract_volumes_with_password(&compressed_archives, Some(b"wrong")),
+        collect_extract_volumes_with_password(&compressed_archives, Some(b"wrong")),
         Err(Error::WrongPasswordOrCorruptData)
     ));
-    let extracted = rars_format::rar15_40::extract_volumes_with_password(
-        &compressed_archives,
-        Some(b"password"),
-    )
-    .unwrap();
+    let extracted =
+        collect_extract_volumes_with_password(&compressed_archives, Some(b"password")).unwrap();
     assert_eq!(extracted[0].data, compressed.data);
 }
 
@@ -3555,7 +3636,7 @@ fn extracts_rars_generated_rar15_writer_oracles() {
     ] {
         let bytes = std::fs::read(fixture(fixture_name)).unwrap();
         let archive = Archive::parse(&bytes).unwrap();
-        let extracted = archive.extract().unwrap();
+        let extracted = collect_extract(&archive).unwrap();
 
         assert_eq!(extracted[0].name, b"payload.txt");
         assert_eq!(extracted[0].data, RARS_GENERATED_PAYLOAD);
@@ -3580,21 +3661,18 @@ fn extracts_rars_generated_rar15_comments_and_encryption_oracles() {
         Some(&b"file-note"[..])
     );
     assert_eq!(
-        comment_archive.extract().unwrap()[0].data,
+        collect_extract(&comment_archive).unwrap()[0].data,
         RARS_GENERATED_PAYLOAD
     );
 
     let encrypted_bytes = std::fs::read(fixture("rars_generated/encrypted.rar")).unwrap();
     let encrypted_archive = Archive::parse(&encrypted_bytes).unwrap();
     assert!(matches!(
-        encrypted_archive.extract(),
+        collect_extract(&encrypted_archive),
         Err(Error::NeedPassword)
     ));
     assert_eq!(
-        encrypted_archive
-            .extract_with_password(Some(b"pass"))
-            .unwrap()[0]
-            .data,
+        collect_extract_with_password(&encrypted_archive, Some(b"pass")).unwrap()[0].data,
         RARS_GENERATED_PAYLOAD
     );
 }
@@ -3609,7 +3687,7 @@ fn extracts_rars_generated_rar15_writer_volume_oracles() {
     .into_iter()
     .map(|name| Archive::parse(&std::fs::read(fixture(name)).unwrap()).unwrap())
     .collect();
-    let stored = extract_volumes(&stored_archives).unwrap();
+    let stored = collect_extract_volumes(&stored_archives).unwrap();
     assert_eq!(stored[0].name, b"payload.txt");
     assert_eq!(stored[0].data, RARS_GENERATED_PAYLOAD);
 
@@ -3622,12 +3700,11 @@ fn extracts_rars_generated_rar15_writer_volume_oracles() {
     .map(|name| Archive::parse(&std::fs::read(fixture(name)).unwrap()).unwrap())
     .collect();
     assert!(matches!(
-        extract_volumes(&encrypted_archives),
+        collect_extract_volumes(&encrypted_archives),
         Err(Error::NeedPassword)
     ));
     let encrypted =
-        rars_format::rar15_40::extract_volumes_with_password(&encrypted_archives, Some(b"pass"))
-            .unwrap();
+        collect_extract_volumes_with_password(&encrypted_archives, Some(b"pass")).unwrap();
     assert_eq!(encrypted[0].name, b"payload.txt");
     assert_eq!(encrypted[0].data, RARS_GENERATED_PAYLOAD);
 }
@@ -3716,9 +3793,12 @@ fn extracts_rar202_encrypted_files_with_rar20_cipher() {
 
     assert_eq!(files.len(), 2);
     assert!(files.iter().all(|file| file.is_encrypted()));
-    assert!(matches!(archive.extract(), Err(Error::NeedPassword)));
+    assert!(matches!(
+        collect_extract(&archive),
+        Err(Error::NeedPassword)
+    ));
 
-    let extracted = archive.extract_with_password(Some(b"password")).unwrap();
+    let extracted = collect_extract_with_password(&archive, Some(b"password")).unwrap();
     assert_eq!(extracted.len(), 2);
     assert_eq!(extracted[0].name, b"FILE1.TXT");
     assert_eq!(extracted[0].data, b"file1\r\n");
@@ -3734,7 +3814,7 @@ fn rejects_wrong_password_for_rar20_encrypted_file_as_password_error() {
     let archive = Archive::parse(&bytes).unwrap();
 
     assert_eq!(
-        archive.extract_with_password(Some(b"wrong-password")),
+        collect_extract_with_password(&archive, Some(b"wrong-password")),
         Err(Error::WrongPasswordOrCorruptData)
     );
 }
@@ -3757,7 +3837,7 @@ fn extracts_rar300_header_encrypted_archive_with_password() {
     assert_eq!(file.unp_ver, 29);
     assert_eq!(file.method, 0x33);
 
-    let extracted = archive.extract_with_password(Some(b"password")).unwrap();
+    let extracted = collect_extract_with_password(&archive, Some(b"password")).unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].data, b"Hello, RAR 3.x fixture world.\n");
     assert_eq!(crc32(&extracted[0].data), 0xa538535e);
@@ -3774,7 +3854,7 @@ fn extracts_rar420_header_encrypted_archive_with_password() {
     assert_eq!(file.unp_ver, 29);
     assert_eq!(file.method, 0x33);
 
-    let extracted = archive.extract_with_password(Some(b"password")).unwrap();
+    let extracted = collect_extract_with_password(&archive, Some(b"password")).unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].data, b"Hello, RAR 3.x fixture world.\n");
     assert_eq!(crc32(&extracted[0].data), 0xa538535e);
@@ -3794,9 +3874,12 @@ fn extracts_rar300_aes_encrypted_file_with_password() {
         file.salt,
         Some([0x4a, 0x81, 0x67, 0x7d, 0xc0, 0x3d, 0x5f, 0x83])
     );
-    assert!(matches!(archive.extract(), Err(Error::NeedPassword)));
+    assert!(matches!(
+        collect_extract(&archive),
+        Err(Error::NeedPassword)
+    ));
 
-    let extracted = archive.extract_with_password(Some(b"password")).unwrap();
+    let extracted = collect_extract_with_password(&archive, Some(b"password")).unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"hello.txt");
     assert_eq!(extracted[0].data, b"Hello, RAR 3.x fixture world.\n");
@@ -3809,7 +3892,7 @@ fn rejects_wrong_password_for_rar3_encrypted_file_as_password_error() {
     let archive = Archive::parse(&bytes).unwrap();
 
     assert_eq!(
-        archive.extract_with_password(Some(b"wrong-password")),
+        collect_extract_with_password(&archive, Some(b"wrong-password")),
         Err(Error::WrongPasswordOrCorruptData)
     );
 }
@@ -3843,9 +3926,12 @@ fn extracts_rar4_junrar_encrypted_member_with_correct_password() {
     assert!(file.is_encrypted());
     assert_eq!(file.method, 0x33);
     assert_eq!(file.unp_ver, 29);
-    assert!(matches!(archive.extract(), Err(Error::NeedPassword)));
+    assert!(matches!(
+        collect_extract(&archive),
+        Err(Error::NeedPassword)
+    ));
 
-    let extracted = archive.extract_with_password(Some(b"junrar")).unwrap();
+    let extracted = collect_extract_with_password(&archive, Some(b"junrar")).unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"file1.txt");
     assert_eq!(extracted[0].data, b"file1\n");
@@ -3858,7 +3944,7 @@ fn rejects_wrong_password_for_rar4_encrypted_file_as_password_error() {
     let archive = Archive::parse(&bytes).unwrap();
 
     assert_eq!(
-        archive.extract_with_password(Some(b"wrong-password")),
+        collect_extract_with_password(&archive, Some(b"wrong-password")),
         Err(Error::WrongPasswordOrCorruptData)
     );
 }
@@ -3871,7 +3957,7 @@ fn extracts_rar4_junrar_header_encrypted_member_with_correct_password() {
     let archive = Archive::parse_with_password(&bytes, Some(b"junrar")).unwrap();
     assert!(archive.main.has_encrypted_headers());
 
-    let extracted = archive.extract_with_password(Some(b"junrar")).unwrap();
+    let extracted = collect_extract_with_password(&archive, Some(b"junrar")).unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"file1.txt");
     assert_eq!(extracted[0].data, b"file1\n");
@@ -3890,7 +3976,7 @@ fn decodes_rar4_compact_unicode_name_before_extraction() {
     assert_eq!(file.name, "新建文本文档.txt".as_bytes());
     assert!(file.is_encrypted());
 
-    let extracted = archive.extract_with_password(Some(b"test")).unwrap();
+    let extracted = collect_extract_with_password(&archive, Some(b"test")).unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, "新建文本文档.txt".as_bytes());
     assert_eq!(extracted[0].data, b"aaaaaaaaaa");
@@ -3913,7 +3999,7 @@ fn extracts_rar4_sharpcompress_encrypted_files_only_archive() {
     assert!(files[..3].iter().all(|file| file.is_encrypted()));
     assert!(files[3..].iter().all(|file| file.is_directory()));
 
-    let extracted = archive.extract_with_password(Some(b"test")).unwrap();
+    let extracted = collect_extract_with_password(&archive, Some(b"test")).unwrap();
     assert_eq!(extracted.len(), 6);
     assert_eq!(extracted[0].name, b"exe\\test.exe");
     assert_eq!(extracted[0].data.len(), 45056);
@@ -3945,13 +4031,16 @@ fn extracts_rar4_mixed_visible_names_known_password_fixture() {
     assert_eq!(stored.data, b"1File");
     assert_eq!(crc32(&stored.data), 0x578a2019);
 
-    assert!(matches!(archive.extract(), Err(Error::NeedPassword)));
+    assert!(matches!(
+        collect_extract(&archive),
+        Err(Error::NeedPassword)
+    ));
     assert_eq!(
-        archive.extract_with_password(Some(b"wrong-password")),
+        collect_extract_with_password(&archive, Some(b"wrong-password")),
         Err(Error::WrongPasswordOrCorruptData)
     );
 
-    let extracted = archive.extract_with_password(Some(b"known-pass")).unwrap();
+    let extracted = collect_extract_with_password(&archive, Some(b"known-pass")).unwrap();
     assert_eq!(extracted.len(), 3);
     assert_eq!(extracted[0].name, b"1File.txt");
     assert_eq!(extracted[0].data, b"1File");
@@ -3968,7 +4057,7 @@ fn extracts_rar300_stored_file_and_verifies_crc32() {
     let bytes = std::fs::read(fixture("rar300/with_comment_rar300.rar")).unwrap();
     let archive = Archive::parse(&bytes).unwrap();
 
-    let extracted = archive.extract_stored().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"hello.txt");
     assert_eq!(extracted[0].data, b"Hello, RAR 3.x fixture world.\n");
@@ -4003,10 +4092,11 @@ fn rejects_corrupt_rar15_40_stored_payload_checksum() {
     bytes[offset] ^= 0x01;
     let archive = Archive::parse(&bytes).unwrap();
 
-    assert!(matches!(
-        archive.extract_stored(),
-        Err(Error::Crc32Mismatch { .. })
-    ));
+    match collect_extract(&archive) {
+        Err(Error::Crc32Mismatch { .. }) => {}
+        Err(Error::AtEntry { source, .. }) if matches!(*source, Error::Crc32Mismatch { .. }) => {}
+        other => panic!("expected checksum error, got {other:?}"),
+    }
 }
 
 #[test]
@@ -4033,7 +4123,7 @@ fn extracts_large_solid_rar300_with_reused_tables() {
     assert!(files.iter().all(|file| file.method == 0x33));
     assert!(files.iter().all(|file| file.unp_ver == 29));
 
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted.len(), 3);
     assert_eq!(extracted[0].name, b"hello.txt");
     assert_eq!(extracted[0].data, b"Hello, RAR 3.x fixture world.\n");
@@ -4051,7 +4141,7 @@ fn extracts_simple_solid_rar300_entries_with_codec_state() {
     let bytes = std::fs::read(fixture("rar300/solid_simple_rar300.rar")).unwrap();
     let archive = Archive::parse(&bytes).unwrap();
 
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted.len(), 2);
     assert_eq!(extracted[0].name, b"one.txt");
     assert_eq!(
@@ -4072,8 +4162,9 @@ fn stored_only_extract_rejects_compressed_rar300_lz_file() {
     let bytes = std::fs::read(fixture("rar300/compressed_text_rar300.rar")).unwrap();
     let archive = Archive::parse(&bytes).unwrap();
 
+    let file = archive.files().next().unwrap();
     assert!(matches!(
-        archive.extract_stored(),
+        file.extract_stored(&archive),
         Err(Error::InvalidHeader(
             "RAR 1.5 compressed file extraction is not implemented"
         ))
@@ -4085,7 +4176,7 @@ fn extracts_compressed_rar300_lz_file() {
     let bytes = std::fs::read(fixture("rar300/compressed_text_rar300.rar")).unwrap();
     let archive = Archive::parse(&bytes).unwrap();
 
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"text.txt");
     assert_eq!(extracted[0].data, expected_compressed_text_payload());
@@ -4105,7 +4196,7 @@ fn extracts_rar154_unp15_compressed_file() {
     assert_eq!(file.pack_size, 2068);
     assert_eq!(file.unp_size, 4198);
 
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"README.md");
     assert_eq!(extracted[0].data, expected);
@@ -4123,9 +4214,12 @@ fn extracts_rar154_crypt15_encrypted_compressed_file() {
     assert!(file.is_encrypted());
     assert_eq!(file.method, 0x33);
     assert_eq!(file.unp_ver, 15);
-    assert!(matches!(archive.extract(), Err(Error::NeedPassword)));
+    assert!(matches!(
+        collect_extract(&archive),
+        Err(Error::NeedPassword)
+    ));
 
-    let extracted = archive.extract_with_password(Some(b"password")).unwrap();
+    let extracted = collect_extract_with_password(&archive, Some(b"password")).unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"README.md");
     assert_eq!(extracted[0].data, expected);
@@ -4138,7 +4232,7 @@ fn rejects_wrong_password_for_rar15_encrypted_file_as_password_error() {
     let archive = Archive::parse(&bytes).unwrap();
 
     assert_eq!(
-        archive.extract_with_password(Some(b"wrong-password")),
+        collect_extract_with_password(&archive, Some(b"wrong-password")),
         Err(Error::WrongPasswordOrCorruptData)
     );
 }
@@ -4150,7 +4244,7 @@ fn extracts_rar154_unp15_solid_flagged_file() {
     let archive = Archive::parse(&bytes).unwrap();
 
     assert!(archive.main.is_solid());
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"README.md");
     assert_eq!(extracted[0].data, expected);
@@ -4165,7 +4259,7 @@ fn extracts_rar154_unp15_multi_file_archive() {
     assert_eq!(files.len(), 17);
     assert!(files.iter().all(|file| file.unp_ver == 15));
 
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted.len(), 17);
     let expected = expected_doc_154_best_manifest();
     for (entry, (name, size, crc)) in extracted.iter().zip(expected) {
@@ -4179,7 +4273,7 @@ fn extracts_rar154_unp15_multi_file_archive() {
 fn extracts_rar154_unp15_audio_shaped_windows_archive() {
     let bytes = std::fs::read(fixture("rar154/audio_win_names_unpack15.rar")).unwrap();
     let archive = Archive::parse(&bytes).unwrap();
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
 
     assert_eq!(extracted.len(), 2);
     assert_eq!(extracted[0].name, b"BoatModernEnglish.wav");
@@ -4194,7 +4288,7 @@ fn extracts_rar154_unp15_audio_shaped_windows_archive() {
 fn extracts_rar154_unp15_audio_shaped_dos_archive() {
     let bytes = std::fs::read(fixture("rar154/audio_dos_names_unpack15.rar")).unwrap();
     let archive = Archive::parse(&bytes).unwrap();
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
 
     assert_eq!(extracted.len(), 2);
     assert_eq!(extracted[0].name, b"BOATMO~1.WAV");
@@ -4217,7 +4311,7 @@ fn extracts_rar250_unp20_lz_file() {
     assert_eq!(file.pack_size, 54);
     assert_eq!(file.unp_size, 2300);
 
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"PLAIN.TXT");
     assert_eq!(extracted[0].data.len(), 2300);
@@ -4305,13 +4399,13 @@ fn repairs_rar250_protect_head_single_damaged_sector() {
     damaged[damage_offset..damage_offset + 64].fill(0xa5);
 
     let damaged_archive = Archive::parse(&damaged).unwrap();
-    assert!(damaged_archive.extract().is_err());
+    assert!(collect_extract(&damaged_archive).is_err());
 
     let repaired = damaged_archive.repair_protect_head().unwrap();
 
     assert_eq!(repaired, bytes);
     let repaired_archive = Archive::parse(&repaired).unwrap();
-    let extracted = repaired_archive.extract().unwrap();
+    let extracted = collect_extract(&repaired_archive).unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"BIG.BIN");
     assert_eq!(crc32(&extracted[0].data), 0x9a0e0c8c);
@@ -4329,13 +4423,13 @@ fn protect_head_does_not_repair_trailing_partial_sector_before_record() {
     damaged[damage_offset..damage_offset + 8].fill(0xa5);
 
     let damaged_archive = Archive::parse(&damaged).unwrap();
-    assert!(damaged_archive.extract().is_err());
+    assert!(collect_extract(&damaged_archive).is_err());
 
     let repaired = damaged_archive.repair_protect_head().unwrap();
 
     assert_eq!(repaired, damaged);
     assert_ne!(repaired, bytes);
-    assert!(Archive::parse(&repaired).unwrap().extract().is_err());
+    assert!(collect_extract(&Archive::parse(&repaired).unwrap()).is_err());
 }
 
 #[test]
@@ -4354,13 +4448,13 @@ fn protect_head_repairs_last_stable_sector_before_metadata_overlap() {
     damaged[damage_offset..damage_offset + 64].fill(0xa5);
 
     let damaged_archive = Archive::parse(&damaged).unwrap();
-    assert!(damaged_archive.extract().is_err());
+    assert!(collect_extract(&damaged_archive).is_err());
 
     let repaired = damaged_archive.repair_protect_head().unwrap();
 
     assert_eq!(repaired, bytes);
     let repaired_archive = Archive::parse(&repaired).unwrap();
-    let extracted = repaired_archive.extract().unwrap();
+    let extracted = collect_extract(&repaired_archive).unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"BIG.BIN");
     assert_eq!(crc32(&extracted[0].data), 0x9a0e0c8c);
@@ -4373,13 +4467,13 @@ fn repairs_rar300_newsub_recovery_single_damaged_sector() {
     damaged[512 + 16..512 + 80].fill(0xa5);
 
     let damaged_archive = Archive::parse(&damaged).unwrap();
-    assert!(damaged_archive.extract().is_err());
+    assert!(collect_extract(&damaged_archive).is_err());
 
     let repaired = damaged_archive.repair_protect_head().unwrap();
 
     assert_eq!(repaired, bytes);
     let repaired_archive = Archive::parse(&repaired).unwrap();
-    let extracted = repaired_archive.extract().unwrap();
+    let extracted = collect_extract(&repaired_archive).unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"bigtext_64k.bin");
     assert_eq!(crc32(&extracted[0].data), 0xddc95682);
@@ -4393,19 +4487,19 @@ fn repairs_compressed_rar300_newsub_recovery_single_damaged_sector() {
     damaged[512 + 16..512 + 80].fill(0xa5);
 
     let damaged_archive = Archive::parse(&damaged).unwrap();
-    assert!(damaged_archive.extract().is_err());
+    assert!(collect_extract(&damaged_archive).is_err());
 
     let repaired = damaged_archive.repair_protect_head().unwrap();
 
     assert_eq!(repaired, compressed);
     let repaired_archive = Archive::parse(&repaired).unwrap();
-    let extracted = repaired_archive.extract().unwrap();
+    let extracted = collect_extract(&repaired_archive).unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"bigtext_64k.bin");
     assert_eq!(crc32(&extracted[0].data), 0xddc95682);
 
     let expected_archive = Archive::parse(&expected).unwrap();
-    let expected_extracted = expected_archive.extract().unwrap();
+    let expected_extracted = collect_extract(&expected_archive).unwrap();
     assert_eq!(extracted[0].data, expected_extracted[0].data);
 }
 
@@ -4424,12 +4518,12 @@ fn newsub_recovery_repairs_trailing_partial_sector_before_record() {
     damaged[damage_offset..damage_offset + 8].fill(0xa5);
 
     let damaged_archive = Archive::parse(&damaged).unwrap();
-    assert!(damaged_archive.extract().is_err());
+    assert!(collect_extract(&damaged_archive).is_err());
 
     let repaired = damaged_archive.repair_protect_head().unwrap();
 
     assert_eq!(repaired, bytes);
-    let extracted = Archive::parse(&repaired).unwrap().extract().unwrap();
+    let extracted = collect_extract(&Archive::parse(&repaired).unwrap()).unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"bigtext_64k.bin");
     assert_eq!(crc32(&extracted[0].data), 0xddc95682);
@@ -4465,7 +4559,7 @@ fn repairs_rar300_old_style_recovery_volume_set() {
     .unwrap();
 
     assert_eq!(repaired[1], part2);
-    let extracted = extract_volumes(&[
+    let extracted = collect_extract_volumes(&[
         Archive::parse(&repaired[0]).unwrap(),
         Archive::parse(&repaired[1]).unwrap(),
         Archive::parse(&repaired[2]).unwrap(),
@@ -4494,7 +4588,7 @@ fn repairs_rar4_new_style_recovery_volume_set_with_zeroed_rev_trailer() {
     .unwrap();
 
     assert_eq!(repaired[1], part2);
-    let extracted = extract_volumes(&[
+    let extracted = collect_extract_volumes(&[
         Archive::parse(&repaired[0]).unwrap(),
         Archive::parse(&repaired[1]).unwrap(),
         Archive::parse(&repaired[2]).unwrap(),
@@ -4518,7 +4612,7 @@ fn extracts_rar250_unp20_multimedia_switch_lz_file() {
     assert_eq!(file.unp_size, 32768);
     assert_eq!(rar15_first_file_data_peek(&bytes), 0x0040);
 
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"PCM_LR.WAV");
     assert_eq!(extracted[0].data, expected_rar250_multimedia_payload());
@@ -4541,7 +4635,7 @@ fn extracts_synthetic_unp20_audio_block_archive() {
         assert_eq!(file.unp_ver, 20);
         assert_eq!(file.unp_size, samples as u64);
 
-        let extracted = archive.extract().unwrap();
+        let extracted = collect_extract(&archive).unwrap();
         assert_eq!(extracted.len(), 1);
         assert_eq!(extracted[0].name, format!("AUDIO{channels}.BIN").as_bytes());
         assert_eq!(extracted[0].data, vec![0; samples]);
@@ -4560,7 +4654,7 @@ fn extracts_rar250_unp20_audio_shaped_and_text_lz_archive() {
     assert!(files.iter().all(|file| file.unp_ver == 20));
     assert_eq!(rar15_first_file_data_peek(&bytes), 0x2221);
 
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted.len(), 2);
     assert_eq!(extracted[0].name, b"BoatModernEnglish.wav");
     assert_eq!(crc32(&extracted[0].data), files[0].file_crc);
@@ -4584,7 +4678,7 @@ fn extracts_rar250_unp20_solid_members() {
     assert!(files[1].is_solid());
     assert_eq!(rar15_file_data_peeks(&bytes), [0x0dcd, 0xdfbe]);
 
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted.len(), 2);
     assert_eq!(extracted[0].data, expected_rar250_solid1_payload());
     assert_eq!(extracted[1].data, expected_rar250_solid2_payload());
@@ -4603,7 +4697,7 @@ fn extracts_rar250_unp20_large_lz_file() {
     assert_eq!(file.unp_ver, 20);
     assert_eq!(file.unp_size, 167_936);
 
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"BIGLZ.BIN");
     assert_eq!(extracted[0].data, expected_rar250_big_lz_payload());
@@ -4630,7 +4724,7 @@ fn extracts_rar250_unp20_keep_tables_archive() {
     assert_eq!(files[1].unp_size, 76);
     assert_eq!(files[1].file_crc, 0x497a718f);
 
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted.len(), 2);
     assert_eq!(crc32(&extracted[0].data), 0xbf94ba22);
     assert_eq!(crc32(&extracted[1].data), 0x497a718f);
@@ -4648,7 +4742,7 @@ fn extracts_rar250_unp20_explicit_multiblock_archive() {
     assert_eq!(file.pack_size, 4_761);
     assert_eq!(file.unp_size, 16_384);
 
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].data.len(), 16_384);
     assert_eq!(crc32(&extracted[0].data), 0xa24d_a8f8);
@@ -4696,7 +4790,7 @@ fn extracts_rar300_standard_rarvm_filter_fixtures() {
     ] {
         let bytes = std::fs::read(fixture(name)).unwrap();
         let archive = Archive::parse(&bytes).unwrap();
-        let extracted = archive.extract().unwrap();
+        let extracted = collect_extract(&archive).unwrap();
         assert_eq!(extracted.len(), 1, "{name}");
         assert_eq!(extracted[0].name, entry_name, "{name}");
         assert_eq!(extracted[0].data.len(), size, "{name}");
@@ -4717,7 +4811,7 @@ fn extracts_rar300_ppmd_text_file() {
     assert_eq!(file.pack_size, 13_276);
     assert_eq!(file.unp_size, 130_048);
 
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"lorem_127k.txt");
     assert_eq!(extracted[0].data, expected);
@@ -4736,7 +4830,7 @@ fn extracts_rar300_ppmd_escape_literal_file() {
     assert_eq!(file.unp_ver, 29);
     assert_eq!(file.unp_size, 65_536);
 
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"escape_64k.bin");
     assert_eq!(extracted[0].data, expected);
@@ -4757,7 +4851,7 @@ fn extracts_rar300_ppmd_mixed_archive() {
     assert_eq!(files[0].unp_ver, 29);
     assert_eq!(files[1].unp_ver, 29);
 
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted.len(), 2);
     assert_eq!(extracted[0].data, expected_text);
     assert_eq!(extracted[1].data, expected_binary);
@@ -4780,7 +4874,7 @@ fn extracts_rar300_solid_ppmd_archive() {
     assert!(!files[0].is_solid());
     assert!(files[1].is_solid());
 
-    let extracted = archive.extract().unwrap();
+    let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted.len(), 2);
     assert_eq!(extracted[0].data, expected_a);
     assert_eq!(extracted[1].data, expected_b);
@@ -4820,7 +4914,7 @@ fn rejects_split_rar15_40_entries_until_volume_reassembly_exists() {
     let archive = Archive::parse(&bytes).unwrap();
 
     assert!(matches!(
-        archive.extract_stored(),
+        collect_extract(&archive),
         Err(Error::InvalidHeader(
             "RAR 1.5 split entry requires multivolume extraction"
         ))
@@ -4839,7 +4933,7 @@ fn extracts_stored_rar300_old_numbered_volume_set() {
     .map(|name| Archive::parse(&std::fs::read(fixture(name)).unwrap()).unwrap())
     .collect();
 
-    let extracted = extract_volumes(&archives).unwrap();
+    let extracted = collect_extract_volumes(&archives).unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"stored-volume.txt");
     assert_eq!(extracted[0].data, expected_stored_volume_payload());
@@ -4857,7 +4951,7 @@ fn rejects_incomplete_rar300_stored_volume_set() {
     .collect();
 
     assert!(matches!(
-        extract_volumes(&archives),
+        collect_extract_volumes(&archives),
         Err(Error::InvalidHeader("RAR 1.5 split entry is incomplete"))
     ));
 }
@@ -4875,7 +4969,7 @@ fn extracts_compressed_rar300_old_numbered_volume_set() {
     .map(|name| Archive::parse(&std::fs::read(fixture(name)).unwrap()).unwrap())
     .collect();
 
-    let extracted = extract_volumes(&archives).unwrap();
+    let extracted = collect_extract_volumes(&archives).unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"cvolume.bin");
     assert_eq!(extracted[0].data.len(), 4096);
@@ -4896,7 +4990,7 @@ fn extracts_compressed_rar300_new_numbered_volume_set() {
     assert!(archives
         .iter()
         .all(|archive| archive.main.uses_new_numbering()));
-    let extracted = extract_volumes(&archives).unwrap();
+    let extracted = collect_extract_volumes(&archives).unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"bigtext_64k.bin");
     assert_eq!(extracted[0].data.len(), 65_536);
@@ -4919,12 +5013,11 @@ fn extracts_encrypted_rar300_old_numbered_volume_set() {
     assert!(second.is_encrypted());
     assert_eq!(first.salt, second.salt);
     assert!(matches!(
-        extract_volumes(&archives),
+        collect_extract_volumes(&archives),
         Err(Error::NeedPassword)
     ));
 
-    let extracted =
-        rars_format::rar15_40::extract_volumes_with_password(&archives, Some(b"password")).unwrap();
+    let extracted = collect_extract_volumes_with_password(&archives, Some(b"password")).unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"bigtext_64k.bin");
     assert_eq!(extracted[0].data.len(), 65_536);
@@ -4948,12 +5041,11 @@ fn extracts_encrypted_rar300_new_numbered_volume_set() {
         .iter()
         .all(|archive| archive.files().next().unwrap().is_encrypted()));
     assert!(matches!(
-        extract_volumes(&archives),
+        collect_extract_volumes(&archives),
         Err(Error::NeedPassword)
     ));
 
-    let extracted =
-        rars_format::rar15_40::extract_volumes_with_password(&archives, Some(b"password")).unwrap();
+    let extracted = collect_extract_volumes_with_password(&archives, Some(b"password")).unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"bigtext_64k.bin");
     assert_eq!(extracted[0].data.len(), 65_536);
@@ -4981,12 +5073,11 @@ fn extracts_header_encrypted_rar300_old_numbered_volume_set() {
     assert!(first.is_encrypted());
     assert!(second.is_encrypted());
     assert!(matches!(
-        extract_volumes(&archives),
+        collect_extract_volumes(&archives),
         Err(Error::NeedPassword)
     ));
 
-    let extracted =
-        rars_format::rar15_40::extract_volumes_with_password(&archives, Some(b"password")).unwrap();
+    let extracted = collect_extract_volumes_with_password(&archives, Some(b"password")).unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"bigtext_64k.bin");
     assert_eq!(extracted[0].data.len(), 65_536);
@@ -5013,12 +5104,11 @@ fn extracts_header_encrypted_rar300_new_numbered_volume_set() {
         .iter()
         .all(|archive| archive.main.uses_new_numbering()));
     assert!(matches!(
-        extract_volumes(&archives),
+        collect_extract_volumes(&archives),
         Err(Error::NeedPassword)
     ));
 
-    let extracted =
-        rars_format::rar15_40::extract_volumes_with_password(&archives, Some(b"password")).unwrap();
+    let extracted = collect_extract_volumes_with_password(&archives, Some(b"password")).unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"bigtext_64k.bin");
     assert_eq!(extracted[0].data.len(), 65_536);
@@ -5036,7 +5126,7 @@ fn extracts_rar154_unp15_old_numbered_volume_set() {
     .map(|name| Archive::parse(&std::fs::read(fixture(name)).unwrap()).unwrap())
     .collect();
 
-    let extracted = extract_volumes(&archives).unwrap();
+    let extracted = collect_extract_volumes(&archives).unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"random.bin");
     assert_eq!(extracted[0].data.len(), 2_097_152);

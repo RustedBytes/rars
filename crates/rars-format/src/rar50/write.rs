@@ -2747,8 +2747,45 @@ fn write_vint(out: &mut Vec<u8>, mut value: u64) {
 mod tests {
     use super::*;
     use rars_codec::rar50::{encode_literal_only, encode_lz_member};
+    use std::cell::RefCell;
     use std::fs;
+    use std::io::{Result as IoResult, Write};
     use std::process::Command;
+    use std::rc::Rc;
+
+    struct CollectWriter(Rc<RefCell<Vec<u8>>>);
+
+    impl Write for CollectWriter {
+        fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
+            self.0.borrow_mut().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> IoResult<()> {
+            Ok(())
+        }
+    }
+
+    fn collect_extract(archive: &Archive) -> Result<Vec<ExtractedEntry>> {
+        let entries = RefCell::new(Vec::new());
+        archive.extract_to(|meta| {
+            let data = Rc::new(RefCell::new(Vec::new()));
+            entries.borrow_mut().push((meta.clone(), Rc::clone(&data)));
+            Ok(Box::new(CollectWriter(data)))
+        })?;
+        Ok(entries
+            .into_inner()
+            .into_iter()
+            .map(|(meta, data)| ExtractedEntry {
+                name: meta.name,
+                data: data.borrow().clone(),
+                file_time: meta.file_time,
+                attr: meta.attr,
+                host_os: meta.host_os,
+                is_directory: meta.is_directory,
+            })
+            .collect())
+    }
 
     #[test]
     fn internal_literal_only_compressed_member_round_trips_through_rar50_reader() {
@@ -2791,7 +2828,7 @@ mod tests {
         assert_eq!(info.method, 1);
         assert_eq!(info.dictionary_size, 128 * 1024);
 
-        let extracted = parsed.extract().unwrap();
+        let extracted = collect_extract(&parsed).unwrap();
         assert_eq!(extracted[0].name, name);
         assert_eq!(extracted[0].data, data);
     }
