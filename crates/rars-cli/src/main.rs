@@ -1546,7 +1546,7 @@ fn parse_archives(paths: &[String], password: Option<&[u8]>) -> CliResult<Vec<De
 
 fn read_archive_error(path: &str, err: Error) -> String {
     match err {
-        Error::Io(message) => format!("failed to read archive '{path}': {message}"),
+        Error::Io { message, .. } => format!("failed to read archive '{path}': {message}"),
         Error::UnsupportedSignature => {
             format!(
                 "failed to identify archive '{path}': {}",

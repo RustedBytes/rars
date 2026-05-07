@@ -64,11 +64,8 @@ serialization.
 ### 6. API And Error Model
 
 - Pick one `extract_to` shape across the facade and per-version modules.
-- Widen facade-level extracted file attributes to `u64` so RAR5 attributes do
-  not need a synthetic overflow error.
-- Rework `rars-format::Error::Io` so callers can inspect at least
-  `io::ErrorKind`, and consider preserving structured codec/recovery/crypto
-  errors instead of flattening them all to `InvalidHeader`.
+- Consider preserving structured codec/recovery/crypto errors instead of
+  flattening them all to `InvalidHeader`.
 - Decide whether the umbrella `ArchiveWriter` should remain public or whether
   callers should use per-version writer builders directly.
 - Apply the RAR5 builder pattern to RAR 1.5-4.x writing if another independent
@@ -85,9 +82,6 @@ serialization.
   remove the fast path.
 - Add `zeroize` for passwords, derived keys, AES state, and temporary KDF
   buffers where ownership makes that practical.
-- Tighten low-level crypto APIs that expose block primitives unnecessarily
-  (for example RAR3 AES block encrypt/decrypt should be private or take
-  `&mut [u8; 16]`).
 
 ### 8. Hardening And Coverage
 
@@ -100,8 +94,6 @@ serialization.
 - Add comments/provenance for transliterated Unpack15 state names and embedded
   RAR3 standard-filter bytecode blobs.
 - Split `rars-recovery/src/lib.rs` into `rar3.rs` and `rar5.rs` modules.
-- Add a note or explicit zero handling around `Gf16` multiplication so its
-  zero-result behaviour does not depend silently on over-allocated tables.
 
 ### 9. Fixtures And Oracles
 

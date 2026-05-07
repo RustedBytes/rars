@@ -1563,7 +1563,7 @@ fn extract_to_reports_rar15_entry_context_on_write_failure() {
         } => {
             assert_eq!(name, b"payload.txt");
             assert_eq!(operation, "extracting");
-            assert!(matches!(*source, Error::Io(_)));
+            assert!(matches!(*source, Error::Io { .. }));
         }
         other => panic!("expected entry context, got {other:?}"),
     }

@@ -31,7 +31,10 @@ pub enum Error {
         family: &'static str,
         unpack_version: u8,
     },
-    Io(String),
+    Io {
+        kind: std::io::ErrorKind,
+        message: String,
+    },
     NeedPassword,
     WrongPasswordOrCorruptData,
     CrcMismatch {
@@ -86,7 +89,7 @@ impl std::fmt::Display for Error {
                 f,
                 "{family} encryption is not supported: unpack version {unpack_version}"
             ),
-            Self::Io(message) => write!(f, "I/O error: {message}"),
+            Self::Io { message, .. } => write!(f, "I/O error: {message}"),
             Self::NeedPassword => write!(f, "a password is required"),
             Self::WrongPasswordOrCorruptData => {
                 write!(f, "wrong password or corrupt encrypted data")
@@ -112,7 +115,10 @@ impl std::fmt::Display for Error {
 
 impl From<std::io::Error> for Error {
     fn from(error: std::io::Error) -> Self {
-        Self::Io(error.to_string())
+        Self::Io {
+            kind: error.kind(),
+            message: error.to_string(),
+        }
     }
 }
 
@@ -238,6 +244,23 @@ mod tests {
             std::error::Error::source(&error).map(ToString::to_string),
             Some("checksum mismatch: expected 0x00000001, got 0x00000002".to_string())
         );
+    }
+
+    #[test]
+    fn io_error_preserves_error_kind() {
+        let error = Error::from(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "locked",
+        ));
+
+        assert!(matches!(
+            error,
+            Error::Io {
+                kind: std::io::ErrorKind::PermissionDenied,
+                ..
+            }
+        ));
+        assert_eq!(error.to_string(), "I/O error: locked");
     }
 
     #[test]

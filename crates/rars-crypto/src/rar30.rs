@@ -31,7 +31,7 @@ impl Rar30Cipher {
         }
     }
 
-    pub fn encrypt_block(&mut self, block: &mut [u8]) {
+    fn encrypt_block(&mut self, block: &mut [u8]) {
         for (byte, iv_byte) in block.iter_mut().zip(self.iv) {
             *byte ^= iv_byte;
         }
@@ -39,7 +39,7 @@ impl Rar30Cipher {
         self.iv.copy_from_slice(block);
     }
 
-    pub fn decrypt_block(&mut self, block: &mut [u8]) {
+    fn decrypt_block(&mut self, block: &mut [u8]) {
         let ciphertext: [u8; 16] = block.try_into().expect("AES block size");
         self.cipher.decrypt_block(block.into());
         for (byte, iv_byte) in block.iter_mut().zip(self.iv) {
@@ -281,5 +281,4 @@ mod tests {
         Rar30Cipher::new(password, salt).decrypt_in_place(&mut data);
         assert_eq!(data, plain);
     }
-
 }

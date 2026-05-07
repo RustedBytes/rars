@@ -18,7 +18,7 @@ pub enum Archive {
 pub struct ExtractedEntryMeta {
     pub name: Vec<u8>,
     pub file_time: u32,
-    pub file_attr: u32,
+    pub file_attr: u64,
     pub is_directory: bool,
 }
 
@@ -400,7 +400,7 @@ fn rar13_meta(meta: &rar13::ExtractedEntryMeta) -> ExtractedEntryMeta {
     ExtractedEntryMeta {
         name: meta.name.clone(),
         file_time: meta.file_time,
-        file_attr: u32::from(meta.file_attr),
+        file_attr: u64::from(meta.file_attr),
         is_directory: meta.is_directory,
     }
 }
@@ -409,7 +409,7 @@ fn rar15_40_meta(meta: &rar15_40::ExtractedEntryMeta) -> ExtractedEntryMeta {
     ExtractedEntryMeta {
         name: meta.name.clone(),
         file_time: meta.file_time,
-        file_attr: meta.attr,
+        file_attr: u64::from(meta.attr),
         is_directory: meta.is_directory,
     }
 }
@@ -418,8 +418,7 @@ fn rar50_meta(meta: &rar50::ExtractedEntryMeta) -> Result<ExtractedEntryMeta> {
     Ok(ExtractedEntryMeta {
         name: meta.name.clone(),
         file_time: meta.file_time,
-        file_attr: u32::try_from(meta.attr)
-            .map_err(|_| Error::InvalidHeader("RAR 5 file attributes overflow u32"))?,
+        file_attr: meta.attr,
         is_directory: meta.is_directory,
     })
 }
@@ -636,7 +635,7 @@ mod tests {
         name: Vec<u8>,
         data: Vec<u8>,
         file_time: u32,
-        file_attr: u32,
+        file_attr: u64,
         is_directory: bool,
     }
 
@@ -685,7 +684,7 @@ mod tests {
                 name: meta.name,
                 data: data.borrow().clone(),
                 file_time: meta.file_time,
-                file_attr: meta.attr,
+                file_attr: u64::from(meta.attr),
                 is_directory: meta.is_directory,
             })
             .collect())
@@ -708,7 +707,7 @@ mod tests {
                 name: meta.name,
                 data: data.borrow().clone(),
                 file_time: meta.file_time,
-                file_attr: meta.attr,
+                file_attr: u64::from(meta.attr),
                 is_directory: meta.is_directory,
             })
             .collect())
@@ -731,7 +730,7 @@ mod tests {
                 name: meta.name,
                 data: data.borrow().clone(),
                 file_time: meta.file_time,
-                file_attr: meta.attr as u32,
+                file_attr: meta.attr,
                 is_directory: meta.is_directory,
             })
             .collect())
@@ -755,7 +754,7 @@ mod tests {
             name: meta.name,
             data,
             file_time: meta.file_time,
-            file_attr: meta.attr as u32,
+            file_attr: meta.attr,
             is_directory: meta.is_directory,
         })
     }
@@ -968,6 +967,30 @@ mod tests {
                 hash: _,
             }
         ));
+    }
+
+    #[test]
+    fn extraction_metadata_preserves_rar50_u64_file_attributes() {
+        let bytes = ArchiveWriter::new(ArchiveVersion::Rar50)
+            .unwrap()
+            .rar50_writer()
+            .unwrap()
+            .stored_entries(&[rar50::StoredEntry {
+                name: b"wide-attrs.txt",
+                data: b"wide RAR5 file attributes",
+                mtime: Some(0),
+                attributes: 0x1_0000_0020,
+                host_os: 3,
+            }])
+            .finish()
+            .unwrap();
+
+        let archive = ArchiveReader::read(&bytes).unwrap();
+        let extracted = collect_extract(&archive, None).unwrap();
+
+        assert_eq!(extracted.len(), 1);
+        assert_eq!(extracted[0].name, b"wide-attrs.txt");
+        assert_eq!(extracted[0].file_attr, 0x1_0000_0020);
     }
 
     #[test]

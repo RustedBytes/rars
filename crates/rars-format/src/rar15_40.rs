@@ -510,7 +510,7 @@ impl FileHeader {
             | Error::UnsupportedCompression { .. }
             | Error::UnsupportedEncryption { .. }
             | Error::TooShort
-            | Error::Io(_)
+            | Error::Io { .. }
             | Error::AtArchiveOffset { .. }
             | Error::AtEntry { .. } => error,
             Error::InvalidHeader(_)
@@ -1598,7 +1598,7 @@ fn decrypt_encrypted_header_at(
     let mut first_block: [u8; 16] = first_ciphertext
         .try_into()
         .expect("RAR encrypted header first block size");
-    cipher.decrypt_block(&mut first_block);
+    cipher.decrypt_in_place(&mut first_block);
     let head_size = read_u16(&first_block, 5)? as usize;
     if head_size < 7 {
         return Err(Error::InvalidHeader("RAR 1.5 block header is too short"));
@@ -1654,7 +1654,7 @@ fn read_encrypted_header_at(
     let mut first_block: [u8; 16] = first[8..24]
         .try_into()
         .expect("RAR encrypted header first block size");
-    cipher.decrypt_block(&mut first_block);
+    cipher.decrypt_in_place(&mut first_block);
     let head_size = read_u16(&first_block, 5)? as usize;
     if head_size < 7 {
         return Err(Error::InvalidHeader("RAR 1.5 block header is too short"));

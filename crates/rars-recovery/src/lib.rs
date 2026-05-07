@@ -1015,6 +1015,9 @@ pub mod rar5 {
         }
 
         pub fn mul(&self, left: u16, right: u16) -> u16 {
+            if left == 0 || right == 0 {
+                return 0;
+            }
             let index = self.log[left as usize] + self.log[right as usize];
             self.exp[index as usize]
         }
@@ -1149,6 +1152,8 @@ pub mod rar5 {
 
             assert_eq!(gf.mul(0x8000, 2), 0x100b);
             assert_eq!(gf.mul(0, 0x1234), 0);
+            assert_eq!(gf.mul(0x1234, 0), 0);
+            assert_eq!(gf.mul(0, 0), 0);
             assert_eq!(gf.mul(1, 0x1234), 0x1234);
         }
 
