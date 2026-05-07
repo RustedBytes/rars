@@ -1427,11 +1427,25 @@ fn write_rar50_volume_parts(first_path: &Path, parts: &[Vec<u8>]) -> CliResult<(
 
 fn rar50_volume_part_path(first_path: &Path, index: usize) -> CliResult<PathBuf> {
     let parent = first_path.parent().unwrap_or_else(|| Path::new(""));
-    let stem = first_path
-        .file_stem()
+    let file_name = first_path
+        .file_name()
         .ok_or("RAR 5 volume path needs a file name")?
         .to_string_lossy();
+    let stem = rar50_volume_stem(&file_name);
     Ok(parent.join(format!("{stem}.part{}.rar", index + 1)))
+}
+
+fn rar50_volume_stem(file_name: &str) -> &str {
+    let without_rar = file_name
+        .strip_suffix(".rar")
+        .or_else(|| file_name.strip_suffix(".RAR"))
+        .unwrap_or(file_name);
+    if let Some((base, digits)) = without_rar.rsplit_once(".part") {
+        if !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return base;
+        }
+    }
+    without_rar
 }
 
 fn current_filetime() -> u64 {
@@ -1603,8 +1617,8 @@ fn usage() {
 
 #[cfg(test)]
 mod tests {
-    use super::{infer_part_index, output_relative_path};
-    use std::path::Path;
+    use super::{infer_part_index, output_relative_path, rar50_volume_part_path};
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn infer_part_index_accepts_new_and_old_numbered_volume_names() {
@@ -1641,5 +1655,21 @@ mod tests {
         ] {
             assert!(output_relative_path(name).is_err(), "{name:?}");
         }
+    }
+
+    #[test]
+    fn rar50_volume_part_path_does_not_duplicate_existing_part_suffix() {
+        assert_eq!(
+            rar50_volume_part_path(Path::new("archive.part1.rar"), 0).unwrap(),
+            PathBuf::from("archive.part1.rar")
+        );
+        assert_eq!(
+            rar50_volume_part_path(Path::new("archive.part1.rar"), 1).unwrap(),
+            PathBuf::from("archive.part2.rar")
+        );
+        assert_eq!(
+            rar50_volume_part_path(Path::new("archive.rar"), 0).unwrap(),
+            PathBuf::from("archive.part1.rar")
+        );
     }
 }

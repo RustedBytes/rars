@@ -110,9 +110,17 @@ fn encode_member(
     let literal_len = if let Some(table) = fixed_table {
         table.length
     } else {
+        let mut used_offset_slots = [false; OFFSET_COUNT];
+        for token in &tokens {
+            if let EncodeToken::Match { offset, .. } = *token {
+                let (slot, _) = offset_slot_for_match(offset)?;
+                used_offset_slots[slot] = true;
+            }
+        }
         let literal_count = used_literals.iter().filter(|&&used| used).count();
-        let main_symbol_count =
-            literal_count + used_match_slots.iter().filter(|&&used| used).count();
+        let main_symbol_count = literal_count
+            + used_match_slots.iter().filter(|&&used| used).count()
+            + used_offset_slots.iter().filter(|&&used| used).count();
         literal_code_len(main_symbol_count)?
     };
 
@@ -137,7 +145,6 @@ fn encode_member(
                 table_lengths[270 + slot] = literal_len;
             }
         }
-
         let mut used_offset_slots = [false; OFFSET_COUNT];
         for token in &tokens {
             if let EncodeToken::Match { offset, .. } = *token {
@@ -397,6 +404,7 @@ fn canonical_codes(lengths: &[u8]) -> Result<Vec<Option<HuffmanCode>>> {
             count[len as usize] += 1;
         }
     }
+    validate_huffman_counts(&count)?;
 
     let mut next_code = [0u16; 16];
     let mut code = 0u16;
@@ -933,6 +941,9 @@ fn fill_levels(levels: &mut [u8], pos: &mut usize, count: usize, value: u8) -> R
 #[derive(Debug, Clone)]
 struct Huffman {
     symbols: Vec<HuffmanSymbol>,
+    first_code: [u16; 16],
+    first_index: [usize; 16],
+    counts: [u16; 16],
 }
 
 #[derive(Debug, Clone)]
@@ -946,6 +957,9 @@ impl Huffman {
     fn empty() -> Self {
         Self {
             symbols: Vec::new(),
+            first_code: [0; 16],
+            first_index: [0; 16],
+            counts: [0; 16],
         }
     }
 
@@ -962,12 +976,22 @@ impl Huffman {
         if count.iter().all(|&value| value == 0) {
             return Ok(Self::empty());
         }
+        validate_huffman_counts(&count)?;
 
+        let mut first_code = [0u16; 16];
         let mut next_code = [0u16; 16];
         let mut code = 0u16;
         for len in 1..=15 {
             code = (code + count[len - 1]) << 1;
+            first_code[len] = code;
             next_code[len] = code;
+        }
+
+        let mut first_index = [0usize; 16];
+        let mut index = 0usize;
+        for len in 1..=15 {
+            first_index[len] = index;
+            index += usize::from(count[len]);
         }
 
         let mut symbols = Vec::new();
@@ -980,7 +1004,12 @@ impl Huffman {
             symbols.push(HuffmanSymbol { code, len, symbol });
         }
         symbols.sort_by_key(|item| (item.len, item.code, item.symbol));
-        Ok(Self { symbols })
+        Ok(Self {
+            symbols,
+            first_code,
+            first_index,
+            counts: count,
+        })
     }
 
     fn decode(&self, bits: &mut BitReader) -> Result<usize> {
@@ -990,16 +1019,29 @@ impl Huffman {
         }
         for len in 1..=15 {
             code = (code << 1) | bits.read_bit()? as u16;
-            if let Some(item) = self
-                .symbols
-                .iter()
-                .find(|item| item.len == len && item.code == code)
-            {
-                return Ok(item.symbol);
+            let count = self.counts[len];
+            if count != 0 {
+                let first = self.first_code[len];
+                let offset = code.wrapping_sub(first);
+                if offset < count {
+                    let index = self.first_index[len] + usize::from(offset);
+                    return Ok(self.symbols[index].symbol);
+                }
             }
         }
         Err(Error::InvalidData("RAR 2.0 invalid Huffman code"))
     }
+}
+
+fn validate_huffman_counts(count: &[u16; 16]) -> Result<()> {
+    let mut available = 1i32;
+    for &len_count in count.iter().skip(1) {
+        available = (available << 1) - i32::from(len_count);
+        if available < 0 {
+            return Err(Error::InvalidData("RAR 2.0 oversubscribed Huffman table"));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -1091,8 +1133,8 @@ impl BitWriter {
 #[cfg(test)]
 mod tests {
     use super::{
-        encode_tokens, unpack20_decode, unpack20_encode_literals, BitWriter, EncodeToken, Unpack20,
-        Unpack20Encoder,
+        encode_tokens, unpack20_decode, unpack20_encode_literals, BitWriter, EncodeToken, Error,
+        Huffman, Unpack20, Unpack20Encoder,
     };
 
     const AUTOREJ_PACKED: &[u8] = &[
@@ -1108,6 +1150,14 @@ mod tests {
             unpack20_decode(AUTOREJ_PACKED, expected_text().len()).unwrap(),
             expected_text()
         );
+    }
+
+    #[test]
+    fn rejects_oversubscribed_rar20_huffman_tables() {
+        assert!(matches!(
+            Huffman::from_lengths(&[1, 1, 1]),
+            Err(Error::InvalidData("RAR 2.0 oversubscribed Huffman table"))
+        ));
     }
 
     #[test]

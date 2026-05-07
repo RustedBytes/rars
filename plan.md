@@ -25,8 +25,6 @@ serialization.
 - Audit extraction paths that still buffer decoded output despite the streaming
   API: sub-128 MiB RAR5 compressed members, RAR 1.5-4.x compressed members,
   encrypted entries, and compressed split-volume reassembly.
-- Add Kraft/canonical-table validation to Huffman builders, and port the
-  indexed canonical decode table used by RAR5 back to RAR20/RAR29.
 
 ### 2. CLI Password And Repair UX
 
@@ -37,8 +35,6 @@ serialization.
   only a full repaired `Vec<u8>`.
 - Teach the CLI to recognise or warn about RAR5 redirect/symlink service
   entries instead of silently treating every extracted member as a regular file.
-- Fix RAR5 volume output naming so an input like `archive.part1.rar` does not
-  become `archive.part1.part1.rar`.
 
 ### 3. Compression Quality
 

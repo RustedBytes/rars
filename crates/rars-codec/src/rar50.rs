@@ -1827,6 +1827,7 @@ impl HuffmanTable {
                 count[length as usize] += 1;
             }
         }
+        validate_huffman_counts(&count)?;
 
         let mut first_code = [0u16; 16];
         let mut next_code = [0u16; 16];
@@ -1969,6 +1970,17 @@ impl BitWriter {
     fn finish(self) -> Vec<u8> {
         self.bytes
     }
+}
+
+fn validate_huffman_counts(count: &[u16; 16]) -> Result<()> {
+    let mut available = 1i32;
+    for &len_count in count.iter().skip(1) {
+        available = (available << 1) - i32::from(len_count);
+        if available < 0 {
+            return Err(Error::InvalidData("RAR 5 oversubscribed Huffman table"));
+        }
+    }
+    Ok(())
 }
 
 fn write_zero_lengths(writer: &mut BitWriter, mut count: usize) {
@@ -2215,8 +2227,17 @@ mod tests {
     }
 
     #[test]
+    fn rejects_oversubscribed_rar50_huffman_tables() {
+        assert!(matches!(
+            HuffmanTable::from_lengths(&[1, 1, 1]),
+            Err(Error::InvalidData("RAR 5 oversubscribed Huffman table"))
+        ));
+    }
+
+    #[test]
     fn detects_rar50_align_mode_when_align_lengths_are_not_uniform_four() {
         let mut align = vec![4; ALIGN_TABLE_SIZE];
+        align[0] = 0;
         align[3] = 3;
         let lengths = TableLengths {
             main: vec![1, 1],
