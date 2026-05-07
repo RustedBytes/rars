@@ -88,6 +88,38 @@ fn collect_extract_with_password(
         .collect())
 }
 
+fn collect_file(
+    archive: &Archive,
+    file: &rars_format::rar15_40::FileHeader,
+) -> Result<CollectedEntry, Error> {
+    collect_file_with_password(archive, file, None)
+}
+
+fn collect_file_with_password(
+    archive: &Archive,
+    file: &rars_format::rar15_40::FileHeader,
+    password: Option<&[u8]>,
+) -> Result<CollectedEntry, Error> {
+    let meta = file.metadata();
+    let data = Rc::new(RefCell::new(Vec::new()));
+    file.write_to(
+        archive,
+        password,
+        &mut CollectWriter {
+            data: Rc::clone(&data),
+        },
+    )?;
+    let data = data.borrow().clone();
+    Ok(CollectedEntry {
+        name: meta.name,
+        data,
+        file_time: meta.file_time,
+        attr: meta.attr,
+        host_os: meta.host_os,
+        is_directory: meta.is_directory,
+    })
+}
+
 fn collect_extract_volumes(archives: &[Archive]) -> Result<Vec<CollectedEntry>, Error> {
     collect_extract_volumes_with_password(archives, None)
 }
@@ -3909,9 +3941,9 @@ fn extracts_rar4_aes_encrypted_compressed_member() {
     assert_eq!(files[1].unp_ver, 29);
     assert_eq!(files[1].method, 0x33);
 
-    let data = files[1]
-        .unpacked_data_with_password(&archive, Some(b"password"))
-        .unwrap();
+    let data = collect_file_with_password(&archive, files[1], Some(b"password"))
+        .unwrap()
+        .data;
     assert_eq!(data, b"This is from b.txt");
     assert_eq!(crc32(&data), 0xa9fa1485);
 }
@@ -4027,7 +4059,7 @@ fn extracts_rar4_mixed_visible_names_known_password_fixture() {
     assert!(files[1].is_encrypted());
     assert!(files[2].is_encrypted());
 
-    let stored = files[0].extract_stored(&archive).unwrap();
+    let stored = collect_file(&archive, files[0]).unwrap();
     assert_eq!(stored.data, b"1File");
     assert_eq!(crc32(&stored.data), 0x578a2019);
 
@@ -4155,20 +4187,6 @@ fn extracts_simple_solid_rar300_entries_with_codec_state() {
         b"shared prefix shared prefix shared prefix beta\n"
     );
     assert_eq!(crc32(&extracted[1].data), 0xf4fd09e8);
-}
-
-#[test]
-fn stored_only_extract_rejects_compressed_rar300_lz_file() {
-    let bytes = std::fs::read(fixture("rar300/compressed_text_rar300.rar")).unwrap();
-    let archive = Archive::parse(&bytes).unwrap();
-
-    let file = archive.files().next().unwrap();
-    assert!(matches!(
-        file.extract_stored(&archive),
-        Err(Error::InvalidHeader(
-            "RAR 1.5 compressed file extraction is not implemented"
-        ))
-    ));
 }
 
 #[test]

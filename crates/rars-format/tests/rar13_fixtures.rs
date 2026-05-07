@@ -1,4 +1,4 @@
-use rars_format::rar13::{extract_volumes_to, file_checksum, Archive};
+use rars_format::rar13::{extract_volumes_to, file_checksum, Archive, Entry};
 use rars_format::{detect_archive_family, find_archive_start, ArchiveFamily, Error};
 use std::cell::RefCell;
 use std::io::{Result as IoResult, Write};
@@ -104,6 +104,23 @@ fn collect_extract_volumes(
         .collect())
 }
 
+fn collect_entry(
+    archive: &Archive,
+    entry: &Entry,
+    password: Option<&[u8]>,
+) -> Result<Vec<u8>, Error> {
+    let data = Rc::new(RefCell::new(Vec::new()));
+    entry.write_to(
+        archive,
+        password,
+        &mut CollectWriter {
+            data: Rc::clone(&data),
+        },
+    )?;
+    let data = data.borrow().clone();
+    Ok(data)
+}
+
 #[test]
 fn detects_real_rar1402_archive() {
     let sig = detect_archive_family(README_STORE).expect("signature");
@@ -197,7 +214,7 @@ fn decodes_real_rar1402_stored_file() {
     assert_eq!(entry.header.flags, 0);
     assert_eq!(entry.header.unp_ver, 2);
     assert_eq!(entry.header.method, 0);
-    let decoded = entry.stored_data(&archive, None).expect("stored data");
+    let decoded = collect_entry(&archive, entry, None).expect("stored data");
     assert_eq!(decoded, README_EXPECTED);
 
     let extracted = collect_extract(&archive, None).expect("extract stored archive");
@@ -211,7 +228,7 @@ fn decodes_real_rar1402_stored_file() {
 fn real_rar1402_stored_checksum_matches_rolling_sum_rotate() {
     let archive = Archive::parse(README_STORE).expect("parse RAR 1.402 archive");
     let entry = &archive.entries[0];
-    let decoded = entry.stored_data(&archive, None).expect("stored data");
+    let decoded = collect_entry(&archive, entry, None).expect("stored data");
 
     assert_eq!(entry.header.file_crc, 0xe079);
     assert_eq!(file_checksum(&decoded), 0xe079);
@@ -294,7 +311,10 @@ fn parses_empty_stored_file() {
     assert_eq!(entry.header.unp_size, 0);
     assert_eq!(entry.header.file_crc, 0);
     assert!(entry.is_stored());
-    assert_eq!(entry.stored_data(&archive, None).expect("empty data"), b"");
+    assert_eq!(
+        collect_entry(&archive, entry, None).expect("empty data"),
+        b""
+    );
     entry.verify_checksum(b"").expect("empty checksum");
 
     let extracted = collect_extract(&archive, None).expect("extract empty archive");
@@ -314,7 +334,7 @@ fn parses_multiple_file_headers() {
     assert_eq!(first.header.file_crc, 0x7a6e);
     assert!(first.is_stored());
     assert_eq!(
-        first.stored_data(&archive, None).expect("stored HELLO.TXT"),
+        collect_entry(&archive, first, None).expect("stored HELLO.TXT"),
         b"Hello, RAR 1.402 fixture world.\r\n"
     );
     first
@@ -328,11 +348,6 @@ fn parses_multiple_file_headers() {
     assert_eq!(second.header.file_crc, 0x0642);
     assert_eq!(second.header.method, 3);
     assert!(!second.is_stored());
-    assert!(matches!(
-        second.stored_data(&archive, None),
-        Err(Error::InvalidHeader("RAR 1.3 entry is not stored"))
-    ));
-
     let extracted = collect_extract(&archive, None).expect("extract mixed archive");
     assert_eq!(extracted.len(), 2);
     assert_eq!(extracted[0].name, b"HELLO.TXT");
@@ -358,7 +373,7 @@ fn parses_directory_entry_and_following_file() {
     assert!(!file.is_directory());
     assert!(file.is_stored());
     assert_eq!(
-        file.stored_data(&archive, None).expect("stored inner file"),
+        collect_entry(&archive, file, None).expect("stored inner file"),
         b"Inside subdir.\r\n"
     );
     file.verify_checksum(b"Inside subdir.\r\n")
@@ -477,13 +492,11 @@ fn decodes_real_rar1402_encrypted_stored_file() {
     assert!(entry.is_encrypted());
     assert!(entry.is_stored());
     assert!(matches!(
-        entry.stored_data(&archive, None),
+        collect_entry(&archive, entry, None),
         Err(Error::NeedPassword)
     ));
 
-    let decoded = entry
-        .stored_data(&archive, Some(b"password"))
-        .expect("decrypt stored data");
+    let decoded = collect_entry(&archive, entry, Some(b"password")).expect("decrypt stored data");
     assert_eq!(decoded, b"Stored encrypted fixture.\r\n");
     entry
         .verify_checksum(&decoded)
@@ -508,9 +521,7 @@ fn detects_and_parses_rar14_sfx_archive() {
     assert_eq!(entry.name, b"HELLO.TXT");
     assert!(entry.is_stored());
     assert_eq!(
-        entry
-            .stored_data(&archive, None)
-            .expect("stored SFX payload"),
+        collect_entry(&archive, entry, None).expect("stored SFX payload"),
         b"Hello, RAR 1.402 fixture world.\r\n"
     );
 }
@@ -621,9 +632,7 @@ fn parses_archive_comment_main_header_extension() {
     assert_eq!(entry.name, b"HELLO.TXT");
     assert!(entry.is_stored());
     assert_eq!(
-        entry
-            .stored_data(&archive, None)
-            .expect("stored commented payload"),
+        collect_entry(&archive, entry, None).expect("stored commented payload"),
         b"Hello, comment fixture.\r\n"
     );
     entry
@@ -659,9 +668,7 @@ fn parses_and_decodes_file_comment_header_extension() {
         b"FCOM\r\n"
     );
     assert_eq!(
-        entry
-            .stored_data(&archive, None)
-            .expect("stored file-comment payload"),
+        collect_entry(&archive, entry, None).expect("stored file-comment payload"),
         b"Hello, file comment fixture.\r\n"
     );
 }

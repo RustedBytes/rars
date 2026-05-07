@@ -41,9 +41,6 @@ serialization.
 
 - Continue enriching library errors with block type and operation context before
   treating the public API as stable.
-- Audit format-module convenience helpers that return decoded member payloads
-  as `Vec<u8>`. Keep only narrow inspection/test helpers that cannot be confused
-  with production extraction paths.
 
 ### 5. Fixtures And Oracles
 

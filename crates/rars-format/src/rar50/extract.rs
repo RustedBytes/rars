@@ -1,4 +1,4 @@
-use super::{blake2sp, Archive, ExtractedEntry, ExtractedEntryMeta, FileHeader};
+use super::{blake2sp, Archive, ExtractedEntryMeta, FileHeader};
 use crate::error::{Error, Result};
 use crate::volume_extract::{ChainedReader, SplitVolumeState, SplitVolumeStep};
 use rars_codec::rar50::{DecodeMode, Unpack50Decoder};
@@ -128,17 +128,14 @@ impl FileHeader {
         }
     }
 
-    pub fn extract(&self, archive: &Archive) -> Result<ExtractedEntry> {
-        self.extract_with_password(archive, None)
-    }
-
-    pub fn extract_with_password(
+    pub fn write_to(
         &self,
         archive: &Archive,
         password: Option<&[u8]>,
-    ) -> Result<ExtractedEntry> {
+        out: &mut impl Write,
+    ) -> Result<()> {
         let mut session = DecoderSession::new_with_password(password);
-        session.extract_file(archive, self)
+        session.write_file_to(archive, self, out)
     }
 
     pub(crate) fn decoded_data_unverified(
@@ -150,37 +147,6 @@ impl FileHeader {
         Ok(self
             .decoded_data_with_decoder(archive, &mut decoder, password)?
             .data)
-    }
-
-    fn extract_with_decoder(
-        &self,
-        archive: &Archive,
-        decoder: &mut Unpack50Decoder,
-        password: Option<&[u8]>,
-    ) -> Result<ExtractedEntry> {
-        if self.is_directory() {
-            return Ok(ExtractedEntry {
-                name: self.name.clone(),
-                data: Vec::new(),
-                file_time: self.mtime.unwrap_or(0),
-                attr: self.attributes,
-                host_os: self.host_os,
-                is_directory: true,
-            });
-        }
-        let decoded = self
-            .decoded_data_with_decoder(archive, decoder, password)
-            .map_err(|error| self.entry_error("decoding", error))?;
-        self.verify_integrity_with_keys(&decoded.data, decoded.keys.as_ref())
-            .map_err(|error| self.entry_error("verifying", error))?;
-        Ok(ExtractedEntry {
-            name: self.name.clone(),
-            data: decoded.data,
-            file_time: self.mtime.unwrap_or(0),
-            attr: self.attributes,
-            host_os: self.host_os,
-            is_directory: false,
-        })
     }
 
     fn decoded_data_with_decoder(
@@ -295,10 +261,6 @@ impl<'a> DecoderSession<'a> {
             decoder: Unpack50Decoder::new(),
             password,
         }
-    }
-
-    fn extract_file(&mut self, archive: &Archive, file: &FileHeader) -> Result<ExtractedEntry> {
-        file.extract_with_decoder(archive, &mut self.decoder, self.password)
     }
 
     fn write_file_to(

@@ -93,16 +93,6 @@ pub enum AuthenticityVerificationStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct ExtractedEntry {
-    pub name: Vec<u8>,
-    pub data: Vec<u8>,
-    pub file_time: u32,
-    pub file_attr: u8,
-    pub is_directory: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct ExtractedEntryMeta {
     pub name: Vec<u8>,
     pub file_time: u32,
@@ -353,19 +343,6 @@ impl Archive {
         })
     }
 
-    fn read_range(&self, range: Range<usize>) -> Result<Vec<u8>> {
-        match &self.source {
-            ArchiveSource::Memory(data) => data
-                .get(range)
-                .map(|data| data.to_vec())
-                .ok_or(Error::TooShort),
-            ArchiveSource::File(path) => {
-                let mut file = File::open(path.as_ref())?;
-                read_exact_at(&mut file, range.start, range.len())
-            }
-        }
-    }
-
     fn copy_range_to(&self, range: Range<usize>, out: &mut impl Write) -> Result<()> {
         match &self.source {
             ArchiveSource::Memory(data) => {
@@ -609,30 +586,8 @@ impl Entry {
         }
     }
 
-    pub fn packed_data_owned(&self, archive: &Archive) -> Result<Vec<u8>> {
-        archive.read_range(self.packed_range.clone())
-    }
-
     pub fn write_packed_data(&self, archive: &Archive, out: &mut impl Write) -> Result<()> {
         archive.copy_range_to(self.packed_range.clone(), out)
-    }
-
-    pub fn stored_data(&self, archive: &Archive, password: Option<&[u8]>) -> Result<Vec<u8>> {
-        if !self.is_stored() {
-            return Err(Error::InvalidHeader("RAR 1.3 entry is not stored"));
-        }
-
-        self.decrypt_packed_data(archive, password)
-    }
-
-    fn decrypt_packed_data(&self, archive: &Archive, password: Option<&[u8]>) -> Result<Vec<u8>> {
-        let mut data = self.packed_data_owned(archive)?;
-        if self.is_encrypted() {
-            let password = password.ok_or(Error::NeedPassword)?;
-            Rar13Cipher::new(password).decrypt_in_place(&mut data);
-        }
-
-        Ok(data)
     }
 
     pub fn verify_checksum(&self, data: &[u8]) -> Result<()> {
@@ -654,32 +609,6 @@ impl Entry {
             file_attr: self.header.file_attr,
             is_directory: self.is_directory(),
         }
-    }
-
-    pub fn extract_stored(
-        &self,
-        archive: &Archive,
-        password: Option<&[u8]>,
-    ) -> Result<ExtractedEntry> {
-        if self.is_directory() {
-            return Ok(ExtractedEntry {
-                name: self.name.clone(),
-                data: Vec::new(),
-                file_time: self.header.file_time,
-                file_attr: self.header.file_attr,
-                is_directory: true,
-            });
-        }
-
-        let data = self.stored_data(archive, password)?;
-        self.verify_checksum(&data)?;
-        Ok(ExtractedEntry {
-            name: self.name.clone(),
-            data,
-            file_time: self.header.file_time,
-            file_attr: self.header.file_attr,
-            is_directory: self.is_directory(),
-        })
     }
 
     fn write_stored_to(
@@ -776,35 +705,13 @@ impl Entry {
         }
     }
 
-    pub fn extract(&self, archive: &Archive, password: Option<&[u8]>) -> Result<ExtractedEntry> {
-        self.extract_with_context(archive, password, None, false)
-    }
-
-    fn extract_with_context(
+    pub fn write_to(
         &self,
         archive: &Archive,
         password: Option<&[u8]>,
-        unpack15: Option<&mut Unpack15>,
-        solid: bool,
-    ) -> Result<ExtractedEntry> {
-        if self.is_stored() || self.is_directory() {
-            return self.extract_stored(archive, password);
-        }
-
-        let packed = self.decrypt_packed_data(archive, password)?;
-        let data = if let Some(unpack15) = unpack15 {
-            unpack15.decode_member(&packed, self.header.unp_size as usize, solid)?
-        } else {
-            unpack15_decode(&packed, self.header.unp_size as usize)?
-        };
-        self.verify_checksum(&data)?;
-        Ok(ExtractedEntry {
-            name: self.name.clone(),
-            data,
-            file_time: self.header.file_time,
-            file_attr: self.header.file_attr,
-            is_directory: false,
-        })
+        out: &mut impl Write,
+    ) -> Result<()> {
+        self.write_compressed_to(archive, password, &mut Unpack15::new(), false, out)
     }
 
     fn entry_error(&self, operation: &'static str, error: Error) -> Error {
@@ -1574,6 +1481,15 @@ mod tests {
 
     struct CollectWriter(Rc<RefCell<Vec<u8>>>);
 
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct CollectedEntry {
+        name: Vec<u8>,
+        data: Vec<u8>,
+        file_time: u32,
+        file_attr: u8,
+        is_directory: bool,
+    }
+
     impl Write for CollectWriter {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
             self.0.borrow_mut().extend_from_slice(buf);
@@ -1585,7 +1501,7 @@ mod tests {
         }
     }
 
-    fn collect_extract(archive: &Archive, password: Option<&[u8]>) -> Result<Vec<ExtractedEntry>> {
+    fn collect_extract(archive: &Archive, password: Option<&[u8]>) -> Result<Vec<CollectedEntry>> {
         let entries = RefCell::new(Vec::new());
         archive.extract_to(password, |meta| {
             let data = Rc::new(RefCell::new(Vec::new()));
@@ -1595,7 +1511,7 @@ mod tests {
         Ok(entries
             .into_inner()
             .into_iter()
-            .map(|(meta, data)| ExtractedEntry {
+            .map(|(meta, data)| CollectedEntry {
                 name: meta.name,
                 data: data.borrow().clone(),
                 file_time: meta.file_time,
@@ -1608,7 +1524,7 @@ mod tests {
     fn collect_extract_volumes(
         volumes: &[Archive],
         password: Option<&[u8]>,
-    ) -> Result<Vec<ExtractedEntry>> {
+    ) -> Result<Vec<CollectedEntry>> {
         let entries = RefCell::new(Vec::new());
         extract_volumes_to(volumes, password, |meta| {
             let data = Rc::new(RefCell::new(Vec::new()));
@@ -1618,7 +1534,7 @@ mod tests {
         Ok(entries
             .into_inner()
             .into_iter()
-            .map(|(meta, data)| ExtractedEntry {
+            .map(|(meta, data)| CollectedEntry {
                 name: meta.name,
                 data: data.borrow().clone(),
                 file_time: meta.file_time,
@@ -1654,14 +1570,9 @@ mod tests {
         assert_eq!(archive.main.flags, 0x80);
         assert_eq!(archive.entries.len(), 2);
         assert_eq!(archive.entries[0].name_lossy(), "README.md");
-        assert_eq!(
-            archive.entries[0].stored_data(&archive, None).unwrap(),
-            b"hello rar 1.3"
-        );
-        assert!(archive.entries[1].is_directory());
-
         let extracted = collect_extract(&archive, None).unwrap();
         assert_eq!(extracted[0].data, b"hello rar 1.3");
+        assert!(archive.entries[1].is_directory());
         assert!(extracted[1].is_directory);
     }
 
@@ -1848,16 +1759,11 @@ mod tests {
         let bytes = write_stored_archive(&input, WriterOptions::default()).unwrap();
         let archive = Archive::parse(&bytes).unwrap();
         assert!(archive.entries[0].is_encrypted());
-        assert!(matches!(
-            archive.entries[0].stored_data(&archive, None),
-            Err(Error::NeedPassword)
-        ));
-        assert_eq!(
-            archive.entries[0]
-                .stored_data(&archive, Some(b"pass"))
-                .unwrap(),
-            b"secret bytes"
-        );
+        match collect_extract(&archive, None) {
+            Err(Error::NeedPassword) => {}
+            Err(Error::AtEntry { source, .. }) if matches!(*source, Error::NeedPassword) => {}
+            other => panic!("expected missing password error, got {other:?}"),
+        }
 
         let extracted = collect_extract(&archive, Some(b"pass")).unwrap();
         assert_eq!(extracted[0].data, b"secret bytes");

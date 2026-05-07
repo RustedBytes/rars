@@ -256,17 +256,6 @@ pub struct CompressionInfo {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct ExtractedEntry {
-    pub name: Vec<u8>,
-    pub data: Vec<u8>,
-    pub file_time: u32,
-    pub attr: u64,
-    pub host_os: u64,
-    pub is_directory: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct ExtractedEntryMeta {
     pub name: Vec<u8>,
     pub file_time: u32,

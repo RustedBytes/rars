@@ -676,6 +676,29 @@ mod tests {
             .collect())
     }
 
+    fn collect_rar50_file(
+        archive: &rar50::Archive,
+        file: &rar50::FileHeader,
+    ) -> Result<CollectedEntry> {
+        let meta = file.metadata();
+        let data = Rc::new(RefCell::new(Vec::new()));
+        file.write_to(
+            archive,
+            None,
+            &mut CollectWriter {
+                data: Rc::clone(&data),
+            },
+        )?;
+        let data = data.borrow().clone();
+        Ok(CollectedEntry {
+            name: meta.name,
+            data,
+            file_time: meta.file_time,
+            file_attr: meta.attr as u32,
+            is_directory: meta.is_directory,
+        })
+    }
+
     fn write_rar29_filter(
         writer: ArchiveWriter,
         entries: &[rar15_40::FileEntry<'_>],
@@ -708,7 +731,7 @@ mod tests {
             let service = archive.services().next().unwrap();
             assert_eq!(service.name, b"RR");
             assert_eq!(service.recovery_record().unwrap().unwrap().percent, percent);
-            let data = service.extract(archive).unwrap().data;
+            let data = collect_rar50_file(archive, service).unwrap().data;
             assert!(data.starts_with(b"{RB}"));
             assert_eq!(
                 u32::from_le_bytes(data[0x0c..0x10].try_into().unwrap()) as usize,
@@ -2425,7 +2448,7 @@ mod tests {
         assert_eq!(services.len(), 1);
         assert_eq!(services[0].name, b"CMT");
         assert_eq!(
-            services[0].extract(raw).unwrap().data,
+            collect_rar50_file(raw, services[0]).unwrap().data,
             b"facade rar5 comment\n"
         );
         let extracted = collect_extract(&archive, None).unwrap();
@@ -2461,7 +2484,7 @@ mod tests {
         assert_eq!(services.len(), 1);
         assert_eq!(services[0].name, b"CMT");
         assert_eq!(
-            services[0].extract(raw).unwrap().data,
+            collect_rar50_file(raw, services[0]).unwrap().data,
             b"facade rar5 file comment\n"
         );
         let extracted = collect_extract(&archive, None).unwrap();
@@ -2503,7 +2526,7 @@ mod tests {
         )
         .unwrap();
         let raw = archive.as_rar50().unwrap();
-        let service = raw.services().next().unwrap().extract(raw).unwrap();
+        let service = collect_rar50_file(raw, raw.services().next().unwrap()).unwrap();
         assert_eq!(service.data, b"facade encrypted rar5 file comment\n");
         let extracted = collect_extract(&archive, Some(b"password")).unwrap();
         assert_eq!(
@@ -2552,7 +2575,7 @@ mod tests {
         )
         .unwrap();
         let raw = archive.as_rar50().unwrap();
-        let service = raw.services().next().unwrap().extract(raw).unwrap();
+        let service = collect_rar50_file(raw, raw.services().next().unwrap()).unwrap();
         assert_eq!(service.data, b"facade header encrypted rar5 file comment\n");
         let extracted = collect_extract(&archive, Some(b"password")).unwrap();
         assert_eq!(
@@ -2586,7 +2609,10 @@ mod tests {
         let services: Vec<_> = raw.services().collect();
         assert_eq!(services.len(), 1);
         assert_eq!(services[0].name, b"QO");
-        assert!(!services[0].extract(raw).unwrap().data.is_empty());
+        assert!(!collect_rar50_file(raw, services[0])
+            .unwrap()
+            .data
+            .is_empty());
         let extracted = collect_extract(&archive, None).unwrap();
         assert_eq!(extracted[0].data, b"facade rar5 quick-open payload\n");
     }
@@ -2626,8 +2652,14 @@ mod tests {
         assert_eq!(services.len(), 2);
         assert_eq!(services[0].name, b"ACL");
         assert_eq!(services[1].name, b"STM");
-        assert_eq!(services[0].extract(raw).unwrap().data, b"facade acl");
-        assert_eq!(services[1].extract(raw).unwrap().data, b"facade stream");
+        assert_eq!(
+            collect_rar50_file(raw, services[0]).unwrap().data,
+            b"facade acl"
+        );
+        assert_eq!(
+            collect_rar50_file(raw, services[1]).unwrap().data,
+            b"facade stream"
+        );
         let extracted = collect_extract(&archive, None).unwrap();
         assert_eq!(extracted[0].data, b"facade rar5 service payload\n");
     }
@@ -2823,7 +2855,7 @@ mod tests {
 
         let archive = ArchiveReader::read(&bytes).unwrap();
         let raw = archive.as_rar50().unwrap();
-        let comment = raw.services().next().unwrap().extract(raw).unwrap();
+        let comment = collect_rar50_file(raw, raw.services().next().unwrap()).unwrap();
         assert_eq!(comment.data, b"facade compressed comment\n");
         let extracted = collect_extract(&archive, None).unwrap();
         assert_eq!(extracted[0].data, payload);
@@ -3233,7 +3265,7 @@ mod tests {
         )
         .unwrap();
         let raw = archive.as_rar50().unwrap();
-        let comment = raw.services().next().unwrap().extract(raw).unwrap();
+        let comment = collect_rar50_file(raw, raw.services().next().unwrap()).unwrap();
         assert_eq!(comment.data, b"facade encrypted comment\n");
         let extracted = collect_extract(&archive, Some(b"password")).unwrap();
         assert_eq!(extracted[0].data, b"facade rar5 encrypted stored payload\n");
@@ -3271,7 +3303,7 @@ mod tests {
         )
         .unwrap();
         let raw = archive.as_rar50().unwrap();
-        let comment = raw.services().next().unwrap().extract(raw).unwrap();
+        let comment = collect_rar50_file(raw, raw.services().next().unwrap()).unwrap();
         assert_eq!(comment.data, b"facade encrypted compressed comment\n");
         let extracted = collect_extract(&archive, Some(b"password")).unwrap();
         assert_eq!(extracted[0].data, payload);
@@ -3350,7 +3382,7 @@ mod tests {
         )
         .unwrap();
         let raw = archive.as_rar50().unwrap();
-        let comment = raw.services().next().unwrap().extract(raw).unwrap();
+        let comment = collect_rar50_file(raw, raw.services().next().unwrap()).unwrap();
         assert_eq!(comment.data, b"facade header encrypted comment\n");
         let extracted = collect_extract(&archive, Some(b"password")).unwrap();
         assert_eq!(
@@ -3392,7 +3424,7 @@ mod tests {
         )
         .unwrap();
         let raw = archive.as_rar50().unwrap();
-        let comment = raw.services().next().unwrap().extract(raw).unwrap();
+        let comment = collect_rar50_file(raw, raw.services().next().unwrap()).unwrap();
         assert_eq!(
             comment.data,
             b"facade header encrypted compressed comment\n"
@@ -3434,7 +3466,7 @@ mod tests {
         let service = raw.services().next().unwrap();
         assert_eq!(service.name, b"RR");
         assert_eq!(service.recovery_record().unwrap().unwrap().percent, 6);
-        let recovery_data = service.extract(raw).unwrap().data;
+        let recovery_data = collect_rar50_file(raw, service).unwrap().data;
         assert!(recovery_data.starts_with(b"{RB}"));
         assert_eq!(
             u32::from_le_bytes(recovery_data[0x0c..0x10].try_into().unwrap()) as usize,
@@ -3523,7 +3555,7 @@ mod tests {
         assert_eq!(service.name, b"RR");
         assert!(!service.encrypted);
         assert_eq!(service.recovery_record().unwrap().unwrap().percent, 4);
-        let recovery_data = service.extract(raw).unwrap().data;
+        let recovery_data = collect_rar50_file(raw, service).unwrap().data;
         assert!(recovery_data.starts_with(b"{RB}"));
         assert_eq!(
             u32::from_le_bytes(recovery_data[0x0c..0x10].try_into().unwrap()) as usize,

@@ -81,6 +81,27 @@ fn collect_extract_with_password(
         .collect())
 }
 
+fn collect_file(archive: &Archive, file: &rar50::FileHeader) -> Result<CollectedEntry, Error> {
+    let meta = file.metadata();
+    let data = Rc::new(RefCell::new(Vec::new()));
+    file.write_to(
+        archive,
+        None,
+        &mut CollectWriter {
+            data: Rc::clone(&data),
+        },
+    )?;
+    let data = data.borrow().clone();
+    Ok(CollectedEntry {
+        name: meta.name,
+        data,
+        file_time: meta.file_time,
+        attr: meta.attr,
+        host_os: meta.host_os,
+        is_directory: meta.is_directory,
+    })
+}
+
 fn collect_extract_volumes(archives: &[Archive]) -> Result<Vec<CollectedEntry>, Error> {
     collect_extract_volumes_with_password(archives, None)
 }
@@ -675,7 +696,7 @@ fn rar50_writer_builder_writes_stored_archive_with_comment_and_metadata() {
     assert_eq!(services.len(), 1);
     assert_eq!(services[0].name, b"CMT");
     assert_eq!(
-        services[0].extract(&archive).unwrap().data,
+        collect_file(&archive, services[0]).unwrap().data,
         b"builder archive comment"
     );
     assert_eq!(
@@ -1184,7 +1205,7 @@ fn writes_rar50_archive_comment_service_record() {
     assert_eq!(services[0].name, b"CMT");
     assert!(services[0].is_stored());
     assert_eq!(services[0].service_data, Some(Vec::new()));
-    let comment = services[0].extract(&archive).unwrap();
+    let comment = collect_file(&archive, services[0]).unwrap();
     assert_eq!(comment.name, b"CMT");
     assert_eq!(comment.data, b"RAR5 comment from rars\n");
 
@@ -1220,7 +1241,7 @@ fn writes_compressed_rar50_archive_comment_service_record() {
     let services: Vec<_> = archive.services().collect();
     assert_eq!(service_names(&archive), ["CMT"]);
     assert_eq!(
-        services[0].extract(&archive).unwrap().data,
+        collect_file(&archive, services[0]).unwrap().data,
         b"compressed RAR5 comment from rars\n"
     );
     let extracted = collect_extract(&archive).unwrap();
@@ -1268,7 +1289,7 @@ fn writes_rar50_quick_open_service_record() {
         .find(|service| service.name == b"QO")
         .unwrap();
     assert!(quick_open.is_stored());
-    let quick_open = quick_open.extract(&archive).unwrap();
+    let quick_open = collect_file(&archive, quick_open).unwrap();
     assert_eq!(count_verified_quick_open_wrappers(&quick_open.data), 3);
 
     let extracted = collect_extract(&archive).unwrap();
@@ -1312,11 +1333,11 @@ fn writes_rar50_acl_and_stream_file_service_records() {
     assert_eq!(service_names(&archive), ["ACL", "STM"]);
     assert!(services.iter().all(|service| service.is_stored()));
     assert_eq!(
-        services[0].extract(&archive).unwrap().data,
+        collect_file(&archive, services[0]).unwrap().data,
         b"opaque acl descriptor"
     );
     assert_eq!(
-        services[1].extract(&archive).unwrap().data,
+        collect_file(&archive, services[1]).unwrap().data,
         b"named stream bytes"
     );
 
@@ -1356,7 +1377,7 @@ fn writes_rar50_file_comment_service_record() {
     assert_eq!(service_names(&archive), ["CMT"]);
     assert!(services[0].is_stored());
     assert_eq!(
-        services[0].extract(&archive).unwrap().data,
+        collect_file(&archive, services[0]).unwrap().data,
         b"RAR5 file comment from rars\n"
     );
 
@@ -1401,7 +1422,7 @@ fn writes_encrypted_rar50_file_comment_service_record() {
     assert_eq!(service_names(&archive), ["CMT"]);
     assert!(services[0].encrypted);
     assert!(matches!(
-        services[0].extract(&archive),
+        collect_file(&archive, services[0]),
         Err(Error::AtEntry {
             name,
             operation: "decoding",
@@ -1410,12 +1431,7 @@ fn writes_encrypted_rar50_file_comment_service_record() {
     ));
 
     let archive = Archive::parse_with_password(&bytes, Some(b"secret")).unwrap();
-    let service = archive
-        .services()
-        .next()
-        .unwrap()
-        .extract(&archive)
-        .unwrap();
+    let service = collect_file(&archive, archive.services().next().unwrap()).unwrap();
     assert_eq!(service.data, b"encrypted RAR5 file comment from rars\n");
     let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted.len(), 1);
@@ -1463,7 +1479,7 @@ fn writes_header_encrypted_rar50_file_comment_service_record() {
     assert_eq!(service_names(&archive), ["CMT"]);
     assert!(services[0].encrypted);
     assert_eq!(
-        services[0].extract(&archive).unwrap().data,
+        collect_file(&archive, services[0]).unwrap().data,
         b"header encrypted RAR5 file comment from rars\n"
     );
     let extracted = collect_extract(&archive).unwrap();
@@ -2336,7 +2352,7 @@ fn writes_encrypted_rar50_archive_comment_service_that_reader_extracts_with_pass
     assert_ne!(service_encryption.salt, second_service_encryption.salt);
     assert_ne!(service_encryption.iv, second_service_encryption.iv);
     assert!(matches!(
-        services[0].extract(&archive),
+        collect_file(&archive, services[0]),
         Err(Error::AtEntry {
             name,
             operation: "decoding",
@@ -2345,12 +2361,7 @@ fn writes_encrypted_rar50_archive_comment_service_that_reader_extracts_with_pass
     ));
 
     let archive = Archive::parse_with_password(&bytes, Some(b"password")).unwrap();
-    let comment = archive
-        .services()
-        .next()
-        .unwrap()
-        .extract(&archive)
-        .unwrap();
+    let comment = collect_file(&archive, archive.services().next().unwrap()).unwrap();
     assert_eq!(comment.data, b"encrypted CMT from rars\n");
     let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted[0].data, entries[0].data);
@@ -2390,7 +2401,7 @@ fn writes_encrypted_compressed_rar50_archive_comment_service_with_password() {
     assert_eq!(services[0].name, b"CMT");
     assert!(services[0].encrypted);
     assert!(matches!(
-        services[0].extract(&archive),
+        collect_file(&archive, services[0]),
         Err(Error::AtEntry {
             name,
             operation: "decoding",
@@ -2399,12 +2410,7 @@ fn writes_encrypted_compressed_rar50_archive_comment_service_with_password() {
     ));
 
     let archive = Archive::parse_with_password(&bytes, Some(b"secret")).unwrap();
-    let comment = archive
-        .services()
-        .next()
-        .unwrap()
-        .extract(&archive)
-        .unwrap();
+    let comment = collect_file(&archive, archive.services().next().unwrap()).unwrap();
     assert_eq!(comment.data, b"encrypted compressed CMT from rars\n");
     let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted[0].data, payload);
@@ -2463,7 +2469,7 @@ fn writes_encrypted_rar50_recovery_service_that_reader_extracts_with_password() 
     let recovery = service.recovery_record().unwrap().unwrap();
     assert_eq!(recovery.percent, 6);
 
-    let recovery_data = service.extract(&archive).unwrap().data;
+    let recovery_data = collect_file(&archive, service).unwrap().data;
     assert!(recovery_data.starts_with(b"{RB}"));
     assert_eq!(
         u32::from_le_bytes(recovery_data[0x0c..0x10].try_into().unwrap()) as usize,
@@ -2524,7 +2530,7 @@ fn writes_encrypted_compressed_rar50_recovery_service_that_reader_extracts_with_
     assert_eq!(service.name, b"RR");
     assert!(!service.encrypted);
     assert_eq!(service.recovery_record().unwrap().unwrap().percent, 6);
-    let recovery_data = service.extract(&archive).unwrap().data;
+    let recovery_data = collect_file(&archive, service).unwrap().data;
     assert!(recovery_data.starts_with(b"{RB}"));
 
     let archive = Archive::parse_with_password(&bytes, Some(b"password")).unwrap();
@@ -2706,7 +2712,7 @@ fn writes_header_encrypted_rar50_archive_comment_service_that_reader_extracts_wi
     assert_eq!(services.len(), 1);
     assert_eq!(services[0].name, b"CMT");
     assert!(services[0].encrypted);
-    let comment = services[0].extract(&archive).unwrap();
+    let comment = collect_file(&archive, services[0]).unwrap();
     assert_eq!(comment.data, b"header encrypted CMT from rars\n");
     let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted[0].data, entries[0].data);
@@ -2747,7 +2753,7 @@ fn writes_header_encrypted_compressed_rar50_archive_comment_service_with_passwor
     assert_eq!(services.len(), 1);
     assert_eq!(services[0].name, b"CMT");
     assert!(services[0].encrypted);
-    let comment = services[0].extract(&archive).unwrap();
+    let comment = collect_file(&archive, services[0]).unwrap();
     assert_eq!(comment.data, b"header encrypted compressed CMT from rars\n");
     let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted[0].data, payload);
@@ -2825,7 +2831,7 @@ fn writes_header_encrypted_rar50_recovery_service_that_reader_extracts_with_pass
     assert!(!service.encrypted);
     let recovery = service.recovery_record().unwrap().unwrap();
     assert_eq!(recovery.percent, 4);
-    let recovery_data = service.extract(&archive).unwrap().data;
+    let recovery_data = collect_file(&archive, service).unwrap().data;
     assert!(recovery_data.starts_with(b"{RB}"));
     assert_eq!(
         u32::from_le_bytes(recovery_data[0x0c..0x10].try_into().unwrap()) as usize,
@@ -2867,7 +2873,7 @@ fn writes_header_encrypted_compressed_rar50_recovery_service_that_reader_extract
     assert_eq!(service.name, b"RR");
     assert!(!service.encrypted);
     assert_eq!(service.recovery_record().unwrap().unwrap().percent, 4);
-    let recovery_data = service.extract(&archive).unwrap().data;
+    let recovery_data = collect_file(&archive, service).unwrap().data;
     assert!(recovery_data.starts_with(b"{RB}"));
     let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted[0].data, payload);
@@ -3026,7 +3032,7 @@ fn writes_encrypted_stored_rar50_volume_set_with_recovery_records() {
         assert_eq!(service.name_lossy(), "RR");
         assert!(!service.encrypted);
         assert_eq!(service.recovery_record().unwrap().unwrap().percent, 8);
-        assert_rar5_inline_recovery_chunks(&service.extract(archive).unwrap().data);
+        assert_rar5_inline_recovery_chunks(&collect_file(archive, service).unwrap().data);
     }
 
     let extracted = collect_extract_volumes(&archives).unwrap();
@@ -3187,7 +3193,7 @@ fn writes_encrypted_compressed_rar50_volume_set_with_recovery_records() {
         assert_eq!(service.name_lossy(), "RR");
         assert!(!service.encrypted);
         assert_eq!(service.recovery_record().unwrap().unwrap().percent, 8);
-        assert_rar5_inline_recovery_chunks(&service.extract(archive).unwrap().data);
+        assert_rar5_inline_recovery_chunks(&collect_file(archive, service).unwrap().data);
     }
 
     let extracted = collect_extract_volumes(&archives).unwrap();
@@ -3542,7 +3548,7 @@ fn extracts_rar50_header_encrypted_comment_service_with_password() {
     assert_eq!(services[0].name, b"CMT");
     assert!(services[0].encrypted);
 
-    let comment = services[0].extract(&archive).unwrap();
+    let comment = collect_file(&archive, services[0]).unwrap();
     assert_eq!(comment.name, b"CMT");
     assert_eq!(comment.data.len(), 48);
     assert!(comment

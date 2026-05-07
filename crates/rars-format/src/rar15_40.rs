@@ -229,17 +229,6 @@ pub struct FileEntry<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct ExtractedEntry {
-    pub name: Vec<u8>,
-    pub data: Vec<u8>,
-    pub file_time: u32,
-    pub attr: u32,
-    pub host_os: u8,
-    pub is_directory: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct ExtractedEntryMeta {
     pub name: Vec<u8>,
     pub file_time: u32,
@@ -306,11 +295,11 @@ impl FileHeader {
         archive.copy_range_to(self.packed_range.clone(), out)
     }
 
-    pub fn stored_data(&self, archive: &Archive) -> Result<Vec<u8>> {
+    pub(crate) fn stored_data(&self, archive: &Archive) -> Result<Vec<u8>> {
         self.stored_data_with_password(archive, None)
     }
 
-    pub fn stored_data_with_password(
+    pub(crate) fn stored_data_with_password(
         &self,
         archive: &Archive,
         password: Option<&[u8]>,
@@ -335,7 +324,7 @@ impl FileHeader {
         Ok(data)
     }
 
-    pub fn unpacked_data(&self, archive: &Archive) -> Result<Vec<u8>> {
+    pub(crate) fn unpacked_data(&self, archive: &Archive) -> Result<Vec<u8>> {
         if self.is_stored() {
             return self.stored_data(archive);
         }
@@ -343,19 +332,7 @@ impl FileHeader {
         session.decode_file_data(archive, self)
     }
 
-    pub fn unpacked_data_with_password(
-        &self,
-        archive: &Archive,
-        password: Option<&[u8]>,
-    ) -> Result<Vec<u8>> {
-        if self.is_stored() {
-            return self.stored_data_with_password(archive, password);
-        }
-        let mut session = DecoderSession::new_with_password(false, password);
-        session.decode_file_data(archive, self)
-    }
-
-    pub fn unpacked_data_with_rar29(
+    pub(crate) fn unpacked_data_with_rar29(
         &self,
         archive: &Archive,
         decoder: &mut Unpack29,
@@ -382,7 +359,7 @@ impl FileHeader {
             .map_err(Into::into)
     }
 
-    pub fn unpacked_data_with_unpack15(
+    pub(crate) fn unpacked_data_with_unpack15(
         &self,
         archive: &Archive,
         decoder: &mut Unpack15,
@@ -411,7 +388,7 @@ impl FileHeader {
             .map_err(Into::into)
     }
 
-    pub fn unpacked_data_with_unpack20(
+    pub(crate) fn unpacked_data_with_unpack20(
         &self,
         archive: &Archive,
         decoder: &mut Unpack20,
@@ -490,71 +467,17 @@ impl FileHeader {
         }
     }
 
-    pub fn extract_stored(&self, archive: &Archive) -> Result<ExtractedEntry> {
-        self.extract_stored_with_password(archive, None)
-    }
-
-    pub fn extract_stored_with_password(
+    pub fn write_to(
         &self,
         archive: &Archive,
         password: Option<&[u8]>,
-    ) -> Result<ExtractedEntry> {
+        out: &mut impl Write,
+    ) -> Result<()> {
         if self.is_directory() {
-            return Ok(ExtractedEntry {
-                name: self.name.clone(),
-                data: Vec::new(),
-                file_time: self.file_time,
-                attr: self.attr,
-                host_os: self.host_os,
-                is_directory: true,
-            });
+            return Ok(());
         }
-
-        let data = self.stored_data_with_password(archive, password)?;
-        self.verify_crc32(&data)?;
-        Ok(ExtractedEntry {
-            name: self.name.clone(),
-            data,
-            file_time: self.file_time,
-            attr: self.attr,
-            host_os: self.host_os,
-            is_directory: false,
-        })
-    }
-
-    pub fn extract(&self, archive: &Archive) -> Result<ExtractedEntry> {
-        self.extract_with_password(archive, None)
-    }
-
-    pub fn extract_with_password(
-        &self,
-        archive: &Archive,
-        password: Option<&[u8]>,
-    ) -> Result<ExtractedEntry> {
-        if self.is_directory() {
-            return Ok(ExtractedEntry {
-                name: self.name.clone(),
-                data: Vec::new(),
-                file_time: self.file_time,
-                attr: self.attr,
-                host_os: self.host_os,
-                is_directory: true,
-            });
-        }
-
-        let data = self
-            .unpacked_data_with_password(archive, password)
-            .map_err(|error| self.map_encrypted_payload_error(password, error))?;
-        self.verify_crc32(&data)
-            .map_err(|error| self.map_encrypted_payload_error(password, error))?;
-        Ok(ExtractedEntry {
-            name: self.name.clone(),
-            data,
-            file_time: self.file_time,
-            attr: self.attr,
-            host_os: self.host_os,
-            is_directory: false,
-        })
+        let mut session = DecoderSession::new_with_password(false, password);
+        session.write_file_to(archive, self, out)
     }
 
     fn write_stored_to(
@@ -786,11 +709,11 @@ impl NewSubHeader {
 }
 
 impl CommentHeader {
-    pub fn packed_data(&self, archive: &Archive) -> Result<Vec<u8>> {
+    fn packed_data(&self, archive: &Archive) -> Result<Vec<u8>> {
         archive.read_range(self.packed_range.clone())
     }
 
-    pub fn unpacked_data(&self, archive: &Archive) -> Result<Vec<u8>> {
+    fn unpacked_data(&self, archive: &Archive) -> Result<Vec<u8>> {
         let target = usize::from(self.unp_size);
         let data = if self.method == 0x30 {
             let data = self.packed_data(archive)?;

@@ -2766,7 +2766,17 @@ mod tests {
         }
     }
 
-    fn collect_extract(archive: &Archive) -> Result<Vec<ExtractedEntry>> {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct CollectedEntry {
+        name: Vec<u8>,
+        data: Vec<u8>,
+        file_time: u32,
+        attr: u64,
+        host_os: u64,
+        is_directory: bool,
+    }
+
+    fn collect_extract(archive: &Archive) -> Result<Vec<CollectedEntry>> {
         let entries = RefCell::new(Vec::new());
         archive.extract_to(|meta| {
             let data = Rc::new(RefCell::new(Vec::new()));
@@ -2776,7 +2786,7 @@ mod tests {
         Ok(entries
             .into_inner()
             .into_iter()
-            .map(|(meta, data)| ExtractedEntry {
+            .map(|(meta, data)| CollectedEntry {
                 name: meta.name,
                 data: data.borrow().clone(),
                 file_time: meta.file_time,
