@@ -1,4 +1,3 @@
-
 const MAX_PARITY: usize = 255;
 const MAX_POLYNOMIAL: usize = 512;
 const PRIMITIVE_POLYNOMIAL: u16 = 0x11d;

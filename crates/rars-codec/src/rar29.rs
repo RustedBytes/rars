@@ -47,6 +47,11 @@ const MAX_MATCH_CANDIDATES: usize = 256;
 const MAX_PPMD_MATCH_LENGTH: usize = 287;
 const MIN_PPMD_MATCH_LENGTH: usize = 32;
 const MAX_PPMD_REPEAT_LENGTH: usize = 259;
+
+// RAR 3.x standard filters are stored as RARVM bytecode in the compressed
+// stream. RAR15_40_FORMAT_SPECIFICATION.md §20 and FILTER_TRANSFORMS.md §9
+// define these blobs by byte length plus CRC32 fingerprint; keep the bytes
+// verbatim so writer output and reader recognition use the same wire identity.
 const RAR3_E8_FILTER_BYTECODE: &[u8] = &[
     0x97, 0x1b, 0x01, 0x28, 0x07, 0x06, 0x98, 0x08, 0x00, 0x00, 0x00, 0xd1, 0x3a, 0x10, 0x15, 0x92,
     0xec, 0x50, 0xcb, 0x99, 0x20, 0xb9, 0x25, 0xf0, 0x29, 0x19, 0x15, 0x53, 0x03, 0x12, 0xae, 0x51,

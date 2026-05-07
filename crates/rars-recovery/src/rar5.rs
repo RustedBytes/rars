@@ -1,4 +1,3 @@
-
 const CRC64_XZ_POLY: u64 = 0xc96c_5795_d787_0f42;
 const CRC64_XZ_INIT: u64 = 0xffff_ffff_ffff_ffff;
 const FIELD_SIZE: usize = 65_535;

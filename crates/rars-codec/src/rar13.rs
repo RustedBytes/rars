@@ -51,6 +51,8 @@ pub fn unpack15_decode(input: &[u8], output_size: usize) -> Result<Vec<u8>> {
 
 pub struct Unpack15Encoder {
     bits: BitWriter,
+    // State names follow RAR13_FORMAT_SPECIFICATION.md §6 so the codec state
+    // lines up directly with the documented Unpack15 tables and traces.
     ch_set: [u16; 256],
     ch_set_c: [u16; 256],
     ch_set_b: [u16; 256],
@@ -1249,6 +1251,8 @@ pub struct Unpack15 {
     unp_ptr: usize,
     prev_ptr: usize,
     first_win_done: bool,
+    // State names follow RAR13_FORMAT_SPECIFICATION.md §6 so the codec state
+    // lines up directly with the documented Unpack15 tables and traces.
     ch_set: [u16; 256],
     ch_set_a: [u16; 256],
     ch_set_b: [u16; 256],

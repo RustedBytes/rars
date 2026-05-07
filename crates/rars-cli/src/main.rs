@@ -272,6 +272,7 @@ fn cmd_extract(args: &[String]) -> CliResult<()> {
     if paths.len() < 2 {
         return Err("usage: rars x [--password <password>] <archive> [parts...] <outdir>".into());
     }
+    // Invariant: the length check above guarantees an output directory argument.
     let out_dir = PathBuf::from(paths.pop().expect("outdir"));
 
     if paths.len() == 1 {
@@ -371,6 +372,7 @@ fn cmd_repair_volumes(paths: &[String]) -> CliResult<()> {
 }
 
 fn cmd_repair_rev5(paths: &[String]) -> CliResult<()> {
+    // Invariant: cmd_repair dispatches here only after checking at least two paths.
     let out_dir = PathBuf::from(paths.last().expect("outdir"));
     fs::create_dir_all(&out_dir)?;
     let input_paths = &paths[..paths.len() - 1];
@@ -413,6 +415,7 @@ fn cmd_repair_rev5(paths: &[String]) -> CliResult<()> {
 }
 
 fn cmd_repair_rev3(paths: &[String]) -> CliResult<()> {
+    // Invariant: cmd_repair dispatches here only after checking at least two paths.
     let out_dir = PathBuf::from(paths.last().expect("outdir"));
     fs::create_dir_all(&out_dir)?;
     let input_paths = &paths[..paths.len() - 1];
@@ -982,6 +985,7 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                 }
                 let parts = if let Some(password) = password.as_deref() {
                     if store {
+                        // Invariant: parse_add_command rejects add commands without inputs.
                         let entry = owned.first().expect("stored volume input checked above");
                         let entry = rars::rar50::EncryptedStoredEntry {
                             name: &entry.name,
@@ -1015,6 +1019,7 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                             .finish()?
                     }
                 } else {
+                    // Invariant: parse_add_command rejects add commands without inputs.
                     let entry = entries.first().expect("one input checked above");
                     if store {
                         rars::rar50::Rar50VolumeWriter::new(options)
@@ -1259,6 +1264,7 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                 },
             };
             if let Some(volume_size) = volume_size {
+                // Invariant: parse_add_command rejects add commands without inputs.
                 let entry = owned.first().expect("one input checked above");
                 if entry.file_attr == DOS_DIRECTORY_ATTR {
                     return Err("RAR 1.5 writer currently rejects directories".into());
@@ -1416,6 +1422,7 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
             features.solid = solid;
             let options = Rar13WriterOptions { target, features };
             if let Some(volume_size) = volume_size {
+                // Invariant: parse_add_command rejects add commands without inputs.
                 let entry = owned.first().expect("one input checked above");
                 let parts = if compress {
                     let entry = FileEntry {
