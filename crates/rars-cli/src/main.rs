@@ -20,7 +20,14 @@ const ADD_USAGE: &str =
     "usage: rars a [--password <password>] --format <rar14|rar15|rar20|rar29|rar30|rar40|rar50|rar70> [--store] [--solid] [--encrypt-headers] [--comment <text>] [--archive-name <name>] [--file-comment <text>] [--recovery-percent <1..100>] [--volume-size <bytes>] [--ppmd|--auto-filter|--delta-filter <channels>|--e8-filter|--e8e9-filter|--itanium-filter|--rgb-filter <width>|--audio-filter <channels>|--arm-filter] <archive> <files...>";
 const DOS_DIRECTORY_ATTR: u8 = 0x10;
 const RAR50_STRUCTURAL_RR_WARNING: &str =
-    "warning: RAR 5 recovery writer emits validation-ready RR metadata; byte-identical WinRAR recovery layout is not expected";
+    "warning: RAR 5 recovery writer emits validation-ready RR metadata; WinRAR recovery layout matching is not expected";
+
+fn read_options(password: Option<&[u8]>) -> ArchiveReadOptions<'_> {
+    match password {
+        Some(password) => ArchiveReadOptions::with_password(password),
+        None => ArchiveReadOptions::new(),
+    }
+}
 
 fn main() {
     if let Err(err) = run() {
@@ -58,21 +65,13 @@ fn cmd_info(args: &[String]) -> CliResult<()> {
     }
 
     for path in paths {
-        let archive = ArchiveReader::read_path_with_options(
-            &path,
-            ArchiveReadOptions {
-                password: password.as_deref(),
-            },
-        )
-        .map_err(|err| read_archive_error(&path, err))?;
+        let archive =
+            ArchiveReader::read_path_with_options(&path, read_options(password.as_deref()))
+                .map_err(|err| read_archive_error(&path, err))?;
         println!(
             "{path}: {:?} at offset {}",
             archive.family(),
-            match &archive {
-                DetectedArchive::Rar13(archive) => archive.sfx_offset,
-                DetectedArchive::Rar15To40(archive) => archive.sfx_offset,
-                DetectedArchive::Rar50Plus(archive) => archive.sfx_offset,
-            }
+            archive.sfx_offset()
         );
         match archive {
             DetectedArchive::Rar13(archive) => {
@@ -214,6 +213,7 @@ fn cmd_info(args: &[String]) -> CliResult<()> {
                     );
                 }
             }
+            _ => unreachable!("archive family was parsed but is not handled by info output"),
         }
     }
 
@@ -227,13 +227,9 @@ fn cmd_test(args: &[String]) -> CliResult<()> {
     }
 
     if paths.len() == 1 {
-        let archive = ArchiveReader::read_path_with_options(
-            &paths[0],
-            ArchiveReadOptions {
-                password: password.as_deref(),
-            },
-        )
-        .map_err(|err| read_archive_error(&paths[0], err))?;
+        let archive =
+            ArchiveReader::read_path_with_options(&paths[0], read_options(password.as_deref()))
+                .map_err(|err| read_archive_error(&paths[0], err))?;
         let mut entries = Vec::new();
         archive
             .extract_to(password.as_deref(), |meta| {
@@ -267,13 +263,9 @@ fn cmd_extract(args: &[String]) -> CliResult<()> {
     let out_dir = PathBuf::from(paths.pop().expect("outdir"));
 
     if paths.len() == 1 {
-        let archive = ArchiveReader::read_path_with_options(
-            &paths[0],
-            ArchiveReadOptions {
-                password: password.as_deref(),
-            },
-        )
-        .map_err(|err| read_archive_error(&paths[0], err))?;
+        let archive =
+            ArchiveReader::read_path_with_options(&paths[0], read_options(password.as_deref()))
+                .map_err(|err| read_archive_error(&paths[0], err))?;
         let mut names = Vec::new();
         archive
             .extract_to(password.as_deref(), |meta| {
@@ -315,12 +307,8 @@ fn cmd_repair(args: &[String]) -> CliResult<()> {
         }
         return cmd_repair_volumes(&paths);
     }
-    let archive = ArchiveReader::read_path_with_options(
-        &paths[0],
-        ArchiveReadOptions {
-            password: password.as_deref(),
-        },
-    );
+    let archive =
+        ArchiveReader::read_path_with_options(&paths[0], read_options(password.as_deref()));
     let repaired = match archive {
         Ok(archive) => archive
             .repair_recovery()
@@ -1478,7 +1466,7 @@ fn parse_archives(paths: &[String], password: Option<&[u8]>) -> CliResult<Vec<De
     let mut archives = Vec::new();
     for path in paths {
         archives.push(
-            ArchiveReader::read_path_with_options(path, ArchiveReadOptions { password })
+            ArchiveReader::read_path_with_options(path, read_options(password))
                 .map_err(|err| read_archive_error(path, err))?,
         );
     }

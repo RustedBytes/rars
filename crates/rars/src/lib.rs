@@ -6,6 +6,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum Archive {
     Rar13(rar13::Archive),
     Rar15To40(rar15_40::Archive),
@@ -13,6 +14,7 @@ pub enum Archive {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ExtractedEntry {
     pub name: Vec<u8>,
     pub data: Vec<u8>,
@@ -22,6 +24,7 @@ pub struct ExtractedEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ExtractedEntryMeta {
     pub name: Vec<u8>,
     pub file_time: u32,
@@ -93,6 +96,14 @@ impl Archive {
             Self::Rar13(_) => ArchiveFamily::Rar13,
             Self::Rar15To40(_) => ArchiveFamily::Rar15To40,
             Self::Rar50Plus(_) => ArchiveFamily::Rar50Plus,
+        }
+    }
+
+    pub fn sfx_offset(&self) -> usize {
+        match self {
+            Self::Rar13(archive) => archive.sfx_offset,
+            Self::Rar15To40(archive) => archive.sfx_offset,
+            Self::Rar50Plus(archive) => archive.sfx_offset,
         }
     }
 
@@ -350,6 +361,13 @@ impl ArchiveReader {
     }
 }
 
+fn read_options(password: Option<&[u8]>) -> ArchiveReadOptions<'_> {
+    match password {
+        Some(password) => ArchiveReadOptions::with_password(password),
+        None => ArchiveReadOptions::new(),
+    }
+}
+
 /// Convenience multivolume extraction API that buffers each extracted entry in
 /// memory. Prefer [`extract_volumes_to`] for large archives.
 pub fn extract_volumes(
@@ -368,12 +386,12 @@ pub fn extract_volumes(
         }
         ArchiveFamily::Rar15To40 => {
             let typed = rar15_40_volumes(archives)?;
-            rar15_40::extract_volumes_with_options(&typed, ArchiveReadOptions { password })
+            rar15_40::extract_volumes_with_options(&typed, read_options(password))
                 .map(|entries| entries.into_iter().map(Into::into).collect())
         }
         ArchiveFamily::Rar50Plus => {
             let typed = rar50_volumes(archives)?;
-            rar50::extract_volumes_with_options(&typed, ArchiveReadOptions { password })
+            rar50::extract_volumes_with_options(&typed, read_options(password))
                 .map(|entries| entries.into_iter().map(Into::into).collect())
         }
     }
@@ -399,19 +417,15 @@ where
         }
         ArchiveFamily::Rar15To40 => {
             let typed = rar15_40_volumes(archives)?;
-            rar15_40::extract_volumes_to_with_options(
-                &typed,
-                ArchiveReadOptions { password },
-                |meta| open(&rar15_40_meta(meta)),
-            )
+            rar15_40::extract_volumes_to_with_options(&typed, read_options(password), |meta| {
+                open(&rar15_40_meta(meta))
+            })
         }
         ArchiveFamily::Rar50Plus => {
             let typed = rar50_volumes(archives)?;
-            rar50::extract_volumes_to_with_options(
-                &typed,
-                ArchiveReadOptions { password },
-                |meta| open(&rar50_meta(meta)?),
-            )
+            rar50::extract_volumes_to_with_options(&typed, read_options(password), |meta| {
+                open(&rar50_meta(meta)?)
+            })
         }
     }
 }

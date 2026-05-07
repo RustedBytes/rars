@@ -43,15 +43,11 @@ serialization.
   fixture is worth carrying.
 - Decide whether REV repair needs a streaming output API instead of returning
   all repaired volume files as `Vec<Vec<u8>>`.
-- Split RAR5 REV parsing into metadata-only and payload-carrying forms if REV
-  parse throughput or memory use matters.
 
 ### 4. API And Error Quality
 
 - Continue enriching library errors with block type and operation context before
   treating the public API as stable.
-- Keep low-level parsed format structs public for inspection, but mark them
-  non-exhaustive before public stabilization.
 - Consider deprecating Vec-returning extraction APIs once integration tests and
   examples primarily use streaming APIs.
 

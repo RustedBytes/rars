@@ -14,6 +14,7 @@ pub use features::FeatureSet;
 pub use version::{ArchiveFamily, ArchiveVersion};
 
 #[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
 pub struct ArchiveReadOptions<'a> {
     pub password: Option<&'a [u8]>,
 }

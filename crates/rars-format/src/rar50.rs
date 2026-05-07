@@ -226,6 +226,18 @@ pub struct Rev5Volume {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
+pub struct Rev5VolumeMeta {
+    pub version: u8,
+    pub data_count: u16,
+    pub recovery_count: u16,
+    pub recovery_number: u16,
+    pub payload_crc32: u32,
+    pub payload_size: u64,
+    pub data_volumes: Vec<Rev5DataVolume>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Rev5DataVolume {
     pub file_size: u64,
     pub crc32: u32,
@@ -244,6 +256,7 @@ pub struct CompressionInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ExtractedEntry {
     pub name: Vec<u8>,
     pub data: Vec<u8>,
@@ -254,6 +267,7 @@ pub struct ExtractedEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ExtractedEntryMeta {
     pub name: Vec<u8>,
     pub file_time: u32,
@@ -582,6 +596,35 @@ impl Archive {
 
 impl Rev5Volume {
     pub fn parse(input: &[u8]) -> Result<Self> {
+        let (meta, payload_range) = Rev5VolumeMeta::parse_with_payload_range(input)?;
+        let payload = &input[payload_range];
+        let actual_payload_crc = crc32(payload);
+        if actual_payload_crc != meta.payload_crc32 {
+            return Err(Error::Crc32Mismatch {
+                expected: meta.payload_crc32,
+                actual: actual_payload_crc,
+            });
+        }
+
+        Ok(Self {
+            version: meta.version,
+            data_count: meta.data_count,
+            recovery_count: meta.recovery_count,
+            recovery_number: meta.recovery_number,
+            payload_crc32: meta.payload_crc32,
+            payload_size: meta.payload_size,
+            payload: payload.to_vec(),
+            data_volumes: meta.data_volumes,
+        })
+    }
+}
+
+impl Rev5VolumeMeta {
+    pub fn parse(input: &[u8]) -> Result<Self> {
+        Self::parse_with_payload_range(input).map(|(meta, _)| meta)
+    }
+
+    fn parse_with_payload_range(input: &[u8]) -> Result<(Self, Range<usize>)> {
         if !input.starts_with(REV5_SIGNATURE) {
             return Err(Error::UnsupportedSignature);
         }
@@ -650,25 +693,46 @@ impl Rev5Volume {
             pos += 12;
         }
 
-        let payload = &input[header_end..];
-        let actual_payload_crc = crc32(payload);
-        if actual_payload_crc != payload_crc32 {
-            return Err(Error::Crc32Mismatch {
-                expected: payload_crc32,
-                actual: actual_payload_crc,
-            });
-        }
+        Ok((
+            Self {
+                version,
+                data_count,
+                recovery_count,
+                recovery_number: recovery_number as u16,
+                payload_crc32,
+                payload_size: (input.len() - header_end) as u64,
+                data_volumes,
+            },
+            header_end..input.len(),
+        ))
+    }
+}
 
-        Ok(Self {
-            version,
-            data_count,
-            recovery_count,
-            recovery_number: recovery_number as u16,
-            payload_crc32,
-            payload_size: payload.len() as u64,
-            payload: payload.to_vec(),
-            data_volumes,
-        })
+impl From<&Rev5Volume> for Rev5VolumeMeta {
+    fn from(volume: &Rev5Volume) -> Self {
+        Self {
+            version: volume.version,
+            data_count: volume.data_count,
+            recovery_count: volume.recovery_count,
+            recovery_number: volume.recovery_number,
+            payload_crc32: volume.payload_crc32,
+            payload_size: volume.payload_size,
+            data_volumes: volume.data_volumes.clone(),
+        }
+    }
+}
+
+impl From<Rev5Volume> for Rev5VolumeMeta {
+    fn from(volume: Rev5Volume) -> Self {
+        Self {
+            version: volume.version,
+            data_count: volume.data_count,
+            recovery_count: volume.recovery_count,
+            recovery_number: volume.recovery_number,
+            payload_crc32: volume.payload_crc32,
+            payload_size: volume.payload_size,
+            data_volumes: volume.data_volumes,
+        }
     }
 }
 

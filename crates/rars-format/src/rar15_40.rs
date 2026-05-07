@@ -229,6 +229,7 @@ pub struct FileEntry<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ExtractedEntry {
     pub name: Vec<u8>,
     pub data: Vec<u8>,
@@ -239,6 +240,7 @@ pub struct ExtractedEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ExtractedEntryMeta {
     pub name: Vec<u8>,
     pub file_time: u32,

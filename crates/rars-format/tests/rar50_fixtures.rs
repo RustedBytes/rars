@@ -3,7 +3,8 @@ use rars_format::rar50::{
     extract_volumes, repair_inline_recovery_bytes, repair_rev5_volumes, Archive,
     ArchiveMetadataEntry, EncryptedArchiveCommentEntry, EncryptedCompressedEntry,
     EncryptedStoredEntry, EncryptedStoredEntryWithServices, EncryptedStoredServiceEntry,
-    FilterKind, FilterPolicy, Rev5Volume, StoredEntryWithServices, StoredServiceEntry,
+    FilterKind, FilterPolicy, Rev5Volume, Rev5VolumeMeta, StoredEntryWithServices,
+    StoredServiceEntry,
 };
 use rars_format::{detect_archive_family, rar50, ArchiveFamily, ArchiveVersion, Error, FeatureSet};
 use rars_recovery::rar5::crc64_xz;
@@ -3844,6 +3845,23 @@ fn parses_rar50_rev5_recovery_volume_metadata() {
     assert_eq!(rev.data_volumes.len(), 5);
     assert_eq!(rev.data_volumes[0].file_size, 4096);
     assert_eq!(rev.data_volumes[4].file_size, 1032);
+}
+
+#[test]
+fn parses_rar50_rev5_metadata_without_validating_payload_crc() {
+    let mut bytes = std::fs::read(fixture("multivol_rev.part1.rev")).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0x01;
+
+    let meta = Rev5VolumeMeta::parse(&bytes).unwrap();
+
+    assert_eq!(meta.version, 1);
+    assert_eq!(meta.data_count, 5);
+    assert_eq!(meta.recovery_count, 2);
+    assert_eq!(meta.recovery_number, 5);
+    assert_eq!(meta.payload_size, 4096);
+    assert_eq!(meta.payload_crc32, 0xfd0b_7e3f);
+    assert_eq!(meta.data_volumes.len(), 5);
 }
 
 #[test]

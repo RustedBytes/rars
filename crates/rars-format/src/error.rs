@@ -3,6 +3,7 @@ use crate::version::ArchiveVersion;
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Error {
     TooShort,
     UnsupportedSignature,
