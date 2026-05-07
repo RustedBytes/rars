@@ -29,8 +29,6 @@ serialization.
 ### 2. RAR 1.5-4.x Reader And Recovery
 
 - Add adversarial PPMd fixtures as corpus bugs appear.
-- Add or find a fixture demonstrating the `PROTECT_HEAD` stable repairable
-  prefix when recovery metadata overlaps the protected prefix.
 - Keep the libarchive mixed encrypted fixture as a partial oracle only for the
   RAR 3.93-validated `b.txt` member.
 

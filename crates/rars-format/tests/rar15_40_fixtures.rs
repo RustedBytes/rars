@@ -4339,6 +4339,34 @@ fn protect_head_does_not_repair_trailing_partial_sector_before_record() {
 }
 
 #[test]
+fn protect_head_repairs_last_stable_sector_before_metadata_overlap() {
+    let bytes = std::fs::read(fixture("rar250_protect_head_rr5.rar")).unwrap();
+    let clean = Archive::parse(&bytes).unwrap();
+    let protect: &ProtectHeader = clean.protect_records().next().unwrap();
+    let stable_blocks = protect.block.offset / 512;
+    assert!(stable_blocks > 0);
+    assert!(usize::try_from(protect.total_blocks).unwrap() > stable_blocks);
+    assert_ne!(protect.block.offset % 512, 0);
+
+    let damage_offset = (stable_blocks - 1) * 512 + 16;
+    assert!(damage_offset + 64 <= protect.block.offset);
+    let mut damaged = bytes.clone();
+    damaged[damage_offset..damage_offset + 64].fill(0xa5);
+
+    let damaged_archive = Archive::parse(&damaged).unwrap();
+    assert!(damaged_archive.extract().is_err());
+
+    let repaired = damaged_archive.repair_protect_head().unwrap();
+
+    assert_eq!(repaired, bytes);
+    let repaired_archive = Archive::parse(&repaired).unwrap();
+    let extracted = repaired_archive.extract().unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].name, b"BIG.BIN");
+    assert_eq!(crc32(&extracted[0].data), 0x9a0e0c8c);
+}
+
+#[test]
 fn repairs_rar300_newsub_recovery_single_damaged_sector() {
     let bytes = std::fs::read(fixture("rar300/with_recovery_rar300.rar")).unwrap();
     let mut damaged = bytes.clone();
