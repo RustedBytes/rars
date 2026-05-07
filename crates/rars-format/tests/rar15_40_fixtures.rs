@@ -5206,6 +5206,28 @@ fn crc32_matches_standard_check_value() {
     assert_eq!(crc32(b"123456789"), 0xcbf43926);
 }
 
+#[test]
+fn rejects_file_header_salt_that_extends_beyond_head_size_without_panicking() {
+    let mut archive = b"Rar!\x1a\x07\x00".to_vec();
+    archive.extend_from_slice(&rar15_header(0x73, 0, &[0; 6]));
+
+    let mut file_body = Vec::new();
+    push_u32(&mut file_body, 0);
+    push_u32(&mut file_body, 0);
+    file_body.push(2);
+    push_u32(&mut file_body, 0);
+    push_u32(&mut file_body, 0);
+    file_body.push(29);
+    file_body.push(0x30);
+    push_u16(&mut file_body, 0);
+    push_u32(&mut file_body, 0x20);
+
+    archive.extend_from_slice(&rar15_header(0x74, 0x0400 | 0x1000, &file_body));
+    archive.extend_from_slice(&[0xaa; 8]);
+
+    assert!(Archive::parse(&archive).is_err());
+}
+
 fn expected_stored_volume_payload() -> Vec<u8> {
     "RAR 3.00 stored multivolume fixture line.\n"
         .repeat(80)

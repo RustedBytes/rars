@@ -703,10 +703,7 @@ pub mod rar5 {
     fn find_inline_recovery_chunks(input: &[u8]) -> Result<Vec<FoundInlineRecoveryChunk>> {
         let mut chunks = Vec::new();
         let mut offset = 0usize;
-        while let Some(relative) = input[offset..]
-            .windows(4)
-            .position(|window| window == b"{RB}")
-        {
+        while let Some(relative) = find_recovery_marker(&input[offset..]) {
             let start = offset + relative;
             if let Ok(chunk) = parse_inline_recovery_chunk(&input[start..]) {
                 let shard_size =
@@ -726,6 +723,19 @@ pub mod rar5 {
             return Err(Error::BadRecoveryChunk);
         }
         Ok(chunks)
+    }
+
+    fn find_recovery_marker(input: &[u8]) -> Option<usize> {
+        let mut offset = 0usize;
+        while offset + 4 <= input.len() {
+            let relative = input[offset..].iter().position(|&byte| byte == b'{')?;
+            offset += relative;
+            if input.get(offset..offset + 4) == Some(b"{RB}") {
+                return Some(offset);
+            }
+            offset += 1;
+        }
+        None
     }
 
     fn append_inline_recovery_chunk(

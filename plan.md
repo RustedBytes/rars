@@ -19,15 +19,6 @@ serialization.
 
 ### 1. Pre-release Hardening
 
-- Fix malformed RAR 1.5-4.x `FILE_HEAD` salt parsing so optional salt bytes
-  are bounded by `head_end`, with a regression test for `FHD_SALT|FHD_EXTTIME`
-  and no salt room.
-- Bound RAR29 VM control-stream resource use: cap VM code sizes before
-  allocation, cap retained VM program/filter records, and add hostile-control
-  stream regression tests.
-- Replace the RAR5 inline-recovery raw scanner's repeated `windows(4)` rescans
-  with a linear marker search, and pre-screen the CLI raw-repair fallback on the
-  RAR5 signature before scanning arbitrary input.
 - Make RAR5 large-output streaming handle filter records, or fall back to a
   documented bounded buffered path instead of rejecting filtered members above
   the streaming threshold.
@@ -36,8 +27,6 @@ serialization.
   encrypted entries, and compressed split-volume reassembly.
 - Remove remaining attacker-controlled `unpacked_size as usize` casts in RAR5
   extraction and split reassembly; use checked conversion consistently.
-- Fix RARVM `SAR` when byte-mode shift count reaches the operand width, and add
-  a byte-mode boundary regression.
 - Add Kraft/canonical-table validation to Huffman builders, and port the
   indexed canonical decode table used by RAR5 back to RAR20/RAR29.
 - Use constant-time comparisons for RAR5 password checks and BLAKE2sp/HMAC hash

@@ -1753,8 +1753,16 @@ fn parse_file_like_header(
     pos = name_end;
 
     let salt = if block.flags & FHD_SALT != 0 {
-        let salt_bytes = input.get(pos..pos + 8).ok_or(Error::TooShort)?;
-        pos += 8;
+        let salt_end = pos
+            .checked_add(8)
+            .ok_or(Error::InvalidHeader("RAR 1.5 salt size overflows"))?;
+        if salt_end > head_end {
+            return Err(Error::InvalidHeader(
+                "RAR 1.5 salt extends beyond file header",
+            ));
+        }
+        let salt_bytes = input.get(pos..salt_end).ok_or(Error::TooShort)?;
+        pos = salt_end;
         Some(
             salt_bytes
                 .try_into()

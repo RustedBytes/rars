@@ -3092,6 +3092,27 @@ fn repairs_rar50_stored_archive_with_inline_recovery_record() {
 }
 
 #[test]
+fn repair_rejects_non_rar_input_without_raw_inline_scan() {
+    let dir = scratch("repair-non-rar");
+    let input = dir.join("image.jpg");
+    let repaired = dir.join("repaired.rar");
+    fs::write(&input, b"not a rar archive with lots of bytes").unwrap();
+
+    let output = rars()
+        .arg("repair")
+        .arg(&input)
+        .arg(&repaired)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = stderr(&output);
+    assert!(stderr.contains("failed to identify archive"));
+    assert!(!stderr.contains("raw inline recovery repair"));
+    assert!(!repaired.exists());
+}
+
+#[test]
 fn repairs_rar250_protect_head_archive() {
     let dir = scratch("repair-rar250-protect-head");
     let archive = dir.join("damaged.rar");

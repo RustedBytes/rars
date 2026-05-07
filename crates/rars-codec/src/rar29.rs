@@ -15,6 +15,9 @@ const MAX_HISTORY: usize = 4 * 1024 * 1024;
 const INPUT_CHUNK: usize = 64 * 1024;
 const STREAM_CHUNK: usize = 1024 * 1024;
 const MAX_VM_GLOBAL_DATA: usize = 0x2000;
+const MAX_VM_CODE_SIZE: usize = 64 * 1024;
+const MAX_VM_PROGRAMS: usize = 1024;
+const MAX_VM_FILTERS: usize = 1024;
 
 const LENGTH_BASES: [usize; LENGTH_COUNT] = [
     0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 112, 128,
@@ -1613,9 +1616,15 @@ impl Unpack29 {
         }
 
         if new_program {
+            if self.programs.len() >= MAX_VM_PROGRAMS {
+                return Err(Error::InvalidData("RAR 2.9 VM program limit exceeded"));
+            }
             let code_size = vm.read_encoded_u32()? as usize;
             if code_size == 0 {
                 return Err(Error::InvalidData("RAR 2.9 VM code is empty"));
+            }
+            if code_size > MAX_VM_CODE_SIZE {
+                return Err(Error::InvalidData("RAR 2.9 VM code is too large"));
             }
             let mut code = Vec::with_capacity(code_size);
             for _ in 0..code_size {
@@ -1650,6 +1659,9 @@ impl Unpack29 {
             }
         }
 
+        if self.filters.len() >= MAX_VM_FILTERS {
+            return Err(Error::InvalidData("RAR 2.9 VM filter limit exceeded"));
+        }
         self.filters.push(VmFilter {
             program: program_index,
             start: block_start,
@@ -2704,6 +2716,61 @@ mod tests {
         assert_eq!(
             decoder.parse_vm_code(0x80 | 0x08, data.finish()),
             Err(Error::NeedMoreInput)
+        );
+    }
+
+    #[test]
+    fn vm_code_size_is_capped_before_allocation() {
+        let mut decoder = Unpack29::new();
+        let mut data = BitWriter::default();
+        data.write_encoded_u32(0);
+        data.write_encoded_u32(1);
+        data.write_encoded_u32((super::MAX_VM_CODE_SIZE + 1) as u32);
+
+        assert_eq!(
+            decoder.parse_vm_code(0x80, data.finish()),
+            Err(Error::InvalidData("RAR 2.9 VM code is too large"))
+        );
+    }
+
+    #[test]
+    fn vm_program_and_filter_counts_are_capped() {
+        let mut decoder = Unpack29::new();
+        decoder
+            .programs
+            .resize_with(super::MAX_VM_PROGRAMS, || VmProgram {
+                kind: VmProgramKind::Standard(StandardFilter::E8),
+                block_size: 1,
+                exec_count: 0,
+                globals: Vec::new(),
+            });
+
+        let mut new_program = BitWriter::default();
+        new_program.write_encoded_u32((super::MAX_VM_PROGRAMS + 1) as u32);
+        new_program.write_encoded_u32(1);
+        new_program.write_encoded_u32(1);
+        new_program.write_bits(0, 8);
+        assert_eq!(
+            decoder.parse_vm_code(0x80, new_program.finish()),
+            Err(Error::InvalidData("RAR 2.9 VM program limit exceeded"))
+        );
+
+        decoder.programs.truncate(1);
+        decoder.last_filter = 0;
+        decoder
+            .filters
+            .resize_with(super::MAX_VM_FILTERS, || VmFilter {
+                program: 0,
+                start: 0,
+                size: 1,
+                regs: [0; 7],
+                global_data: Vec::new(),
+            });
+        let mut reused_program = BitWriter::default();
+        reused_program.write_encoded_u32(0);
+        assert_eq!(
+            decoder.parse_vm_code(0, reused_program.finish()),
+            Err(Error::InvalidData("RAR 2.9 VM filter limit exceeded"))
         );
     }
 

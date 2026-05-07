@@ -728,7 +728,21 @@ impl Vm {
             Opcode::Shr => value.wrapping_shr(count),
             Opcode::Sar => {
                 if byte_mode {
-                    ((value as u8 as i8) >> count) as u8 as u32
+                    if count >= 8 {
+                        if value & 0x80 != 0 {
+                            0xff
+                        } else {
+                            0
+                        }
+                    } else {
+                        ((value as u8 as i8) >> count) as u8 as u32
+                    }
+                } else if count >= 32 {
+                    if value & 0x8000_0000 != 0 {
+                        u32::MAX
+                    } else {
+                        0
+                    }
                 } else {
                     ((value as i32) >> count) as u32
                 }
@@ -1310,6 +1324,36 @@ mod tests {
 
         assert_eq!(result.regs[0], 0x40);
         assert_eq!(result.regs[1], 0xc0);
+    }
+
+    #[test]
+    fn byte_mode_sar_accepts_shift_count_equal_to_width() {
+        let result = execute_instructions(vec![
+            instr(
+                Opcode::Mov,
+                false,
+                vec![Operand::Register(0), Operand::Immediate(0x80)],
+            ),
+            instr(
+                Opcode::Sar,
+                true,
+                vec![Operand::Register(0), Operand::Immediate(8)],
+            ),
+            instr(
+                Opcode::Mov,
+                false,
+                vec![Operand::Register(1), Operand::Immediate(0x7f)],
+            ),
+            instr(
+                Opcode::Sar,
+                true,
+                vec![Operand::Register(1), Operand::Immediate(8)],
+            ),
+            instr(Opcode::Ret, false, Vec::new()),
+        ]);
+
+        assert_eq!(result.regs[0], 0xff);
+        assert_eq!(result.regs[1], 0);
     }
 
     #[test]

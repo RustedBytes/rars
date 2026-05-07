@@ -19,6 +19,7 @@ type CliResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const ADD_USAGE: &str =
     "usage: rars a [--password <password>] --format <rar14|rar15|rar20|rar29|rar30|rar40|rar50|rar70> [--store] [--solid] [--encrypt-headers] [--quick-open] [--comment <text>] [--archive-name <name>] [--file-comment <text>] [--recovery-percent <1..100>] [--volume-size <bytes>] [--ppmd|--auto-filter|--delta-filter <channels>|--e8-filter|--e8e9-filter|--itanium-filter|--rgb-filter <width>|--audio-filter <channels>|--arm-filter] <archive> <files...>";
 const DOS_DIRECTORY_ATTR: u8 = 0x10;
+const RAR50_SIGNATURE: &[u8] = b"Rar!\x1a\x07\x01\x00";
 const RAR50_STRUCTURAL_RR_WARNING: &str =
     "warning: RAR 5 recovery writer emits validation-ready RR metadata; WinRAR recovery layout matching is not expected";
 
@@ -314,6 +315,9 @@ fn cmd_repair(args: &[String]) -> CliResult<()> {
             .repair_recovery()
             .map_err(|err| format!("failed to repair archive '{}': {err}", paths[0]))?,
         Err(parse_error) => {
+            if !path_starts_with(&paths[0], RAR50_SIGNATURE)? {
+                return Err(read_archive_error(&paths[0], parse_error).into());
+            }
             let bytes = fs::read(&paths[0])?;
             rars::rar50::repair_inline_recovery_bytes(&bytes).map_err(|repair_error| {
                 format!(
@@ -326,6 +330,13 @@ fn cmd_repair(args: &[String]) -> CliResult<()> {
     fs::write(&paths[1], repaired)?;
     println!("repaired {}", paths[1]);
     Ok(())
+}
+
+fn path_starts_with(path: &str, prefix: &[u8]) -> CliResult<bool> {
+    let mut file = fs::File::open(path)?;
+    let mut buf = vec![0; prefix.len()];
+    let read = std::io::Read::read(&mut file, &mut buf)?;
+    Ok(read == prefix.len() && buf == prefix)
 }
 
 fn cmd_repair_volumes(paths: &[String]) -> CliResult<()> {
