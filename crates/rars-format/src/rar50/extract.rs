@@ -1,9 +1,11 @@
 use super::{blake2sp, Archive, ExtractedEntryMeta, FileHeader};
 use crate::error::{Error, Result};
 use crate::volume_extract::{ChainedReader, SplitVolumeState, SplitVolumeStep};
-use rars_codec::rar50::{DecodeMode, Unpack50Decoder};
+use rars_codec::rar50::{DecodeMode, DecodedChunk, StreamDecodeError, Unpack50Decoder};
 use rars_crypto::rar50::{Rar50Cipher, Rar50Keys};
 use std::io::{Read, Write};
+
+const STREAM_DECODE_THRESHOLD: u64 = 128 * 1024 * 1024;
 
 impl FileHeader {
     fn crypto_with_password(&self, password: Option<&[u8]>) -> Result<Option<Rar50Keys>> {
@@ -114,6 +116,42 @@ impl FileHeader {
         }
     }
 
+    fn verify_streaming_integrity(
+        &self,
+        crc: StreamingCrc32,
+        hash: Option<([u8; 32], blake2sp::Hasher)>,
+        keys: Option<&Rar50Keys>,
+    ) -> Result<()> {
+        if let Some(expected) = self.data_crc32 {
+            let actual = if self.uses_hash_mac() {
+                let keys = keys.ok_or(Error::InvalidHeader(
+                    "RAR 5 encrypted hash MAC needs encryption keys",
+                ))?;
+                keys.mac_crc32(crc.finish())
+            } else {
+                crc.finish()
+            };
+            if actual != expected {
+                return Err(Error::Crc32Mismatch { expected, actual });
+            }
+        }
+
+        if let Some((expected, hasher)) = hash {
+            let actual = if self.uses_hash_mac() {
+                let keys = keys.ok_or(Error::InvalidHeader(
+                    "RAR 5 encrypted hash MAC needs encryption keys",
+                ))?;
+                keys.mac_hash32(hasher.finalize())
+            } else {
+                hasher.finalize()
+            };
+            if expected != actual {
+                return Err(Error::HashMismatch { hash_type: 0 });
+            }
+        }
+        Ok(())
+    }
+
     fn uses_hash_mac(&self) -> bool {
         self.encryption
             .as_ref()
@@ -203,9 +241,84 @@ impl FileHeader {
             .map_err(Error::from)
     }
 
+    fn stream_packed_with_decoder(
+        &self,
+        packed: &[u8],
+        keys: Option<&Rar50Keys>,
+        decoder: &mut Unpack50Decoder,
+        writer: &mut dyn Write,
+    ) -> Result<()> {
+        if self.is_stored() {
+            return Err(Error::InvalidHeader(
+                "RAR 5 stored file does not use streaming compressed decode",
+            ));
+        }
+
+        let info = self.decoded_compression_info()?;
+        let dictionary_size = usize::try_from(info.dictionary_size).map_err(|_| {
+            Error::InvalidHeader("RAR 5 dictionary size overflows host address size")
+        })?;
+        let output_size = usize::try_from(self.unpacked_size)
+            .map_err(|_| Error::InvalidHeader("RAR 5 unpacked size overflows host address size"))?;
+        let mut input = std::io::Cursor::new(packed);
+        let mut crc = StreamingCrc32::new();
+        let mut hash = streaming_hash_verifier(self)?;
+        decoder
+            .decode_member_from_reader_with_dictionary_to_sink(
+                &mut input,
+                info.algorithm_version,
+                output_size,
+                dictionary_size,
+                info.solid,
+                |chunk| match chunk {
+                    DecodedChunk::Bytes(chunk) => {
+                        crc.update(chunk);
+                        if let Some((_, hasher)) = &mut hash {
+                            hasher.update(chunk);
+                        }
+                        writer.write_all(chunk)
+                    }
+                    DecodedChunk::Repeated { byte, len } => {
+                        write_repeated_chunk(writer, &mut crc, &mut hash, byte, len)
+                    }
+                },
+            )
+            .map_err(|error| match error {
+                StreamDecodeError::Decode(error) => Error::from(error),
+                StreamDecodeError::Sink(error) => Error::from(error),
+            })?;
+        self.verify_streaming_integrity(crc, hash, keys)
+    }
+
     fn entry_error(&self, operation: &'static str, error: Error) -> Error {
         error.at_entry(self.name.clone(), operation)
     }
+}
+
+fn write_repeated_chunk(
+    writer: &mut dyn Write,
+    crc: &mut StreamingCrc32,
+    hash: &mut Option<([u8; 32], blake2sp::Hasher)>,
+    byte: u8,
+    mut len: usize,
+) -> std::io::Result<()> {
+    if byte == 0 {
+        crc.update_zeroes(len as u64);
+    }
+    let buffer = [byte; 64 * 1024];
+    while len > 0 {
+        let take = len.min(buffer.len());
+        let chunk = &buffer[..take];
+        if byte != 0 {
+            crc.update(chunk);
+        }
+        if let Some((_, hasher)) = hash.as_mut() {
+            hasher.update(chunk);
+        }
+        writer.write_all(chunk)?;
+        len -= take;
+    }
+    Ok(())
 }
 
 fn map_rar50_crypto_error(error: rars_crypto::rar50::Error) -> Error {
@@ -271,6 +384,9 @@ impl<'a> DecoderSession<'a> {
         file: &FileHeader,
         writer: &mut dyn Write,
     ) -> Result<()> {
+        if file.should_stream_decode() {
+            return self.stream_file_to(archive, file, writer);
+        }
         let decoded = self
             .decoded_file_data(archive, file)
             .map_err(|error| file.entry_error("decoding", error))?;
@@ -280,6 +396,19 @@ impl<'a> DecoderSession<'a> {
             .write_all(&decoded.data)
             .map_err(Error::from)
             .map_err(|error| file.entry_error("writing", error))
+    }
+
+    fn stream_file_to(
+        &mut self,
+        archive: &Archive,
+        file: &FileHeader,
+        writer: &mut dyn Write,
+    ) -> Result<()> {
+        let (packed, keys) = file
+            .packed_data_with_password(archive, self.password)
+            .map_err(|error| file.entry_error("reading", error))?;
+        file.stream_packed_with_decoder(&packed, keys.as_ref(), &mut self.decoder, writer)
+            .map_err(|error| file.entry_error("decoding", error))
     }
 
     fn decoded_file_data(&mut self, archive: &Archive, file: &FileHeader) -> Result<DecodedData> {
@@ -302,6 +431,12 @@ impl<'a> DecoderSession<'a> {
         decryptor: Option<&SplitDecryptor>,
     ) -> Result<Vec<u8>> {
         final_file.decode_split_with_decoder(volumes, split, &mut self.decoder, decryptor)
+    }
+}
+
+impl FileHeader {
+    fn should_stream_decode(&self) -> bool {
+        !self.is_stored() && self.unpacked_size > STREAM_DECODE_THRESHOLD
     }
 }
 
@@ -737,11 +872,23 @@ impl StreamingCrc32 {
     }
 
     fn update(&mut self, input: &[u8]) {
+        const TABLE: [u32; 256] = crc32_table();
         for &byte in input {
-            self.value ^= byte as u32;
-            for _ in 0..8 {
-                let mask = 0u32.wrapping_sub(self.value & 1);
-                self.value = (self.value >> 1) ^ (0xedb8_8320 & mask);
+            let index = (self.value as u8 ^ byte) as usize;
+            self.value = (self.value >> 8) ^ TABLE[index];
+        }
+    }
+
+    fn update_zeroes(&mut self, len: u64) {
+        let mut matrix = zero_byte_matrix();
+        let mut count = len;
+        while count != 0 {
+            if count & 1 != 0 {
+                self.value = gf2_matrix_times(&matrix, self.value);
+            }
+            count >>= 1;
+            if count != 0 {
+                matrix = gf2_matrix_square(&matrix);
             }
         }
     }
@@ -749,6 +896,56 @@ impl StreamingCrc32 {
     fn finish(self) -> u32 {
         !self.value
     }
+}
+
+fn zero_byte_matrix() -> [u32; 32] {
+    let mut matrix = [0; 32];
+    for (bit, slot) in matrix.iter_mut().enumerate() {
+        let mut value = 1u32 << bit;
+        let index = value as u8 as usize;
+        const TABLE: [u32; 256] = crc32_table();
+        value = (value >> 8) ^ TABLE[index];
+        *slot = value;
+    }
+    matrix
+}
+
+fn gf2_matrix_times(matrix: &[u32; 32], mut vector: u32) -> u32 {
+    let mut sum = 0;
+    let mut index = 0;
+    while vector != 0 {
+        if vector & 1 != 0 {
+            sum ^= matrix[index];
+        }
+        vector >>= 1;
+        index += 1;
+    }
+    sum
+}
+
+fn gf2_matrix_square(matrix: &[u32; 32]) -> [u32; 32] {
+    let mut square = [0; 32];
+    for (index, slot) in square.iter_mut().enumerate() {
+        *slot = gf2_matrix_times(matrix, matrix[index]);
+    }
+    square
+}
+
+const fn crc32_table() -> [u32; 256] {
+    let mut table = [0; 256];
+    let mut i = 0;
+    while i < 256 {
+        let mut value = i as u32;
+        let mut bit = 0;
+        while bit < 8 {
+            let mask = 0u32.wrapping_sub(value & 1);
+            value = (value >> 1) ^ (0xedb8_8320 & mask);
+            bit += 1;
+        }
+        table[i] = value;
+        i += 1;
+    }
+    table
 }
 
 #[cfg(test)]
@@ -795,6 +992,17 @@ mod tests {
         .unwrap();
 
         assert_eq!(&*captured.borrow(), &full);
+    }
+
+    #[test]
+    fn streaming_crc32_zero_advance_matches_byte_update() {
+        let mut bytewise = StreamingCrc32::new();
+        bytewise.update(&vec![0; 100_000]);
+
+        let mut skipped = StreamingCrc32::new();
+        skipped.update_zeroes(100_000);
+
+        assert_eq!(skipped.finish(), bytewise.finish());
     }
 
     fn stored_split_archive(data: &[u8], full: &[u8], crc: u32, flags: u64) -> Archive {

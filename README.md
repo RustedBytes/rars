@@ -17,8 +17,8 @@ A Rust implementation of RAR.
   data.
 
 Some advanced compatibility targets remain active research areas: compression
-policy parity with WinRAR, true Unpack70 coverage for very large dictionaries,
-full historical AV verification, and SFX writer/stub generation.
+policy parity with WinRAR, full historical AV verification, SFX writer/stub
+generation, and external oracle maintenance.
 
 ## Development
 

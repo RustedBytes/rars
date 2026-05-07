@@ -34,8 +34,9 @@ serialization.
 
 ### 3. RAR 5.0/7.x Reader And Recovery
 
-- True Unpack70 remains fixture-blocked until a practical >4 GiB dictionary
-  fixture is worth carrying.
+- Keep the external Unpack70 large-dictionary oracle reproducible with
+  `reference-rar70-large-dict.sh`; the generated sparse fixture stays outside
+  the repository.
 
 ### 4. Hardening And Coverage
 
@@ -48,7 +49,8 @@ serialization.
   stable behaviour.
 - Use the reference scripts for optional local-oracle checks:
   `reference-rar5-writer.sh`, `reference-rar5-recovery-repair.sh`,
-  `reference-rar29-rarvm-writer.sh`, and `reference-rar3-aes-writer.sh`.
+  `reference-rar29-rarvm-writer.sh`, `reference-rar3-aes-writer.sh`, and
+  `reference-rar70-large-dict.sh`.
 - Use `./scripts/coverage.sh` periodically; it writes HTML coverage to
   `target/coverage/html/index.html`.
 
