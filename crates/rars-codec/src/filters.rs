@@ -14,10 +14,12 @@ pub(crate) struct DeltaErrorMessages {
     pub truncated_source: &'static str,
 }
 
+#[cfg(test)]
 pub(crate) fn encode(op: FilterOp, data: &[u8], file_offset: u32) -> Result<Vec<u8>> {
     encode_with_messages(op, data, file_offset, DeltaErrorMessages::generic())
 }
 
+#[cfg(test)]
 pub(crate) fn encode_with_messages(
     op: FilterOp,
     data: &[u8],
@@ -185,6 +187,7 @@ pub(crate) fn delta_encode(
 }
 
 impl DeltaErrorMessages {
+    #[cfg(test)]
     pub(crate) const fn generic() -> Self {
         Self {
             invalid_channels: "DELTA filter channel count is invalid",

@@ -1095,7 +1095,11 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                             rars::rar50::FilterKind::Arm,
                         ))
                         .finish()?
-                } else if auto_filter {
+                } else if auto_filter
+                    || (archive_comment.is_none()
+                        && archive_metadata.is_none()
+                        && !options.features.solid)
+                {
                     rars::rar50::Rar50Writer::new(options)
                         .compressed_entries(&compressed_entries)
                         .filter_policy(rars::rar50::FilterPolicy::AutoSize)

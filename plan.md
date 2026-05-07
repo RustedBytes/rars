@@ -34,8 +34,9 @@ serialization so byte-close WinRAR compatibility can improve incrementally.
   selector. Remaining wins are likely filter-block boundary tuning, match-finder
   quality, lazy parsing, and PPMd tuning.
 - Improve RAR5/RAR7 compressed-writer policy beyond the deterministic method-1
-  bounded hash-chain baseline. The next useful work is better x86/audio/filter
-  placement and match selection, not new writer entry points.
+  bounded hash-chain baseline. RAR5 auto mode now considers ranged x86 filters;
+  remaining useful work is audio/filter placement and match selection, not new
+  writer entry points.
 - Keep byte-identical WinRAR output out of scope for baseline writers. Reference
   parity means generated archives are accepted by relevant readers and extract
   to expected metadata/payloads.

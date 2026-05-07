@@ -3711,6 +3711,45 @@ fn creates_rar50_auto_filtered_compressed_archive_that_can_be_tested() {
 }
 
 #[test]
+fn creates_rar50_default_compressed_archive_with_auto_policy() {
+    let dir = scratch("create-rar50-default-auto-compressed");
+    let source = dir.join("payload.bin");
+    let auto_archive = dir.join("auto.rar");
+    let default_archive = dir.join("default.rar");
+    fs::write(
+        &source,
+        b"\xe8\0\0\0\0rar50 default auto filtered cli payload\n".repeat(16),
+    )
+    .unwrap();
+
+    let auto = rars()
+        .args(["a", "--format", "rar50", "--auto-filter"])
+        .arg(&auto_archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(auto.status.success(), "stderr: {}", stderr(&auto));
+    let default = rars()
+        .args(["a", "--format", "rar50"])
+        .arg(&default_archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(default.status.success(), "stderr: {}", stderr(&default));
+
+    let auto_parsed = rars::rar50::Archive::parse_path(&auto_archive).unwrap();
+    let default_parsed = rars::rar50::Archive::parse_path(&default_archive).unwrap();
+    assert_eq!(
+        default_parsed.files().next().unwrap().packed_size(),
+        auto_parsed.files().next().unwrap().packed_size()
+    );
+
+    let test = rars().arg("test").arg(&default_archive).output().unwrap();
+    assert!(test.status.success(), "stderr: {}", stderr(&test));
+    assert!(stdout(&test).contains("OK payload.bin"));
+}
+
+#[test]
 fn creates_rar29_auto_filtered_compressed_archive_that_can_be_tested() {
     let dir = scratch("create-rar29-auto-filtered-compressed");
     let source = dir.join("payload.bin");
