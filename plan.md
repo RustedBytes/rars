@@ -22,8 +22,6 @@ forward independently of compression benchmark harness work.
 
 ### 1. API And Error Model
 
-- Decide whether the umbrella `ArchiveWriter` should remain public or whether
-  callers should use per-version writer builders directly.
 - Apply the RAR5 builder pattern to RAR 1.5-4.x writing if another independent
   option axis lands there.
 - Refactor `cmd_add` into a parsed write plan plus one dispatcher, then split
