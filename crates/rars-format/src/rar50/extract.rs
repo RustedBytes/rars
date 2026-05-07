@@ -971,14 +971,34 @@ const fn crc32_table() -> [u32; 256] {
 #[cfg(test)]
 mod tests {
     use super::super::{
-        ArchiveSource, Block, BlockHeader, FileHash, MainHeader, HEAD_FILE, HFL_SPLIT_AFTER,
-        HFL_SPLIT_BEFORE,
+        ArchiveSource, Block, BlockHeader, FileEncryption, FileHash, MainHeader, HEAD_FILE,
+        HFL_SPLIT_AFTER, HFL_SPLIT_BEFORE,
     };
     use super::*;
     use crate::rar15_40::crc32;
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::sync::Arc;
+
+    fn plain_file(name: &[u8], data: &[u8], hash: Option<FileHash>) -> FileHeader {
+        FileHeader {
+            block: empty_block(HEAD_FILE, 0, 0..0),
+            file_flags: 0,
+            unpacked_size: data.len() as u64,
+            attributes: 0x20,
+            mtime: None,
+            data_crc32: None,
+            compression_info: 0,
+            host_os: 2,
+            name: name.to_vec(),
+            hash,
+            redirection: None,
+            service_data: None,
+            encrypted: false,
+            encryption: None,
+            crypto: None,
+        }
+    }
 
     #[test]
     fn stored_split_entries_stream_fragments_to_writer() {
@@ -1067,6 +1087,221 @@ mod tests {
             wrong.verify_integrity_with_keys(data, None),
             Err(Error::HashMismatch { hash_type: 0 })
         ));
+    }
+
+    #[test]
+    fn verify_integrity_rejects_bad_blake2sp_length_and_unknown_hash_type() {
+        let data = b"hash me";
+        let mut bad_length = plain_file(
+            b"a.txt",
+            data,
+            Some(FileHash {
+                hash_type: 0,
+                data: vec![0u8; 16],
+            }),
+        );
+        assert!(matches!(
+            bad_length.verify_integrity_with_keys(data, None),
+            Err(Error::InvalidHeader(_))
+        ));
+
+        bad_length.hash.as_mut().unwrap().hash_type = 99;
+        bad_length.hash.as_mut().unwrap().data = vec![0u8; 32];
+        assert!(matches!(
+            bad_length.verify_integrity_with_keys(data, None),
+            Err(Error::UnsupportedFeature { .. })
+        ));
+    }
+
+    #[test]
+    fn streaming_hash_verifier_rejects_bad_blake2sp_length_and_unknown_hash_type() {
+        let mut file = plain_file(
+            b"a.txt",
+            b"",
+            Some(FileHash {
+                hash_type: 0,
+                data: vec![0u8; 16],
+            }),
+        );
+        assert!(matches!(
+            streaming_hash_verifier(&file),
+            Err(Error::InvalidHeader(_))
+        ));
+
+        file.hash.as_mut().unwrap().hash_type = 7;
+        file.hash.as_mut().unwrap().data = vec![0u8; 32];
+        assert!(matches!(
+            streaming_hash_verifier(&file),
+            Err(Error::UnsupportedFeature { .. })
+        ));
+
+        let nohash = plain_file(b"a.txt", b"", None);
+        assert!(matches!(streaming_hash_verifier(&nohash), Ok(None)));
+    }
+
+    #[test]
+    fn crypto_with_password_short_circuits_for_unencrypted_or_unsupported_versions() {
+        let plain = plain_file(b"a.txt", b"", None);
+        assert!(plain.crypto_with_password(None).unwrap().is_none());
+        assert!(plain.crypto_with_password(Some(b"pw")).unwrap().is_none());
+
+        let mut missing = plain_file(b"a.txt", b"", None);
+        missing.encrypted = true;
+        assert!(matches!(
+            missing.crypto_with_password(None),
+            Err(Error::NeedPassword)
+        ));
+        assert!(matches!(
+            missing.crypto_with_password(Some(b"pw")),
+            Err(Error::InvalidHeader(_))
+        ));
+
+        let mut bad_version = plain_file(b"a.txt", b"", None);
+        bad_version.encrypted = true;
+        bad_version.encryption = Some(FileEncryption {
+            version: 1,
+            flags: 0,
+            kdf_count: 0,
+            salt: [0u8; 16],
+            iv: [0u8; 16],
+            check_value: None,
+        });
+        assert!(matches!(
+            bad_version.crypto_with_password(Some(b"pw")),
+            Err(Error::UnsupportedFeature { .. })
+        ));
+    }
+
+    #[test]
+    fn crypto_with_password_handles_missing_check_value() {
+        let mut file = plain_file(b"a.txt", b"", None);
+        file.encrypted = true;
+        file.encryption = Some(FileEncryption {
+            version: 0,
+            flags: 0,
+            kdf_count: 0,
+            salt: [0u8; 16],
+            iv: [0u8; 16],
+            check_value: None,
+        });
+        assert!(file.crypto_with_password(Some(b"pw")).unwrap().is_some());
+    }
+
+    #[test]
+    fn decode_packed_rejects_stored_size_mismatch() {
+        let mut decoder = Unpack50Decoder::new();
+
+        let mut file = plain_file(b"a.txt", &vec![0u8; 32], None);
+        file.unpacked_size = 32;
+        let short = vec![0u8; 16];
+        assert!(matches!(
+            file.decode_packed_with_decoder(&short, &mut decoder),
+            Err(Error::InvalidHeader(_))
+        ));
+
+        let mut encrypted = plain_file(b"b.txt", &vec![0u8; 32], None);
+        encrypted.encrypted = true;
+        encrypted.unpacked_size = 32;
+        let too_short = vec![0u8; 16];
+        assert!(matches!(
+            encrypted.decode_packed_with_decoder(&too_short, &mut decoder),
+            Err(Error::InvalidHeader(_))
+        ));
+
+        let exact = vec![0u8; 64];
+        let trimmed = encrypted
+            .decode_packed_with_decoder(&exact, &mut decoder)
+            .unwrap();
+        assert_eq!(trimmed.len(), encrypted.unpacked_size as usize);
+    }
+
+    #[test]
+    fn verify_streaming_integrity_validates_crc_and_hash() {
+        let payload = b"streaming";
+        let crc_value = crc32(payload);
+        let hash_value = blake2sp::hash(payload);
+
+        let mut file = plain_file(b"s.txt", payload, None);
+        file.data_crc32 = Some(crc_value);
+        file.hash = Some(FileHash {
+            hash_type: 0,
+            data: hash_value.to_vec(),
+        });
+
+        let make_state = || {
+            let mut crc = StreamingCrc32::new();
+            crc.update(payload);
+            let mut hasher = blake2sp::Hasher::new();
+            hasher.update(payload);
+            (crc, Some((hash_value, hasher)))
+        };
+
+        let (crc, hash) = make_state();
+        file.verify_streaming_integrity(crc, hash, None).unwrap();
+
+        let (crc, hash) = make_state();
+        let mut bad = file.clone();
+        bad.data_crc32 = Some(crc_value ^ 0x1);
+        assert!(matches!(
+            bad.verify_streaming_integrity(crc, hash, None),
+            Err(Error::Crc32Mismatch { .. })
+        ));
+
+        let (crc, _) = make_state();
+        let mut wrong_expected = hash_value;
+        wrong_expected[0] ^= 0xff;
+        let mut hasher = blake2sp::Hasher::new();
+        hasher.update(payload);
+        let mut bad_hash = file.clone();
+        bad_hash.data_crc32 = None;
+        assert!(matches!(
+            bad_hash.verify_streaming_integrity(crc, Some((wrong_expected, hasher)), None),
+            Err(Error::HashMismatch { hash_type: 0 })
+        ));
+
+        let empty = plain_file(b"e.txt", b"", None);
+        empty
+            .verify_streaming_integrity(StreamingCrc32::new(), None, None)
+            .unwrap();
+    }
+
+    #[test]
+    fn write_repeated_chunk_updates_crc_hash_and_writer() {
+        let mut writer = Vec::new();
+        let mut crc_zero = StreamingCrc32::new();
+        let mut hash = Some(([0u8; 32], blake2sp::Hasher::new()));
+        write_repeated_chunk(&mut writer, &mut crc_zero, &mut hash, 0, 70_000).unwrap();
+        assert_eq!(writer.len(), 70_000);
+        let zero_crc = crc_zero.finish();
+
+        let mut bytewise = StreamingCrc32::new();
+        bytewise.update(&vec![0u8; 70_000]);
+        assert_eq!(zero_crc, bytewise.finish());
+
+        let mut writer = Vec::new();
+        let mut crc_ff = StreamingCrc32::new();
+        let mut hash_none: Option<([u8; 32], blake2sp::Hasher)> = None;
+        write_repeated_chunk(&mut writer, &mut crc_ff, &mut hash_none, 0xff, 1024).unwrap();
+        assert_eq!(writer, vec![0xffu8; 1024]);
+    }
+
+    #[test]
+    fn map_rar50_crypto_error_translates_kdf_count() {
+        assert!(matches!(
+            map_rar50_crypto_error(rars_crypto::rar50::Error::KdfCountTooLarge),
+            Error::UnsupportedFeature { .. }
+        ));
+        assert!(matches!(
+            map_rar50_crypto_error(rars_crypto::rar50::Error::BadPassword),
+            Error::WrongPasswordOrCorruptData
+        ));
+    }
+
+    #[test]
+    fn constant_time_eq_returns_false_for_length_mismatch() {
+        assert!(!constant_time_eq(b"abc", b"abcd"));
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
     }
 
     fn stored_split_archive(data: &[u8], full: &[u8], crc: u32, flags: u64) -> Archive {
