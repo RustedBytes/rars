@@ -35,63 +35,84 @@ cargo test --workspace --all-targets
 
 "$llvm_profdata" merge -sparse "$profraw_dir"/*.profraw -o "$profdata"
 
-mapfile -t library_objects < <(
+mapfile -t object_files < <(
   find "$coverage_dir/debug/deps" -maxdepth 1 -type f -executable \
     ! -name '*.d' \
     ! -name '*.rlib' \
     ! -name '*.rmeta' \
-    ! -name 'cli-*' \
-    ! -name 'rars-[0-9a-f]*' \
     | sort
 )
-cli_object="$coverage_dir/debug/rars"
+production_binary="$coverage_dir/debug/rars"
+if [[ -x "$production_binary" ]]; then
+  object_files+=("$production_binary")
+fi
 
-if [[ "${#library_objects[@]}" -eq 0 || ! -x "$cli_object" ]]; then
-  echo "coverage objects not found" >&2
+if [[ "${#object_files[@]}" -eq 0 ]]; then
+  echo "no coverage objects found" >&2
   exit 1
 fi
 
-coverage_object_args() {
-  local -n input_objects=$1
-  local -n output_args=$2
+object_args=("${object_files[0]}")
+for object in "${object_files[@]:1}"; do
+  object_args+=("--object" "$object")
+done
 
-  output_args=("${input_objects[0]}")
-  for object in "${input_objects[@]:1}"; do
-    output_args+=("--object" "$object")
-  done
-}
+ignore_regex='/.cargo/registry|/rustc/|/tests/'
 
-coverage_object_args library_objects library_args
+detail="$("$llvm_cov" report \
+  --ignore-filename-regex="$ignore_regex" \
+  --instr-profile="$profdata" \
+  "${object_args[@]}" 2>&1)"
 
 {
-  echo "Library coverage"
-  "$llvm_cov" report \
-    --ignore-filename-regex='/.cargo/registry|/rustc/|/tests/' \
-    --instr-profile="$profdata" \
-    "${library_args[@]}"
+  echo "Coverage by crate"
+  printf '%-16s  %14s  %8s  %14s  %8s  %14s  %8s\n' \
+    "Crate" "Regions" "Region%" "Lines" "Line%" "Functions" "Func%"
+  echo "----------------------------------------------------------------------------------------------"
+  awk '
+    /^[A-Za-z]/ && $1 ~ /\// {
+      split($1, parts, "/")
+      crate = parts[1]
+      regions[crate]   += $2
+      missed_r[crate]  += $3
+      funcs[crate]     += $5
+      missed_f[crate]  += $6
+      lines[crate]     += $8
+      missed_l[crate]  += $9
+      seen[crate] = 1
+    }
+    END {
+      n = 0
+      for (c in seen) names[++n] = c
+      # sort by name
+      for (i = 1; i <= n; i++)
+        for (j = i + 1; j <= n; j++)
+          if (names[i] > names[j]) { t = names[i]; names[i] = names[j]; names[j] = t }
+      for (i = 1; i <= n; i++) {
+        c = names[i]
+        cr = regions[c] - missed_r[c]
+        cl = lines[c]   - missed_l[c]
+        cf = funcs[c]   - missed_f[c]
+        rp = regions[c] ? (cr * 100.0 / regions[c]) : 0
+        lp = lines[c]   ? (cl * 100.0 / lines[c])   : 0
+        fp = funcs[c]   ? (cf * 100.0 / funcs[c])   : 0
+        printf "%-16s  %14s  %7.2f%%  %14s  %7.2f%%  %14s  %7.2f%%\n", \
+          c, cr"/"regions[c], rp, cl"/"lines[c], lp, cf"/"funcs[c], fp
+      }
+    }
+  ' <<<"$detail"
   echo
-  echo "CLI coverage"
-  "$llvm_cov" report \
-    --ignore-filename-regex='/.cargo/registry|/rustc/|/tests/' \
-    --instr-profile="$profdata" \
-    "$cli_object"
+  echo "Per-file detail"
+  echo "$detail"
 } | tee "$coverage_dir/summary.txt"
 
 "$llvm_cov" show \
   --format=html \
-  --ignore-filename-regex='/.cargo/registry|/rustc/|/tests/' \
+  --ignore-filename-regex="$ignore_regex" \
   --instr-profile="$profdata" \
-  --output-dir="$coverage_dir/html/library" \
-  "${library_args[@]}"
-
-"$llvm_cov" show \
-  --format=html \
-  --ignore-filename-regex='/.cargo/registry|/rustc/|/tests/' \
-  --instr-profile="$profdata" \
-  --output-dir="$coverage_dir/html/cli" \
-  "$cli_object"
+  --output-dir="$coverage_dir/html" \
+  "${object_args[@]}"
 
 echo
 echo "Text summary: $coverage_dir/summary.txt"
-echo "Library HTML report: $coverage_dir/html/library/index.html"
-echo "CLI HTML report: $coverage_dir/html/cli/index.html"
+echo "HTML report:  $coverage_dir/html/index.html"
