@@ -264,4 +264,22 @@ mod tests {
         Rar30Cipher::new(b"password", salt).decrypt_in_place(&mut data);
         assert_eq!(data, plain);
     }
+
+    #[test]
+    fn rar30_aes_round_trips_with_long_password_slow_path() {
+        // Password long enough that utf-16(password) + 8-byte salt >= 64,
+        // forcing derive_key_iv to use the custom Sha1 with update_rar29
+        // instead of derive_key_iv_fast.
+        let password = b"this-password-is-deliberately-long-enough-to-exceed-64-bytes-utf16";
+        let salt = Some(*b"longsalt");
+        let mut data = *b"0123456789abcdefRAR AES CBC data";
+        let plain = data;
+
+        Rar30Cipher::new(password, salt).encrypt_in_place(&mut data);
+        assert_ne!(data, plain);
+
+        Rar30Cipher::new(password, salt).decrypt_in_place(&mut data);
+        assert_eq!(data, plain);
+    }
+
 }
