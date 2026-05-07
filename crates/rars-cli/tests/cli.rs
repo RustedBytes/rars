@@ -1,8 +1,9 @@
 use rars::rar13::{write_stored_archive, StoredEntry, WriterOptions};
 use rars::rar15_40;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn fixture(name: &str) -> PathBuf {
@@ -469,6 +470,53 @@ fn reports_missing_input_path_with_context() {
 }
 
 #[test]
+fn password_file_and_stdin_password_unlock_encrypted_archives() {
+    let dir = scratch("password-file-and-stdin");
+    let source = dir.join("secret.txt");
+    let archive = dir.join("secret.rar");
+    let password_file = dir.join("password.txt");
+    fs::write(&source, b"password-file cli payload\n").unwrap();
+    fs::write(&password_file, b"pass\n").unwrap();
+
+    let create = rars()
+        .args(["a", "--password-file"])
+        .arg(&password_file)
+        .args(["--format", "rar50", "--store"])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(create.status.success(), "stderr: {}", stderr(&create));
+
+    let mut command = rars();
+    command
+        .args(["test", "--password", "-"])
+        .arg(&archive)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    child.stdin.as_mut().unwrap().write_all(b"pass\n").unwrap();
+    let test = child.wait_with_output().unwrap();
+    assert!(test.status.success(), "stderr: {}", stderr(&test));
+    assert!(stdout(&test).contains("OK secret.txt"));
+}
+
+#[test]
+fn password_options_reject_missing_and_duplicate_sources() {
+    let missing_value = rars().args(["test", "--password-file"]).output().unwrap();
+    assert!(!missing_value.status.success());
+    assert!(stderr(&missing_value).contains("missing --password-file value"));
+
+    let duplicate = rars()
+        .args(["test", "--password", "one", "--password", "two"])
+        .output()
+        .unwrap();
+    assert!(!duplicate.status.success());
+    assert!(stderr(&duplicate).contains("password was provided more than once"));
+}
+
+#[test]
 fn prints_usage_without_command() {
     let output = rars().output().unwrap();
     assert!(output.status.success(), "stderr: {}", stderr(&output));
@@ -479,7 +527,7 @@ fn prints_usage_without_command() {
 fn prints_usage_for_help_command() {
     let output = rars().arg("--help").output().unwrap();
     assert!(output.status.success(), "stderr: {}", stderr(&output));
-    assert!(stderr(&output).contains("rars info [--password <password>] <archive>"));
+    assert!(stderr(&output).contains("rars info [--password <password>|--password-file <path>]"));
 }
 
 #[test]
@@ -526,6 +574,7 @@ fn rejects_missing_add_option_values() {
         &["a", "--format", "rar50", "--recovery-percent"][..],
         &["a", "--format", "rar14", "--volume-size"][..],
         &["a", "--password"][..],
+        &["a", "--password-file"][..],
     ] {
         let output = rars().args(args).output().unwrap();
         assert!(!output.status.success(), "args: {args:?}");

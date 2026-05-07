@@ -51,6 +51,7 @@ const MHEXTRA_LOCATOR_RECOVERY: u64 = 0x0002;
 
 const FHEXTRA_CRYPT: u64 = 0x01;
 const FHEXTRA_HASH: u64 = 0x02;
+const FHEXTRA_REDIR: u64 = 0x05;
 const FHEXTRA_SUBDATA: u64 = 0x07;
 const MHEXTRA_ARCHIVE_METADATA: u64 = 0x02;
 const MHEXTRA_ARCHIVE_METADATA_NAME: u64 = 0x0001;
@@ -173,10 +174,19 @@ pub struct FileHeader {
     pub host_os: u64,
     pub name: Vec<u8>,
     pub hash: Option<FileHash>,
+    pub redirection: Option<FileRedirection>,
     pub service_data: Option<Vec<u8>>,
     pub encrypted: bool,
     pub encryption: Option<FileEncryption>,
     crypto: Option<FileCryptoState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FileRedirection {
+    pub redirection_type: u64,
+    pub flags: u64,
+    pub target_name: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -283,6 +293,10 @@ impl FileHeader {
 
     pub fn is_stored(&self) -> bool {
         compression_method(self.compression_info) == 0
+    }
+
+    pub fn is_redirection(&self) -> bool {
+        self.redirection.is_some()
     }
 
     pub fn decoded_compression_info(&self) -> Result<CompressionInfo> {
@@ -932,6 +946,7 @@ fn parse_file_header_bytes(parsed: &ParsedBlockHeader) -> Result<FileHeader> {
         host_os,
         name,
         hash: None,
+        redirection: None,
         service_data: None,
         encrypted: false,
         encryption: None,
@@ -958,12 +973,42 @@ fn parse_file_extra_area(input: &[u8], range: Range<usize>, file: &mut FileHeade
                     data: input[data.start + hash_type_len..data.end].to_vec(),
                 });
             }
+            FHEXTRA_REDIR => {
+                file.redirection = Some(parse_file_redirection_record(input, data)?);
+            }
             FHEXTRA_SUBDATA => {
                 file.service_data = Some(input[data].to_vec());
             }
             _ => {}
         }
         Ok(())
+    })
+}
+
+fn parse_file_redirection_record(input: &[u8], range: Range<usize>) -> Result<FileRedirection> {
+    let (redirection_type, type_len) = read_vint_at(input, range.start, range.end)?;
+    let flags_start = range.start + type_len;
+    let (flags, flags_len) = read_vint_at(input, flags_start, range.end)?;
+    let name_len_start = flags_start + flags_len;
+    let (name_len, name_len_len) = read_vint_at(input, name_len_start, range.end)?;
+    let name_start = name_len_start + name_len_len;
+    let name_len = usize::try_from(name_len).map_err(|_| {
+        Error::InvalidHeader("RAR 5 file redirection target length overflows host address size")
+    })?;
+    let name_end = name_start
+        .checked_add(name_len)
+        .ok_or(Error::InvalidHeader(
+            "RAR 5 file redirection target length overflows",
+        ))?;
+    if name_end != range.end {
+        return Err(Error::InvalidHeader(
+            "RAR 5 file redirection record has trailing bytes",
+        ));
+    }
+    Ok(FileRedirection {
+        redirection_type,
+        flags,
+        target_name: input[name_start..name_end].to_vec(),
     })
 }
 
@@ -1658,5 +1703,27 @@ mod tests {
         assert_eq!(read_vint_at(&[0x01], 0, 0), Err(Error::TooShort));
         assert_eq!(read_vint_at(&[0x81, 0x01], 0, 1), Err(Error::TooShort));
         assert_eq!(read_vint_at(&[0x81, 0x01], 0, 2).unwrap(), (129, 2));
+    }
+
+    #[test]
+    fn parses_file_redirection_extra_record() {
+        let input = [1, 1, 6, b't', b'a', b'r', b'g', b'e', b't'];
+        let record = parse_file_redirection_record(&input, 0..input.len()).unwrap();
+
+        assert_eq!(record.redirection_type, 1);
+        assert_eq!(record.flags, 1);
+        assert_eq!(record.target_name, b"target");
+    }
+
+    #[test]
+    fn rejects_file_redirection_record_with_trailing_bytes() {
+        let input = [1, 0, 3, b'f', b'o', b'o', 0];
+
+        assert!(matches!(
+            parse_file_redirection_record(&input, 0..input.len()),
+            Err(Error::InvalidHeader(
+                "RAR 5 file redirection record has trailing bytes"
+            ))
+        ));
     }
 }

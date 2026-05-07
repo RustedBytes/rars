@@ -17,7 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 type CliResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 const ADD_USAGE: &str =
-    "usage: rars a [--password <password>] --format <rar14|rar15|rar20|rar29|rar30|rar40|rar50|rar70> [--store] [--solid] [--encrypt-headers] [--quick-open] [--comment <text>] [--archive-name <name>] [--file-comment <text>] [--recovery-percent <1..100>] [--volume-size <bytes>] [--ppmd|--auto-filter|--delta-filter <channels>|--e8-filter|--e8e9-filter|--itanium-filter|--rgb-filter <width>|--audio-filter <channels>|--arm-filter] <archive> <files...>";
+    "usage: rars a [--password <password>|--password-file <path>] --format <rar14|rar15|rar20|rar29|rar30|rar40|rar50|rar70> [--store] [--solid] [--encrypt-headers] [--quick-open] [--comment <text>] [--archive-name <name>] [--file-comment <text>] [--recovery-percent <1..100>] [--volume-size <bytes>] [--ppmd|--auto-filter|--delta-filter <channels>|--e8-filter|--e8e9-filter|--itanium-filter|--rgb-filter <width>|--audio-filter <channels>|--arm-filter] <archive> <files...>";
 const DOS_DIRECTORY_ATTR: u8 = 0x10;
 const RAR50_SIGNATURE: &[u8] = b"Rar!\x1a\x07\x01\x00";
 const RAR50_STRUCTURAL_RR_WARNING: &str =
@@ -203,6 +203,14 @@ fn cmd_info(args: &[String]) -> CliResult<()> {
                             .map(|crc| format!("{crc:#010x}"))
                             .unwrap_or_else(|| "none".to_string())
                     );
+                    if let Some(redirection) = &file.redirection {
+                        println!(
+                            "       redirection: type={} flags={:#x} target={}",
+                            redirection.redirection_type,
+                            redirection.flags,
+                            String::from_utf8_lossy(&redirection.target_name)
+                        );
+                    }
                 }
                 for service in archive.services() {
                     println!(
@@ -231,6 +239,7 @@ fn cmd_test(args: &[String]) -> CliResult<()> {
         let archive =
             ArchiveReader::read_path_with_options(&paths[0], read_options(password.as_deref()))
                 .map_err(|err| read_archive_error(&paths[0], err))?;
+        warn_rar50_redirections(&archive);
         let mut entries = Vec::new();
         archive
             .extract_to(password.as_deref(), |meta| {
@@ -243,6 +252,9 @@ fn cmd_test(args: &[String]) -> CliResult<()> {
         }
     } else {
         let archives = parse_archives(&paths, password.as_deref())?;
+        for archive in &archives {
+            warn_rar50_redirections(archive);
+        }
         let mut entries = Vec::new();
         extract_volumes_to(&archives, password.as_deref(), |meta| {
             entries.push(meta.clone());
@@ -267,6 +279,7 @@ fn cmd_extract(args: &[String]) -> CliResult<()> {
         let archive =
             ArchiveReader::read_path_with_options(&paths[0], read_options(password.as_deref()))
                 .map_err(|err| read_archive_error(&paths[0], err))?;
+        warn_rar50_redirections(&archive);
         let mut names = Vec::new();
         archive
             .extract_to(password.as_deref(), |meta| {
@@ -284,6 +297,9 @@ fn cmd_extract(args: &[String]) -> CliResult<()> {
         }
     } else {
         let archives = parse_archives(&paths, password.as_deref())?;
+        for archive in &archives {
+            warn_rar50_redirections(archive);
+        }
         let mut names = Vec::new();
         extract_volumes_to(&archives, password.as_deref(), |meta| {
             names.push(meta.name.clone());
@@ -1477,14 +1493,44 @@ fn parse_password(args: &[String]) -> CliResult<(Option<Vec<u8>>, Vec<String>)> 
     let mut rest = Vec::new();
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
-        if arg == "--password" || arg == "-p" {
-            let value = iter.next().ok_or("missing password value")?;
-            password = Some(value.as_bytes().to_vec());
-        } else {
-            rest.push(arg.clone());
+        match arg.as_str() {
+            "--password" | "-p" => {
+                let value = iter.next().ok_or("missing password value")?;
+                set_password(&mut password, read_password_value(value)?)?;
+            }
+            "--password-file" => {
+                let path = iter.next().ok_or("missing --password-file value")?;
+                let bytes = fs::read(path)?;
+                set_password(&mut password, trim_password_line(bytes))?;
+            }
+            _ => rest.push(arg.clone()),
         }
     }
     Ok((password, rest))
+}
+
+fn set_password(slot: &mut Option<Vec<u8>>, value: Vec<u8>) -> CliResult<()> {
+    if slot.is_some() {
+        return Err("password was provided more than once".into());
+    }
+    *slot = Some(value);
+    Ok(())
+}
+
+fn read_password_value(value: &str) -> CliResult<Vec<u8>> {
+    if value == "-" {
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::stdin(), &mut bytes)?;
+        return Ok(trim_password_line(bytes));
+    }
+    Ok(value.as_bytes().to_vec())
+}
+
+fn trim_password_line(mut bytes: Vec<u8>) -> Vec<u8> {
+    while matches!(bytes.last(), Some(b'\n' | b'\r')) {
+        bytes.pop();
+    }
+    bytes
 }
 
 fn parse_archives(paths: &[String], password: Option<&[u8]>) -> CliResult<Vec<DetectedArchive>> {
@@ -1539,6 +1585,22 @@ fn print_ok_entry(entry: &ExtractedEntryMeta) {
         String::from_utf8_lossy(&entry.name),
         if entry.is_directory { "/" } else { "" }
     );
+}
+
+fn warn_rar50_redirections(archive: &DetectedArchive) {
+    let DetectedArchive::Rar50Plus(archive) = archive else {
+        return;
+    };
+    for file in archive.files().filter(|file| file.redirection.is_some()) {
+        eprintln!("{}", redirection_warning(file.name_lossy()));
+    }
+}
+
+fn redirection_warning(name: impl AsRef<str>) -> String {
+    format!(
+        "warning: RAR 5 redirection entry '{}' is not recreated; extraction treats only regular file payloads as writable output",
+        name.as_ref()
+    )
 }
 
 fn output_relative_path(name: &[u8]) -> CliResult<PathBuf> {
@@ -1606,10 +1668,10 @@ fn read_inputs(paths: &[String], password: Option<&[u8]>) -> CliResult<Vec<Owned
 fn usage() {
     eprintln!(
         "usage:
-  rars info [--password <password>] <archive>...
-  rars test [--password <password>] <archive> [parts...]
-  rars x [--password <password>] <archive> [parts...] <outdir>
-  rars repair [--password <password>] <archive> <repaired-archive>
+  rars info [--password <password>|--password-file <path>] <archive>...
+  rars test [--password <password>|--password-file <path>] <archive> [parts...]
+  rars x [--password <password>|--password-file <path>] <archive> [parts...] <outdir>
+  rars repair [--password <password>|--password-file <path>] <archive> <repaired-archive>
   rars repair <rar-parts-and-rev-files...> <outdir>
   {ADD_USAGE}"
     );
@@ -1617,7 +1679,9 @@ fn usage() {
 
 #[cfg(test)]
 mod tests {
-    use super::{infer_part_index, output_relative_path, rar50_volume_part_path};
+    use super::{
+        infer_part_index, output_relative_path, rar50_volume_part_path, redirection_warning,
+    };
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -1671,5 +1735,13 @@ mod tests {
             rar50_volume_part_path(Path::new("archive.rar"), 0).unwrap(),
             PathBuf::from("archive.part1.rar")
         );
+    }
+
+    #[test]
+    fn redirection_warning_names_unsupported_rar5_entry() {
+        let warning = redirection_warning("link");
+
+        assert!(warning.contains("RAR 5 redirection entry 'link'"));
+        assert!(warning.contains("not recreated"));
     }
 }

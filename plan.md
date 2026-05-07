@@ -28,13 +28,12 @@ serialization.
 
 ### 2. CLI Password And Repair UX
 
-- Add safer password input modes: tty prompt when needed, `--password-file`, and
-  `--password -` for stdin. Keep `--password` for tests and explicit scripting,
-  but document the process-list leak.
+- Add tty password prompting when an encrypted command needs a password and no
+  explicit password source was supplied. `--password-file` and `--password -`
+  are implemented; keep documenting that `--password` is mainly for tests and
+  explicit scripting because it can leak through process listings.
 - Add a streaming recovery-repair API for large archives instead of returning
   only a full repaired `Vec<u8>`.
-- Teach the CLI to recognise or warn about RAR5 redirect/symlink service
-  entries instead of silently treating every extracted member as a regular file.
 
 ### 3. Compression Quality
 
