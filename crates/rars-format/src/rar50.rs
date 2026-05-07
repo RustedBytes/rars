@@ -649,10 +649,10 @@ impl Rev5VolumeMeta {
                 feature: "RAR 5 REV version",
             });
         }
-        let data_count = u16::from_le_bytes(body[1..3].try_into().unwrap());
-        let recovery_count = u16::from_le_bytes(body[3..5].try_into().unwrap());
-        let recovery_number = u16::from_le_bytes(body[5..7].try_into().unwrap());
-        let payload_crc32 = u32::from_le_bytes(body[7..11].try_into().unwrap());
+        let data_count = u16::from_le_bytes([body[1], body[2]]);
+        let recovery_count = u16::from_le_bytes([body[3], body[4]]);
+        let recovery_number = u16::from_le_bytes([body[5], body[6]]);
+        let payload_crc32 = u32::from_le_bytes([body[7], body[8], body[9], body[10]]);
         let first_recovery_number = u32::from(data_count);
         let recovery_end = first_recovery_number + u32::from(recovery_count);
         let recovery_number = u32::from(recovery_number);
@@ -672,8 +672,18 @@ impl Rev5VolumeMeta {
         let mut data_volumes = Vec::with_capacity(data_count as usize);
         let mut pos = 11;
         for _ in 0..data_count {
-            let file_size = u64::from_le_bytes(body[pos..pos + 8].try_into().unwrap());
-            let crc = u32::from_le_bytes(body[pos + 8..pos + 12].try_into().unwrap());
+            let file_size = u64::from_le_bytes([
+                body[pos],
+                body[pos + 1],
+                body[pos + 2],
+                body[pos + 3],
+                body[pos + 4],
+                body[pos + 5],
+                body[pos + 6],
+                body[pos + 7],
+            ]);
+            let crc =
+                u32::from_le_bytes([body[pos + 8], body[pos + 9], body[pos + 10], body[pos + 11]]);
             data_volumes.push(Rev5DataVolume {
                 file_size,
                 crc32: crc,
@@ -1532,7 +1542,9 @@ impl<'a> SliceReader<'a> {
 
     fn read_u64(&mut self) -> Result<u64> {
         let bytes = self.read_bytes(8)?;
-        Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
+        Ok(u64::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]))
     }
 
     fn read_bytes(&mut self, len: usize) -> Result<&'a [u8]> {

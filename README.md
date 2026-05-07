@@ -4,16 +4,21 @@ A Rust implementation of RAR.
 
 ## Current Status
 
-The first supported vertical slice is RAR 1.3/1.4 archives:
+`rars` covers the RAR lineage from early `RE~^` archives through RAR 7:
 
-- detect `RE~^` archives, including SFX-prefixed archives;
-- parse main/file headers, directory entries, comments extensions, and
-  old-style volume flags;
-- extract stored files, including the historical 3-byte password cipher;
-- extract Unpack15 compressed files, including encrypted and solid archives;
-- verify the RAR 1.3 rolling sum+rotate checksum;
-- reassemble stored old-style multi-volume archives;
-- write stored and compressed RAR 1.4 archives.
+- auto-detect archive families, including SFX-prefixed archives;
+- parse RAR 1.3/1.4, RAR 1.5-4.x, RAR 5.0, and RAR 7.x headers;
+- stream extraction through callback writers instead of buffering full archives;
+- decode historical LZ codecs, RAR 2.9/RAR 3.x PPMd, RARVM filters, solid
+  archives, encrypted members, comments, and split volumes;
+- write selectable RAR versions with stored and compressed members, encryption,
+  comments, RARVM filters, solid mode, volumes, and RAR5 recovery records;
+- repair supported RAR 2.x/3.x recovery records and RAR5 inline/REV recovery
+  data.
+
+Some advanced compatibility targets remain active research areas: compression
+policy parity with WinRAR, true Unpack70 coverage for very large dictionaries,
+full historical AV verification, and SFX writer/stub generation.
 
 ## Development
 

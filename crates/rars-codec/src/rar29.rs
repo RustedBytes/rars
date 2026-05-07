@@ -14,6 +14,7 @@ const TABLE_COUNT: usize = MAIN_COUNT + OFFSET_COUNT + LOW_OFFSET_COUNT + LENGTH
 const MAX_HISTORY: usize = 4 * 1024 * 1024;
 const INPUT_CHUNK: usize = 64 * 1024;
 const STREAM_CHUNK: usize = 1024 * 1024;
+const MAX_VM_GLOBAL_DATA: usize = 0x2000;
 
 const LENGTH_BASES: [usize; LENGTH_COUNT] = [
     0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 112, 128,
@@ -1640,9 +1641,12 @@ impl Unpack29 {
         let mut global_data = Vec::new();
         if first_byte & 0x08 != 0 {
             let data_size = vm.read_encoded_u32()? as usize;
-            global_data.reserve(data_size);
+            global_data.reserve(data_size.min(MAX_VM_GLOBAL_DATA));
             for _ in 0..data_size {
-                global_data.push(vm.read_bits(8)? as u8);
+                let byte = vm.read_bits(8)? as u8;
+                if global_data.len() < MAX_VM_GLOBAL_DATA {
+                    global_data.push(byte);
+                }
             }
         }
 
@@ -2254,8 +2258,8 @@ mod tests {
     use super::{
         encode_ppmd_tokens, encode_tokens, unpack29_decode, unpack29_encode_literals,
         unpack29_encode_ppmd, unpack29_encode_ppmd_literals, unpack29_encode_ppmd_with_filter,
-        EncodeToken, PpmdEncodeToken, Rar29FilterKind, Rar29FilterSpec, Result, StandardFilter,
-        Unpack29, Unpack29Encoder, VmFilter, VmProgram, VmProgramKind,
+        BitWriter, EncodeToken, Error, PpmdEncodeToken, Rar29FilterKind, Rar29FilterSpec, Result,
+        StandardFilter, Unpack29, Unpack29Encoder, VmFilter, VmProgram, VmProgramKind,
     };
 
     const COMPRESSED_TEXT: &[u8] = &[
@@ -2680,6 +2684,27 @@ mod tests {
         let mut bits = super::BitReader::from_bytes(&[0xff; 5]);
 
         assert_eq!(bits.read_encoded_u32().unwrap(), 0xffff_ffff);
+    }
+
+    #[test]
+    fn vm_global_data_size_does_not_reserve_untrusted_declared_size() {
+        let mut decoder = Unpack29::new();
+        decoder.programs.push(VmProgram {
+            kind: VmProgramKind::Standard(StandardFilter::E8),
+            block_size: 1,
+            exec_count: 0,
+            globals: Vec::new(),
+        });
+
+        let mut data = BitWriter::default();
+        data.write_encoded_u32(1);
+        data.write_encoded_u32(0);
+        data.write_encoded_u32(u32::MAX);
+
+        assert_eq!(
+            decoder.parse_vm_code(0x80 | 0x08, data.finish()),
+            Err(Error::NeedMoreInput)
+        );
     }
 
     fn expected_text() -> Vec<u8> {

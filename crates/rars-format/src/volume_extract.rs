@@ -17,9 +17,11 @@ impl<P> SplitVolumeState<P> {
         match (self.pending.is_some(), split_before, split_after) {
             (false, false, false) => SplitVolumeStep::Regular,
             (false, false, true) => SplitVolumeStep::Start,
+            // The match arm's first field proves a pending split exists.
             (true, true, true) => {
                 SplitVolumeStep::Continue(self.pending.as_mut().expect("pending split"))
             }
+            // The match arm's first field proves a pending split exists.
             (true, true, false) => {
                 SplitVolumeStep::Finish(self.pending.take().expect("pending split"))
             }

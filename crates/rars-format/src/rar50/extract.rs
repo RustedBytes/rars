@@ -61,7 +61,9 @@ impl FileHeader {
 
         let keys = self
             .crypto_with_password(password)?
-            .expect("encrypted file has keys");
+            .ok_or(Error::InvalidHeader(
+                "RAR 5 encrypted file is missing encryption keys",
+            ))?;
         Rar50Cipher::new(keys.key, self.encryption_iv()?).decrypt_in_place(&mut packed);
         Ok((packed, Some(keys)))
     }
@@ -566,7 +568,9 @@ impl PendingSplitRefs {
             .ok_or(Error::InvalidHeader("RAR 5 split entry is missing"))?;
         let keys = file
             .crypto_with_password(password)?
-            .expect("encrypted split file has keys");
+            .ok_or(Error::InvalidHeader(
+                "RAR 5 encrypted split file is missing encryption keys",
+            ))?;
         Ok(Some(SplitDecryptor {
             keys,
             iv: file.encryption_iv()?,

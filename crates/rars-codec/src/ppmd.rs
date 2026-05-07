@@ -1034,3 +1034,77 @@ fn update_prob_1(prob: u32) -> u32 {
 fn hi_bits_flag(symbol: u8, bits: u32) -> u32 {
     ((symbol as u32 + 0xc0) >> (8 - bits)) & (1 << bits)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Bytes<'a> {
+        input: &'a [u8],
+    }
+
+    impl PpmdByteReader for Bytes<'_> {
+        fn read_ppmd_byte(&mut self) -> Result<u8> {
+            let Some((&byte, rest)) = self.input.split_first() else {
+                return Err(Error::NeedMoreInput);
+            };
+            self.input = rest;
+            Ok(byte)
+        }
+    }
+
+    #[test]
+    fn decode_init_rejects_truncated_range_header_without_panic() {
+        let mut decoder = PpmdDecoder::new();
+        let mut input = Bytes { input: &[0, 0] };
+        let mut esc = 0;
+
+        assert_eq!(
+            decoder.decode_init(0x20 | 1, &mut input, &mut esc),
+            Err(Error::NeedMoreInput)
+        );
+    }
+
+    #[test]
+    fn decode_init_rejects_reuse_before_model_allocation() {
+        let mut decoder = PpmdDecoder::new();
+        let mut input = Bytes {
+            input: &[0, 0, 0, 0],
+        };
+        let mut esc = 0;
+
+        assert_eq!(
+            decoder.decode_init(0, &mut input, &mut esc),
+            Err(Error::InvalidData("RAR PPMd block reuses missing model"))
+        );
+    }
+
+    #[test]
+    fn decode_init_accepts_max_wire_order_without_growing_unbounded_model() {
+        let mut decoder = PpmdDecoder::new();
+        let mut input = Bytes {
+            input: &[0, 0, 0, 0, 0],
+        };
+        let mut esc = 0;
+
+        decoder
+            .decode_init(0x20 | 0x1f, &mut input, &mut esc)
+            .unwrap();
+
+        assert_eq!(decoder.max_order, 64);
+        assert_eq!(decoder.contexts.len(), 1);
+        assert_eq!(decoder.contexts[0].states.len(), 256);
+    }
+
+    #[test]
+    fn encoder_rejects_orders_outside_model_bounds() {
+        assert!(matches!(
+            PpmdEncoder::new(1, 2),
+            Err(Error::InvalidData("RAR PPMd order is invalid"))
+        ));
+        assert!(matches!(
+            PpmdEncoder::new(65, 2),
+            Err(Error::InvalidData("RAR PPMd order is invalid"))
+        ));
+    }
+}

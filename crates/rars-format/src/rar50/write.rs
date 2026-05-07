@@ -737,6 +737,7 @@ fn emit_resolved_writer_plan(plan: ResolvedRar50WritePlan<'_>) -> Result<Vec<u8>
             if next_quick_open_offset == Some(quick_open_offset) {
                 return Ok(out);
             }
+            // Invariant: a quick-open pass always reports the offset it emitted.
             quick_open_offset = next_quick_open_offset.expect("quick-open offset is set");
         }
         return emit_resolved_writer_plan_pass(&plan, Some(quick_open_offset), None)
@@ -750,6 +751,7 @@ fn emit_resolved_writer_plan(plan: ResolvedRar50WritePlan<'_>) -> Result<Vec<u8>
             if next_recovery_offset == Some(recovery_offset) {
                 return Ok(out);
             }
+            // Invariant: a recovery pass always reports the RR service offset it emitted.
             recovery_offset = next_recovery_offset.expect("recovery offset is set");
         }
         return emit_resolved_writer_plan_pass(&plan, None, Some(recovery_offset))
@@ -1510,6 +1512,7 @@ impl<'a> VolumeSetWriter<'a> {
             let end = start + fragment_len;
             let split_after = end < member_len;
 
+            // Invariant: the branch above starts a volume whenever no body exists.
             let out = self.current_body.as_mut().expect("volume started");
             write_fragment(out, start, end, split_before, split_after)?;
             self.current_payload_len += fragment_len;
@@ -1540,7 +1543,9 @@ impl<'a> VolumeSetWriter<'a> {
     }
 
     fn finish_current_volume(&mut self) -> Result<()> {
+        // Invariant: callers only finish a current volume after start_volume created it.
         let body = self.current_body.take().expect("volume started");
+        // Invariant: start_volume sets the matching volume number with the body.
         let volume_number = self
             .current_volume_number
             .take()
@@ -1909,8 +1914,8 @@ fn archive_metadata_record(metadata: ArchiveMetadataEntry<'_>) -> Result<Vec<u8>
         write_vint(&mut record, name.len() as u64);
         record.extend_from_slice(name);
     }
-    if flags & MHEXTRA_ARCHIVE_METADATA_TIME != 0 {
-        record.extend_from_slice(&metadata.creation_time.unwrap().to_le_bytes());
+    if let Some(creation_time) = metadata.creation_time {
+        record.extend_from_slice(&creation_time.to_le_bytes());
     }
 
     let mut extra = Vec::new();

@@ -37,7 +37,12 @@ serialization.
 - True Unpack70 remains fixture-blocked until a practical >4 GiB dictionary
   fixture is worth carrying.
 
-### 4. Fixtures And Oracles
+### 4. Hardening And Coverage
+
+- Consider adding fuzz targets for `Archive::parse`, `Unpack29::decode_member`,
+  and the PPMd decoder.
+
+### 5. Fixtures And Oracles
 
 - Keep useful spec-repo fixtures copied into crate tests when they validate
   stable behaviour.
@@ -51,4 +56,6 @@ serialization.
 
 - Full cryptographic AV verification for RAR 1.4/2.x.
 - AV writing.
+- CLI module split into command-specific files once the next CLI feature needs
+  non-trivial edits.
 - SFX writer/stub generation.

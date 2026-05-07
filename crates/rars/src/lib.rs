@@ -80,6 +80,52 @@ pub enum ArchiveMemberHash {
     Other { hash_type: u64, data: Vec<u8> },
 }
 
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct ArchiveMembers<'a> {
+    inner: ArchiveMembersInner<'a>,
+    index: usize,
+}
+
+#[derive(Debug, Clone)]
+enum ArchiveMembersInner<'a> {
+    Rar13(&'a [rar13::Entry]),
+    Rar15To40(&'a [rar15_40::Block]),
+    Rar50Plus(&'a [rar50::Block]),
+}
+
+impl Iterator for ArchiveMembers<'_> {
+    type Item = ArchiveMember;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.inner {
+            ArchiveMembersInner::Rar13(entries) => {
+                let entry = entries.get(self.index)?;
+                self.index += 1;
+                Some(rar13_member(entry))
+            }
+            ArchiveMembersInner::Rar15To40(blocks) => {
+                while let Some(block) = blocks.get(self.index) {
+                    self.index += 1;
+                    if let rar15_40::Block::File(file) = block {
+                        return Some(rar15_40_member(file));
+                    }
+                }
+                None
+            }
+            ArchiveMembersInner::Rar50Plus(blocks) => {
+                while let Some(block) = blocks.get(self.index) {
+                    self.index += 1;
+                    if let rar50::Block::File(file) = block {
+                        return Some(rar50_member(file));
+                    }
+                }
+                None
+            }
+        }
+    }
+}
+
 impl Archive {
     pub fn family(&self) -> ArchiveFamily {
         match self {
@@ -97,11 +143,20 @@ impl Archive {
         }
     }
 
-    pub fn members(&self) -> Box<dyn Iterator<Item = ArchiveMember> + '_> {
+    pub fn members(&self) -> ArchiveMembers<'_> {
         match self {
-            Self::Rar13(archive) => Box::new(archive.entries.iter().map(rar13_member)),
-            Self::Rar15To40(archive) => Box::new(archive.files().map(rar15_40_member)),
-            Self::Rar50Plus(archive) => Box::new(archive.files().map(rar50_member)),
+            Self::Rar13(archive) => ArchiveMembers {
+                inner: ArchiveMembersInner::Rar13(&archive.entries),
+                index: 0,
+            },
+            Self::Rar15To40(archive) => ArchiveMembers {
+                inner: ArchiveMembersInner::Rar15To40(&archive.blocks),
+                index: 0,
+            },
+            Self::Rar50Plus(archive) => ArchiveMembers {
+                inner: ArchiveMembersInner::Rar50Plus(&archive.blocks),
+                index: 0,
+            },
         }
     }
 
