@@ -4,7 +4,7 @@ use crate::rar15_40::crc32;
 use crate::version::ArchiveFamily;
 use rars_crypto::rar50::{Rar50Cipher, Rar50Keys};
 use std::fs::File;
-use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -523,10 +523,13 @@ impl Archive {
         }
     }
 
-    fn source_bytes(&self) -> Result<Vec<u8>> {
+    fn source_len(&self) -> Result<usize> {
         match &self.source {
-            ArchiveSource::Memory(data) => Ok(data.to_vec()),
-            ArchiveSource::File(path) => Ok(std::fs::read(path.as_ref())?),
+            ArchiveSource::Memory(data) => Ok(data.len()),
+            ArchiveSource::File(path) => usize::try_from(std::fs::metadata(path.as_ref())?.len())
+                .map_err(|_| {
+                    Error::InvalidHeader("RAR 5 archive size overflows host address size")
+                }),
         }
     }
 
@@ -544,6 +547,16 @@ impl Archive {
         }
     }
 
+    fn copy_range_to(&self, range: Range<usize>, writer: &mut dyn Write) -> Result<()> {
+        let source_len = self.source_len()?;
+        if range.start > range.end || range.end > source_len {
+            return Err(Error::InvalidHeader("RAR 5 repair range is out of bounds"));
+        }
+        let mut reader = self.range_reader(range)?;
+        std::io::copy(&mut reader, writer)?;
+        Ok(())
+    }
+
     pub fn files(&self) -> impl Iterator<Item = &FileHeader> {
         self.blocks.iter().filter_map(|block| match block {
             Block::File(file) => Some(file),
@@ -559,13 +572,18 @@ impl Archive {
     }
 
     pub fn repair_recovery(&self) -> Result<Vec<u8>> {
+        let mut repaired = Vec::new();
+        self.repair_recovery_to(&mut repaired)?;
+        Ok(repaired)
+    }
+
+    pub fn repair_recovery_to(&self, writer: &mut dyn Write) -> Result<()> {
         let recovery = self
             .services()
             .find(|service| matches!(service.recovery_record(), Ok(Some(_))))
             .ok_or(Error::InvalidHeader(
                 "RAR 5 archive does not contain an inline recovery record",
             ))?;
-        let source = self.source_bytes()?;
         let prefix_start = self.sfx_offset;
         let prefix_end = recovery
             .block
@@ -575,24 +593,23 @@ impl Archive {
             .ok_or(Error::InvalidHeader(
                 "RAR 5 recovery prefix range overflows archive bounds",
             ))?;
-        let prefix = source
-            .get(prefix_start..prefix_end)
-            .ok_or(Error::InvalidHeader(
+        let source_len = self.source_len()?;
+        if prefix_end > source_len {
+            return Err(Error::InvalidHeader(
                 "RAR 5 recovery prefix is out of bounds",
-            ))?;
+            ));
+        }
+        let prefix = self.read_range(prefix_start..prefix_end)?;
         let recovery_data = recovery
             .decoded_data_unverified(self, None)
             .map_err(|error| error.at_entry(recovery.name.clone(), "reading recovery data"))?;
         let repaired_prefix =
-            rars_recovery::rar5::repair_inline_recovery_prefix(prefix, &recovery_data)?;
-        let mut repaired = source;
-        repaired
-            .get_mut(prefix_start..prefix_end)
-            .ok_or(Error::InvalidHeader(
-                "RAR 5 recovery prefix is out of bounds",
-            ))?
-            .copy_from_slice(&repaired_prefix);
-        Ok(repaired)
+            rars_recovery::rar5::repair_inline_recovery_prefix(&prefix, &recovery_data)?;
+
+        self.copy_range_to(0..prefix_start, writer)?;
+        writer.write_all(&repaired_prefix)?;
+        self.copy_range_to(prefix_end..source_len, writer)?;
+        Ok(())
     }
 }
 

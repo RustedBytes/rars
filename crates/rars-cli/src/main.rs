@@ -11,6 +11,7 @@ use rars::{
 };
 use std::env;
 use std::fs;
+use std::io::{IsTerminal, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -60,15 +61,13 @@ fn run() -> CliResult<()> {
 }
 
 fn cmd_info(args: &[String]) -> CliResult<()> {
-    let (password, paths) = parse_password(args)?;
+    let (mut password, paths) = parse_password(args)?;
     if paths.is_empty() {
         return Err("usage: rars info [--password <password>] <archive>...".into());
     }
 
     for path in paths {
-        let archive =
-            ArchiveReader::read_path_with_options(&path, read_options(password.as_deref()))
-                .map_err(|err| read_archive_error(&path, err))?;
+        let archive = read_archive_path_prompting(&path, &mut password)?;
         println!(
             "{path}: {:?} at offset {}",
             archive.family(),
@@ -230,15 +229,14 @@ fn cmd_info(args: &[String]) -> CliResult<()> {
 }
 
 fn cmd_test(args: &[String]) -> CliResult<()> {
-    let (password, paths) = parse_password(args)?;
+    let (mut password, paths) = parse_password(args)?;
     if paths.is_empty() {
         return Err("usage: rars test [--password <password>] <archive> [parts...]".into());
     }
 
     if paths.len() == 1 {
-        let archive =
-            ArchiveReader::read_path_with_options(&paths[0], read_options(password.as_deref()))
-                .map_err(|err| read_archive_error(&paths[0], err))?;
+        let archive = read_archive_path_prompting(&paths[0], &mut password)?;
+        ensure_password_for_extract(&archive, &mut password)?;
         warn_rar50_redirections(&archive);
         let mut entries = Vec::new();
         archive
@@ -251,7 +249,8 @@ fn cmd_test(args: &[String]) -> CliResult<()> {
             print_ok_entry(entry);
         }
     } else {
-        let archives = parse_archives(&paths, password.as_deref())?;
+        let archives = parse_archives_prompting(&paths, &mut password)?;
+        ensure_password_for_archives_extract(&archives, &mut password)?;
         for archive in &archives {
             warn_rar50_redirections(archive);
         }
@@ -269,16 +268,15 @@ fn cmd_test(args: &[String]) -> CliResult<()> {
 }
 
 fn cmd_extract(args: &[String]) -> CliResult<()> {
-    let (password, mut paths) = parse_password(args)?;
+    let (mut password, mut paths) = parse_password(args)?;
     if paths.len() < 2 {
         return Err("usage: rars x [--password <password>] <archive> [parts...] <outdir>".into());
     }
     let out_dir = PathBuf::from(paths.pop().expect("outdir"));
 
     if paths.len() == 1 {
-        let archive =
-            ArchiveReader::read_path_with_options(&paths[0], read_options(password.as_deref()))
-                .map_err(|err| read_archive_error(&paths[0], err))?;
+        let archive = read_archive_path_prompting(&paths[0], &mut password)?;
+        ensure_password_for_extract(&archive, &mut password)?;
         warn_rar50_redirections(&archive);
         let mut names = Vec::new();
         archive
@@ -296,7 +294,8 @@ fn cmd_extract(args: &[String]) -> CliResult<()> {
             println!("x {}", String::from_utf8_lossy(name));
         }
     } else {
-        let archives = parse_archives(&paths, password.as_deref())?;
+        let archives = parse_archives_prompting(&paths, &mut password)?;
+        ensure_password_for_archives_extract(&archives, &mut password)?;
         for archive in &archives {
             warn_rar50_redirections(archive);
         }
@@ -314,7 +313,7 @@ fn cmd_extract(args: &[String]) -> CliResult<()> {
 }
 
 fn cmd_repair(args: &[String]) -> CliResult<()> {
-    let (password, paths) = parse_password(args)?;
+    let (mut password, paths) = parse_password(args)?;
     if paths.len() < 2 {
         return Err("usage: rars repair [--password <password>] <archive> <repaired-archive>\n       rars repair <rar-parts-and-rev-files...> <outdir>".into());
     }
@@ -324,26 +323,29 @@ fn cmd_repair(args: &[String]) -> CliResult<()> {
         }
         return cmd_repair_volumes(&paths);
     }
-    let archive =
-        ArchiveReader::read_path_with_options(&paths[0], read_options(password.as_deref()));
-    let repaired = match archive {
-        Ok(archive) => archive
-            .repair_recovery()
-            .map_err(|err| format!("failed to repair archive '{}': {err}", paths[0]))?,
+    let archive = read_archive_path_prompting(&paths[0], &mut password);
+    match archive {
+        Ok(archive) => {
+            let mut output = fs::File::create(&paths[1])?;
+            archive
+                .repair_recovery_to(&mut output)
+                .map_err(|err| format!("failed to repair archive '{}': {err}", paths[0]))?;
+        }
         Err(parse_error) => {
             if !path_starts_with(&paths[0], RAR50_SIGNATURE)? {
-                return Err(read_archive_error(&paths[0], parse_error).into());
+                return Err(parse_error);
             }
             let bytes = fs::read(&paths[0])?;
-            rars::rar50::repair_inline_recovery_bytes(&bytes).map_err(|repair_error| {
-                format!(
-                    "failed to parse archive '{}': {}; raw inline recovery repair also failed: {}",
-                    paths[0], parse_error, repair_error
-                )
-            })?
+            let repaired =
+                rars::rar50::repair_inline_recovery_bytes(&bytes).map_err(|repair_error| {
+                    format!(
+                        "failed to parse archive '{}': {}; raw inline recovery repair also failed: {}",
+                        paths[0], parse_error, repair_error
+                    )
+                })?;
+            fs::write(&paths[1], repaired)?;
         }
-    };
-    fs::write(&paths[1], repaired)?;
+    }
     println!("repaired {}", paths[1]);
     Ok(())
 }
@@ -1533,15 +1535,78 @@ fn trim_password_line(mut bytes: Vec<u8>) -> Vec<u8> {
     bytes
 }
 
-fn parse_archives(paths: &[String], password: Option<&[u8]>) -> CliResult<Vec<DetectedArchive>> {
+fn read_archive_path_prompting(
+    path: &str,
+    password: &mut Option<Vec<u8>>,
+) -> CliResult<DetectedArchive> {
+    match ArchiveReader::read_path_with_options(path, read_options(password.as_deref())) {
+        Ok(archive) => Ok(archive),
+        Err(error) if password.is_none() && error_needs_password(&error) => {
+            if let Some(prompted) = prompt_password_if_tty()? {
+                *password = Some(prompted);
+                ArchiveReader::read_path_with_options(path, read_options(password.as_deref()))
+                    .map_err(|err| read_archive_error(path, err).into())
+            } else {
+                Err(read_archive_error(path, error).into())
+            }
+        }
+        Err(error) => Err(read_archive_error(path, error).into()),
+    }
+}
+
+fn parse_archives_prompting(
+    paths: &[String],
+    password: &mut Option<Vec<u8>>,
+) -> CliResult<Vec<DetectedArchive>> {
     let mut archives = Vec::new();
     for path in paths {
-        archives.push(
-            ArchiveReader::read_path_with_options(path, read_options(password))
-                .map_err(|err| read_archive_error(path, err))?,
-        );
+        archives.push(read_archive_path_prompting(path, password)?);
     }
     Ok(archives)
+}
+
+fn ensure_password_for_archives_extract(
+    archives: &[DetectedArchive],
+    password: &mut Option<Vec<u8>>,
+) -> CliResult<()> {
+    if password.is_none()
+        && archives
+            .iter()
+            .any(|archive| archive.members().any(|member| member.meta.is_encrypted))
+    {
+        if let Some(prompted) = prompt_password_if_tty()? {
+            *password = Some(prompted);
+        }
+    }
+    Ok(())
+}
+
+fn ensure_password_for_extract(
+    archive: &DetectedArchive,
+    password: &mut Option<Vec<u8>>,
+) -> CliResult<()> {
+    ensure_password_for_archives_extract(std::slice::from_ref(archive), password)
+}
+
+fn prompt_password_if_tty() -> CliResult<Option<Vec<u8>>> {
+    if !std::io::stdin().is_terminal() {
+        return Ok(None);
+    }
+    eprint!("password: ");
+    std::io::stderr().flush()?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(Some(trim_password_line(line.into_bytes())))
+}
+
+fn error_needs_password(error: &Error) -> bool {
+    match error {
+        Error::NeedPassword => true,
+        Error::AtArchiveOffset { source, .. } | Error::AtEntry { source, .. } => {
+            error_needs_password(source)
+        }
+        _ => false,
+    }
 }
 
 fn read_archive_error(path: &str, err: Error) -> String {
@@ -1680,8 +1745,10 @@ fn usage() {
 #[cfg(test)]
 mod tests {
     use super::{
-        infer_part_index, output_relative_path, rar50_volume_part_path, redirection_warning,
+        error_needs_password, infer_part_index, output_relative_path, rar50_volume_part_path,
+        redirection_warning,
     };
+    use rars::Error;
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -1743,5 +1810,19 @@ mod tests {
 
         assert!(warning.contains("RAR 5 redirection entry 'link'"));
         assert!(warning.contains("not recreated"));
+    }
+
+    #[test]
+    fn detects_nested_need_password_errors_for_prompt_retry() {
+        let nested = Error::AtEntry {
+            name: b"secret.txt".to_vec(),
+            operation: "decoding",
+            source: Box::new(Error::NeedPassword),
+        };
+
+        assert!(error_needs_password(&nested));
+        assert!(!error_needs_password(&Error::InvalidHeader(
+            "not a password error"
+        )));
     }
 }

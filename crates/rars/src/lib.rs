@@ -177,9 +177,18 @@ impl Archive {
     }
 
     pub fn repair_recovery(&self) -> Result<Vec<u8>> {
+        let mut repaired = Vec::new();
+        self.repair_recovery_to(&mut repaired)?;
+        Ok(repaired)
+    }
+
+    pub fn repair_recovery_to(&self, writer: &mut dyn Write) -> Result<()> {
         match self {
-            Self::Rar15To40(archive) => archive.repair_protect_head(),
-            Self::Rar50Plus(archive) => archive.repair_recovery(),
+            Self::Rar15To40(archive) => {
+                writer.write_all(&archive.repair_protect_head()?)?;
+                Ok(())
+            }
+            Self::Rar50Plus(archive) => archive.repair_recovery_to(writer),
             Self::Rar13(_) => Err(Error::UnsupportedFeature {
                 version: ArchiveVersion::Rar14,
                 feature: "recovery repair for RAR 1.3/1.4 archives",
@@ -2814,7 +2823,8 @@ mod tests {
         let damaged_archive = ArchiveReader::read(&damaged).unwrap();
         assert!(collect_extract(&damaged_archive, None).is_err());
 
-        let repaired = damaged_archive.repair_recovery().unwrap();
+        let mut repaired = Vec::new();
+        damaged_archive.repair_recovery_to(&mut repaired).unwrap();
 
         assert_eq!(repaired, bytes);
         let repaired_archive = ArchiveReader::read(&repaired).unwrap();

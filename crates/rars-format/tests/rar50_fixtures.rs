@@ -1624,7 +1624,8 @@ fn repairs_rar50_inline_recovery_payload_damage() {
     let damaged_archive = Archive::parse(&damaged).unwrap();
     assert!(collect_extract(&damaged_archive).is_err());
 
-    let repaired = damaged_archive.repair_recovery().unwrap();
+    let mut repaired = Vec::new();
+    damaged_archive.repair_recovery_to(&mut repaired).unwrap();
 
     assert_eq!(repaired, bytes);
     let repaired_archive = Archive::parse(&repaired).unwrap();

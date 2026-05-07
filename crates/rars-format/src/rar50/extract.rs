@@ -5,7 +5,11 @@ use rars_codec::rar50::{DecodeMode, DecodedChunk, StreamDecodeError, Unpack50Dec
 use rars_crypto::rar50::{Rar50Cipher, Rar50Keys};
 use std::io::{Read, Write};
 
+#[cfg(not(test))]
 const STREAM_DECODE_THRESHOLD: u64 = 128 * 1024 * 1024;
+#[cfg(test)]
+const STREAM_DECODE_THRESHOLD: u64 = 1024;
+const FILTERED_BUFFER_FALLBACK_LIMIT: u64 = 512 * 1024 * 1024;
 
 impl FileHeader {
     fn crypto_with_password(&self, password: Option<&[u8]>) -> Result<Option<Rar50Keys>> {
@@ -406,15 +410,55 @@ impl<'a> DecoderSession<'a> {
         file: &FileHeader,
         writer: &mut dyn Write,
     ) -> Result<()> {
+        if file.unpacked_size <= FILTERED_BUFFER_FALLBACK_LIMIT {
+            return self.write_buffered_large_member(archive, file, writer);
+        }
+
         let (packed, keys) = file
             .packed_data_with_password(archive, self.password)
             .map_err(|error| file.entry_error("reading", error))?;
-        file.stream_packed_with_decoder(&packed, keys.as_ref(), &mut self.decoder, writer)
-            .map_err(|error| file.entry_error("decoding", error))
+
+        let mut preflight_decoder = self.decoder.clone();
+        let mut sink = std::io::sink();
+        file.stream_packed_with_decoder(&packed, keys.as_ref(), &mut preflight_decoder, &mut sink)
+            .map_err(|error| {
+                if is_stream_filter_error(&error) {
+                    Error::UnsupportedFeature {
+                        version: crate::version::ArchiveVersion::Rar50,
+                        feature: "RAR 5 filtered compressed member above buffered fallback limit",
+                    }
+                } else {
+                    error
+                }
+            })
+            .map_err(|error| file.entry_error("decoding", error))?;
+
+        let mut streaming_decoder = self.decoder.clone();
+        file.stream_packed_with_decoder(&packed, keys.as_ref(), &mut streaming_decoder, writer)
+            .map_err(|error| file.entry_error("decoding", error))?;
+        self.decoder = streaming_decoder;
+        Ok(())
     }
 
     fn decoded_file_data(&mut self, archive: &Archive, file: &FileHeader) -> Result<DecodedData> {
         file.decoded_data_with_decoder(archive, &mut self.decoder, self.password)
+    }
+
+    fn write_buffered_large_member(
+        &mut self,
+        archive: &Archive,
+        file: &FileHeader,
+        writer: &mut dyn Write,
+    ) -> Result<()> {
+        let decoded = self
+            .decoded_file_data(archive, file)
+            .map_err(|error| file.entry_error("decoding", error))?;
+        file.verify_integrity_with_keys(&decoded.data, decoded.keys.as_ref())
+            .map_err(|error| file.entry_error("verifying", error))?;
+        writer
+            .write_all(&decoded.data)
+            .map_err(Error::from)
+            .map_err(|error| file.entry_error("writing", error))
     }
 
     fn split_decryptor(
@@ -434,6 +478,15 @@ impl<'a> DecoderSession<'a> {
     ) -> Result<Vec<u8>> {
         final_file.decode_split_with_decoder(volumes, split, &mut self.decoder, decryptor)
     }
+}
+
+fn is_stream_filter_error(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Codec(rars_codec::Error::InvalidData(
+            "RAR 5 streaming decoder cannot apply filters to large output"
+        ))
+    )
 }
 
 impl FileHeader {
@@ -971,8 +1024,9 @@ const fn crc32_table() -> [u32; 256] {
 #[cfg(test)]
 mod tests {
     use super::super::{
-        ArchiveSource, Block, BlockHeader, FileEncryption, FileHash, MainHeader, HEAD_FILE,
-        HFL_SPLIT_AFTER, HFL_SPLIT_BEFORE,
+        ArchiveSource, Block, BlockHeader, CompressedEntry, FileEncryption, FileHash, FilterKind,
+        FilterPolicy, MainHeader, Rar50Writer, WriterOptions, HEAD_FILE, HFL_SPLIT_AFTER,
+        HFL_SPLIT_BEFORE,
     };
     use super::*;
     use crate::rar15_40::crc32;
@@ -1032,6 +1086,39 @@ mod tests {
         .unwrap();
 
         assert_eq!(&*captured.borrow(), &full);
+    }
+
+    #[test]
+    fn large_filtered_members_fall_back_to_bounded_buffered_decode() {
+        let mut data = Vec::new();
+        for _ in 0..128 {
+            data.extend_from_slice(b"\xe8\0\0\0\0filtered payload block\n");
+        }
+        assert!(data.len() as u64 > STREAM_DECODE_THRESHOLD);
+        assert!(data.len() as u64 <= FILTERED_BUFFER_FALLBACK_LIMIT);
+
+        let archive = Rar50Writer::new(WriterOptions {
+            target: crate::ArchiveVersion::Rar50,
+            features: crate::FeatureSet::store_only(),
+        })
+        .compressed_entries(&[CompressedEntry {
+            name: b"filtered.bin",
+            data: &data,
+            mtime: None,
+            attributes: 0x20,
+            host_os: 3,
+        }])
+        .filter_policy(FilterPolicy::Explicit(FilterKind::E8))
+        .finish()
+        .unwrap();
+        let archive = Archive::parse(&archive).unwrap();
+        let file = archive.files().next().unwrap();
+        assert!(file.should_stream_decode());
+
+        let mut out = Vec::new();
+        file.write_to(&archive, None, &mut out).unwrap();
+
+        assert_eq!(out, data);
     }
 
     #[test]

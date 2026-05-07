@@ -19,23 +19,11 @@ serialization.
 
 ### 1. Pre-release Hardening
 
-- Make RAR5 large-output streaming handle filter records, or fall back to a
-  documented bounded buffered path instead of rejecting filtered members above
-  the streaming threshold.
 - Audit extraction paths that still buffer decoded output despite the streaming
-  API: sub-128 MiB RAR5 compressed members, RAR 1.5-4.x compressed members,
+  API: bounded-buffer RAR5 compressed members, RAR 1.5-4.x compressed members,
   encrypted entries, and compressed split-volume reassembly.
 
-### 2. CLI Password And Repair UX
-
-- Add tty password prompting when an encrypted command needs a password and no
-  explicit password source was supplied. `--password-file` and `--password -`
-  are implemented; keep documenting that `--password` is mainly for tests and
-  explicit scripting because it can leak through process listings.
-- Add a streaming recovery-repair API for large archives instead of returning
-  only a full repaired `Vec<u8>`.
-
-### 3. Compression Quality
+### 2. Compression Quality
 
 - Improve RAR29/RAR30/RAR40 policy quality beyond the current default auto
   selector. Remaining wins are likely filter-block boundary tuning, match-finder
@@ -44,13 +32,13 @@ serialization.
   bounded hash-chain baseline. RAR5 auto mode now considers ranged x86 filters;
   remaining useful work is audio/filter placement and match selection.
 
-### 4. RAR 1.5-4.x Reader And Recovery
+### 3. RAR 1.5-4.x Reader And Recovery
 
 - Add adversarial PPMd fixtures as corpus bugs appear.
 - Keep the libarchive mixed encrypted fixture as a partial oracle only for the
   RAR 3.93-validated `b.txt` member.
 
-### 5. RAR 5.0/7.x Reader And Recovery
+### 4. RAR 5.0/7.x Reader And Recovery
 
 - Keep the external Unpack70 large-dictionary oracle reproducible with
   `reference-rar70-large-dict.sh`; the generated sparse fixture stays outside
@@ -59,7 +47,7 @@ serialization.
   E8E9, Delta, and ARM fixtures for reading, plus reference checks for
   rars-written filtered archives.
 
-### 6. API And Error Model
+### 5. API And Error Model
 
 - Pick one `extract_to` shape across the facade and per-version modules.
 - Decide whether the umbrella `ArchiveWriter` should remain public or whether
@@ -69,7 +57,7 @@ serialization.
 - Refactor `cmd_add` into a parsed write plan plus one dispatcher, then split
   `rars-cli/src/main.rs` into command modules when touching the CLI next.
 
-### 7. Crypto And Secret Handling
+### 6. Crypto And Secret Handling
 
 - Replace straight RAR5 SHA-256/HMAC code with audited `sha2`/`hmac` crates
   unless a format-specific hook is identified, and add WinRAR-derived KDF known
@@ -79,7 +67,7 @@ serialization.
 - Add `zeroize` for passwords, derived keys, AES state, and temporary KDF
   buffers where ownership makes that practical.
 
-### 8. Hardening And Coverage
+### 7. Hardening And Coverage
 
 - Add fuzz targets for `Archive::parse`, `Unpack29::decode_member`, the PPMd
   decoder, and RARVM program parsing/execution. Seed them with the fixture
