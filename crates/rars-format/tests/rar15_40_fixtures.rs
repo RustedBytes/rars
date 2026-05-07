@@ -4258,6 +4258,22 @@ fn parses_rar300_newsub_recovery_record() {
 
 #[test]
 fn parses_compressed_rar300_newsub_recovery_record_fixture() {
+    let bytes = std::fs::read(fixture("rar300/with_compressed_recovery_rar300.rar")).unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    assert!(archive.main.has_recovery_record());
+
+    let recovery = archive
+        .new_subs()
+        .find(|sub| sub.kind == NewSubKind::RecoveryRecord)
+        .unwrap();
+    assert_eq!(recovery.file.name, b"RR");
+    assert_eq!(recovery.file.method, 0x33);
+    assert_eq!(recovery.file.pack_size, 6443);
+    assert_eq!(recovery.file.unp_size, 5672);
+}
+
+#[test]
+fn rejects_corrupt_compressed_rar300_newsub_recovery_record_fixture() {
     let bytes = std::fs::read(fixture(
         "rar300/with_compressed_recovery_header_synthetic.rar",
     ))
@@ -4275,10 +4291,7 @@ fn parses_compressed_rar300_newsub_recovery_record_fixture() {
     let err = archive.repair_protect_head().unwrap_err();
     assert!(matches!(
         err,
-        Error::UnsupportedFeature {
-            version: ArchiveVersion::Rar30,
-            feature: "compressed RAR 3.x NEWSUB recovery record",
-        }
+        Error::InvalidHeader(_) | Error::Crc32Mismatch { .. } | Error::CrcMismatch { .. }
     ));
 }
 
@@ -4342,6 +4355,30 @@ fn repairs_rar300_newsub_recovery_single_damaged_sector() {
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"bigtext_64k.bin");
     assert_eq!(crc32(&extracted[0].data), 0xddc95682);
+}
+
+#[test]
+fn repairs_compressed_rar300_newsub_recovery_single_damaged_sector() {
+    let compressed = std::fs::read(fixture("rar300/with_compressed_recovery_rar300.rar")).unwrap();
+    let expected = std::fs::read(fixture("rar300/with_recovery_rar300.rar")).unwrap();
+    let mut damaged = compressed.clone();
+    damaged[512 + 16..512 + 80].fill(0xa5);
+
+    let damaged_archive = Archive::parse(&damaged).unwrap();
+    assert!(damaged_archive.extract().is_err());
+
+    let repaired = damaged_archive.repair_protect_head().unwrap();
+
+    assert_eq!(repaired, compressed);
+    let repaired_archive = Archive::parse(&repaired).unwrap();
+    let extracted = repaired_archive.extract().unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].name, b"bigtext_64k.bin");
+    assert_eq!(crc32(&extracted[0].data), 0xddc95682);
+
+    let expected_archive = Archive::parse(&expected).unwrap();
+    let expected_extracted = expected_archive.extract().unwrap();
+    assert_eq!(extracted[0].data, expected_extracted[0].data);
 }
 
 #[test]

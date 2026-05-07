@@ -1151,7 +1151,12 @@ impl Archive {
             .new_subs()
             .find(|sub| sub.kind == NewSubKind::RecoveryRecord)
         {
-            return repair_newsub_recovery_bytes(&self.source_bytes()?, self.sfx_offset, recovery);
+            return repair_newsub_recovery_bytes(
+                &self.source_bytes()?,
+                self.sfx_offset,
+                self,
+                recovery,
+            );
         }
         let protect = self.protect_records().next().ok_or(Error::InvalidHeader(
             "RAR 2.x archive does not contain a PROTECT_HEAD recovery record",
@@ -1473,17 +1478,15 @@ fn repair_protect_head_bytes(
 fn repair_newsub_recovery_bytes(
     source: &[u8],
     sfx_offset: usize,
+    archive: &Archive,
     recovery: &NewSubHeader,
 ) -> Result<Vec<u8>> {
-    if recovery.file.method != 0x30 {
-        return Err(Error::UnsupportedFeature {
-            feature: "compressed RAR 3.x NEWSUB recovery record",
-            version: ArchiveVersion::Rar30,
-        });
-    }
-    if recovery.file.pack_size != recovery.file.unp_size {
+    let recovery_data = newsub_recovery_data(archive, recovery)?;
+    let expected_unpacked = usize::try_from(recovery.file.unp_size)
+        .map_err(|_| Error::InvalidHeader("RAR 3.x recovery unpacked size overflows usize"))?;
+    if recovery_data.len() != expected_unpacked {
         return Err(Error::InvalidHeader(
-            "RAR 3.x recovery record packed size does not match unpacked size",
+            "RAR 3.x recovery data size does not match unpacked size",
         ));
     }
     let protected_start = sfx_offset;
@@ -1498,9 +1501,6 @@ fn repair_newsub_recovery_bytes(
             "RAR 3.x recovery protected range is invalid",
         ));
     }
-    let recovery_data = source
-        .get(recovery.file.packed_range.clone())
-        .ok_or(Error::TooShort)?;
     let protected_len = protected_end - protected_start;
     let protected_sectors = protected_len.div_ceil(512);
     if protected_sectors == 0 {
@@ -1582,6 +1582,25 @@ fn repair_newsub_recovery_bytes(
     }
 
     Ok(repaired)
+}
+
+fn newsub_recovery_data(archive: &Archive, recovery: &NewSubHeader) -> Result<Vec<u8>> {
+    if recovery.file.is_encrypted() {
+        return Err(Error::UnsupportedFeature {
+            version: ArchiveVersion::Rar30,
+            feature: "encrypted RAR 3.x NEWSUB recovery record",
+        });
+    }
+    if recovery.file.method == 0x30 {
+        if recovery.file.pack_size != recovery.file.unp_size {
+            return Err(Error::InvalidHeader(
+                "RAR 3.x recovery record packed size does not match unpacked size",
+            ));
+        }
+        return recovery.file.stored_data(archive);
+    }
+    let mut session = DecoderSession::new(false);
+    session.decode_file_data(archive, &recovery.file)
 }
 
 fn protected_sector(
