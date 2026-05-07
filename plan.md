@@ -24,8 +24,7 @@ forward independently of compression benchmark harness work.
 
 - Apply the RAR5 builder pattern to RAR 1.5-4.x writing if another independent
   option axis lands there.
-- Refactor `cmd_add` into a parsed write plan plus one dispatcher, then split
-  `rars-cli/src/main.rs` into command modules when touching the CLI next.
+- Split `rars-cli/src/main.rs` into command modules when touching the CLI next.
 
 ### 2. RAR 1.5-4.x Reader And Recovery
 
@@ -46,7 +45,6 @@ forward independently of compression benchmark harness work.
 
 - Add comments/provenance for transliterated Unpack15 state names and embedded
   RAR3 standard-filter bytecode blobs.
-- Split `rars-recovery/src/lib.rs` into `rar3.rs` and `rar5.rs` modules.
 
 ## Optimization Track
 
