@@ -1528,7 +1528,14 @@ fn print_ok_entry(entry: &ExtractedEntryMeta) {
 }
 
 fn output_relative_path(name: &[u8]) -> CliResult<PathBuf> {
+    if name.contains(&0) {
+        return Err("unsafe archive path contains NUL byte".into());
+    }
     let text = String::from_utf8_lossy(name).replace('\\', "/");
+    let bytes = text.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return Err(format!("unsafe archive path: {text}").into());
+    }
     let path = Path::new(&text);
     let mut out = PathBuf::new();
     for component in path.components() {
@@ -1596,7 +1603,7 @@ fn usage() {
 
 #[cfg(test)]
 mod tests {
-    use super::infer_part_index;
+    use super::{infer_part_index, output_relative_path};
     use std::path::Path;
 
     #[test]
@@ -1607,5 +1614,32 @@ mod tests {
         assert_eq!(infer_part_index(Path::new("archive.r00"), 4), Some(1));
         assert_eq!(infer_part_index(Path::new("archive.r02"), 4), Some(3));
         assert_eq!(infer_part_index(Path::new("archive.r03"), 4), None);
+    }
+
+    #[test]
+    fn output_relative_path_accepts_plain_nested_names() {
+        assert_eq!(
+            output_relative_path(b"dir\\subdir/file.txt").unwrap(),
+            Path::new("dir").join("subdir").join("file.txt")
+        );
+    }
+
+    #[test]
+    fn output_relative_path_rejects_traversal_and_absolute_names() {
+        for name in [
+            b"../evil.txt".as_slice(),
+            b"safe/../../evil.txt",
+            b"/tmp/evil.txt",
+            b"//server/share/evil.txt",
+            b"\\server\\share\\evil.txt",
+            b"C:/evil.txt",
+            b"C:evil.txt",
+            b"",
+            b".",
+            b"./.",
+            b"bad\0name.txt",
+        ] {
+            assert!(output_relative_path(name).is_err(), "{name:?}");
+        }
     }
 }

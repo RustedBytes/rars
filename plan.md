@@ -25,17 +25,8 @@ serialization.
 - Audit extraction paths that still buffer decoded output despite the streaming
   API: sub-128 MiB RAR5 compressed members, RAR 1.5-4.x compressed members,
   encrypted entries, and compressed split-volume reassembly.
-- Remove remaining attacker-controlled `unpacked_size as usize` casts in RAR5
-  extraction and split reassembly; use checked conversion consistently.
 - Add Kraft/canonical-table validation to Huffman builders, and port the
   indexed canonical decode table used by RAR5 back to RAR20/RAR29.
-- Use constant-time comparisons for RAR5 password checks and BLAKE2sp/HMAC hash
-  verification.
-- Use a bitset or sorted damaged-shard cursor in RAR5 recovery reconstruction
-  instead of repeated linear `damaged.contains` checks.
-- Extend CLI path traversal tests beyond `../evil.txt` to absolute paths,
-  drive-prefix paths, nested parent traversal, empty/current-dir names, UNC-like
-  names, and embedded NUL names.
 
 ### 2. CLI Password And Repair UX
 

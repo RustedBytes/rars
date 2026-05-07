@@ -62,7 +62,9 @@ impl Rar50Keys {
 
     pub fn check_password(&self, stored: &[u8; 12]) -> Result<()> {
         let checksum = sha256(&stored[..8]);
-        if checksum[..4] != stored[8..12] || self.password_check != stored[..8] {
+        if !constant_time_eq(&checksum[..4], &stored[8..12])
+            || !constant_time_eq(&self.password_check, &stored[..8])
+        {
             return Err(Error::BadPassword);
         }
         Ok(())
@@ -85,6 +87,17 @@ impl Rar50Keys {
     pub fn mac_hash32(&self, hash: [u8; 32]) -> [u8; 32] {
         hmac_sha256(&self.hash_key, &hash)
     }
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (&left, &right) in left.iter().zip(right) {
+        diff |= left ^ right;
+    }
+    diff == 0
 }
 
 pub struct Rar50Cipher {
@@ -379,6 +392,21 @@ mod tests {
             hex(&hmac_sha256(&[0x0b; 20], b"Hi There")),
             "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
         );
+    }
+
+    #[test]
+    fn password_check_uses_the_check_value_and_its_checksum() {
+        let keys = Rar50Keys::derive(b"secret", [7; 16], 4).unwrap();
+        let mut record = keys.password_check_record();
+
+        assert_eq!(keys.check_password(&record), Ok(()));
+
+        record[0] ^= 0x01;
+        assert_eq!(keys.check_password(&record), Err(Error::BadPassword));
+
+        let mut record = keys.password_check_record();
+        record[11] ^= 0x01;
+        assert_eq!(keys.check_password(&record), Err(Error::BadPassword));
     }
 
     fn hex(bytes: &[u8]) -> String {

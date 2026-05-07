@@ -895,6 +895,13 @@ pub mod rar5 {
                     .collect()
             })
             .collect();
+        let mut damaged_lookup = vec![false; data_count];
+        for &data_index in damaged {
+            if data_index >= data_count {
+                return Err(Error::TooManyDamagedShards);
+            }
+            damaged_lookup[data_index] = true;
+        }
 
         let shard_len = data_shards.first().ok_or(Error::TooManyShards)?.len();
         let gf = Gf16::new();
@@ -903,7 +910,7 @@ pub mod rar5 {
             for &(row_index, parity) in recovery_shards {
                 let mut value = u16::from_le_bytes([parity[word_offset], parity[word_offset + 1]]);
                 for (data_index, shard) in data_shards.iter().enumerate() {
-                    if damaged.contains(&data_index) {
+                    if damaged_lookup[data_index] {
                         continue;
                     }
                     let data_symbol =

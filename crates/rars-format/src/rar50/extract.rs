@@ -100,7 +100,7 @@ impl FileHeader {
                 } else {
                     actual
                 };
-                if hash.data == actual {
+                if constant_time_eq(&hash.data, &actual) {
                     Ok(())
                 } else {
                     Err(Error::HashMismatch { hash_type: 0 })
@@ -145,7 +145,7 @@ impl FileHeader {
             } else {
                 hasher.finalize()
             };
-            if expected != actual {
+            if !constant_time_eq(&expected, &actual) {
                 return Err(Error::HashMismatch { hash_type: 0 });
             }
         }
@@ -229,11 +229,12 @@ impl FileHeader {
         let dictionary_size = usize::try_from(info.dictionary_size).map_err(|_| {
             Error::InvalidHeader("RAR 5 dictionary size overflows host address size")
         })?;
+        let output_size = checked_unpacked_size(self.unpacked_size)?;
         decoder
             .decode_member_with_dictionary(
                 packed,
                 info.algorithm_version,
-                self.unpacked_size as usize,
+                output_size,
                 dictionary_size,
                 info.solid,
                 DecodeMode::Lz,
@@ -637,7 +638,8 @@ impl PendingSplitRefs {
                 break;
             }
             let chunk = if final_file.encrypted {
-                let remaining = final_file.unpacked_size.saturating_sub(written) as usize;
+                let remaining = usize::try_from(final_file.unpacked_size.saturating_sub(written))
+                    .unwrap_or(usize::MAX);
                 &buf[..count.min(remaining)]
             } else {
                 &buf[..count]
@@ -679,7 +681,7 @@ impl PendingSplitRefs {
             } else {
                 hasher.finalize()
             };
-            if expected != actual {
+            if !constant_time_eq(&expected, &actual) {
                 return Err(Error::HashMismatch { hash_type: 0 });
             }
         }
@@ -767,6 +769,22 @@ fn streaming_hash_verifier(file: &FileHeader) -> Result<Option<([u8; 32], blake2
     }
 }
 
+fn checked_unpacked_size(size: u64) -> Result<usize> {
+    usize::try_from(size)
+        .map_err(|_| Error::InvalidHeader("RAR 5 unpacked size overflows host address size"))
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (&left, &right) in left.iter().zip(right) {
+        diff |= left ^ right;
+    }
+    diff == 0
+}
+
 impl FileHeader {
     fn decode_split_with_decoder(
         &self,
@@ -792,11 +810,12 @@ impl FileHeader {
             Error::InvalidHeader("RAR 5 dictionary size overflows host address size")
         })?;
         let mut reader = split.fragment_reader(volumes, decryptor)?;
+        let output_size = checked_unpacked_size(self.unpacked_size)?;
         decoder
             .decode_member_from_reader_with_dictionary(
                 &mut reader,
                 info.algorithm_version,
-                self.unpacked_size as usize,
+                output_size,
                 dictionary_size,
                 info.solid,
                 DecodeMode::Lz,
@@ -1004,6 +1023,49 @@ mod tests {
         skipped.update_zeroes(100_000);
 
         assert_eq!(skipped.finish(), bytewise.finish());
+    }
+
+    #[test]
+    fn checked_unpacked_size_rejects_values_above_host_usize() {
+        assert_eq!(checked_unpacked_size(123).unwrap(), 123usize);
+
+        let overflowing = usize::MAX as u128 + 1;
+        if overflowing <= u64::MAX as u128 {
+            assert!(checked_unpacked_size(overflowing as u64).is_err());
+        }
+    }
+
+    #[test]
+    fn constant_time_hash_comparison_keeps_hash_validation_behaviour() {
+        let data = b"hash me";
+        let file = FileHeader {
+            block: empty_block(HEAD_FILE, 0, 0..0),
+            file_flags: 0,
+            unpacked_size: data.len() as u64,
+            attributes: 0x20,
+            mtime: None,
+            data_crc32: None,
+            compression_info: 0,
+            host_os: 2,
+            name: b"hash.txt".to_vec(),
+            hash: Some(FileHash {
+                hash_type: 0,
+                data: blake2sp::hash(data).to_vec(),
+            }),
+            service_data: None,
+            encrypted: false,
+            encryption: None,
+            crypto: None,
+        };
+
+        file.verify_integrity_with_keys(data, None).unwrap();
+
+        let mut wrong = file;
+        wrong.hash.as_mut().unwrap().data[31] ^= 0x01;
+        assert!(matches!(
+            wrong.verify_integrity_with_keys(data, None),
+            Err(Error::HashMismatch { hash_type: 0 })
+        ));
     }
 
     fn stored_split_archive(data: &[u8], full: &[u8], crc: u32, flags: u64) -> Archive {
