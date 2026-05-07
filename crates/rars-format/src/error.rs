@@ -22,6 +22,15 @@ pub enum Error {
         version: ArchiveVersion,
         feature: &'static str,
     },
+    UnsupportedCompression {
+        family: &'static str,
+        unpack_version: u8,
+        method: u8,
+    },
+    UnsupportedEncryption {
+        family: &'static str,
+        unpack_version: u8,
+    },
     Io(String),
     NeedPassword,
     WrongPasswordOrCorruptData,
@@ -62,6 +71,21 @@ impl std::fmt::Display for Error {
             Self::UnsupportedFeature { version, feature } => {
                 write!(f, "feature {feature} is not supported by {version:?}")
             }
+            Self::UnsupportedCompression {
+                family,
+                unpack_version,
+                method,
+            } => write!(
+                f,
+                "{family} compression is not supported: unpack version {unpack_version}, method {method:#04x}"
+            ),
+            Self::UnsupportedEncryption {
+                family,
+                unpack_version,
+            } => write!(
+                f,
+                "{family} encryption is not supported: unpack version {unpack_version}"
+            ),
             Self::Io(message) => write!(f, "I/O error: {message}"),
             Self::NeedPassword => write!(f, "a password is required"),
             Self::WrongPasswordOrCorruptData => {
@@ -210,6 +234,27 @@ mod tests {
         assert_eq!(
             std::error::Error::source(&error).map(ToString::to_string),
             Some("checksum mismatch: expected 0x00000001, got 0x00000002".to_string())
+        );
+    }
+
+    #[test]
+    fn unsupported_codec_errors_are_not_reported_as_invalid_headers() {
+        assert_eq!(
+            Error::UnsupportedCompression {
+                family: "RAR 1.5-4.x",
+                unpack_version: 14,
+                method: 0x33,
+            }
+            .to_string(),
+            "RAR 1.5-4.x compression is not supported: unpack version 14, method 0x33"
+        );
+        assert_eq!(
+            Error::UnsupportedEncryption {
+                family: "RAR 1.5-4.x",
+                unpack_version: 14,
+            }
+            .to_string(),
+            "RAR 1.5-4.x encryption is not supported: unpack version 14"
         );
     }
 }

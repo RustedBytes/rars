@@ -37,12 +37,7 @@ serialization.
 - True Unpack70 remains fixture-blocked until a practical >4 GiB dictionary
   fixture is worth carrying.
 
-### 4. API And Error Quality
-
-- Continue enriching library errors with block type and operation context before
-  treating the public API as stable.
-
-### 5. Fixtures And Oracles
+### 4. Fixtures And Oracles
 
 - Keep useful spec-repo fixtures copied into crate tests when they validate
   stable behaviour.

@@ -19,9 +19,11 @@ impl CodecState {
         if file.unp_ver == 15 {
             return Ok(Self::Unpack15(Box::default()));
         }
-        Err(Error::InvalidHeader(
-            "RAR 1.5 compressed file extraction is not implemented",
-        ))
+        Err(Error::UnsupportedCompression {
+            family: "RAR 1.5-4.x",
+            unpack_version: file.unp_ver,
+            method: file.method,
+        })
     }
 
     fn supports(&self, file: &FileHeader) -> bool {
@@ -517,9 +519,10 @@ impl SplitCipher {
         if unp_ver >= 29 {
             return Ok(Self::Rar30(Box::new(Rar30Cipher::new(password, salt))));
         }
-        Err(Error::InvalidHeader(
-            "RAR 1.5-4.x encrypted split extraction is not implemented",
-        ))
+        Err(Error::UnsupportedEncryption {
+            family: "RAR 1.5-4.x split volume",
+            unpack_version: unp_ver,
+        })
     }
 }
 

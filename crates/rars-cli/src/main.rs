@@ -743,10 +743,10 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
             return Err("RAR 2.9 compression policy requires compression".into());
         }
         if volume_size.is_some() {
-            return Err("RAR 2.9 compression policy on volumes is not implemented yet".into());
+            return Err("unsupported option combination: RAR 2.9 compression policy cannot currently be used with --volume-size".into());
         }
         if archive_comment.is_some() || file_comment.is_some() {
-            return Err("RAR 2.9 compression policy with comments is not implemented yet".into());
+            return Err("unsupported option combination: RAR 2.9 compression policy cannot currently be combined with archive or file comments".into());
         }
     }
     if matches!(target, ArchiveVersion::Rar50 | ArchiveVersion::Rar70) {
@@ -768,19 +768,19 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
             return Err("RAR 5 filter writer requires compression".into());
         }
         if filtered && password.is_some() {
-            return Err("RAR 5 filter writer with encryption is not implemented yet".into());
+            return Err("unsupported option combination: RAR 5 filter writers cannot currently be combined with encryption".into());
         }
         if filtered && volume_size.is_some() {
-            return Err("RAR 5 filter writer on volumes is not implemented yet".into());
+            return Err("unsupported option combination: RAR 5 filter writers cannot currently be used with --volume-size".into());
         }
         if filtered && recovery_percent.is_some() {
-            return Err("RAR 5 filter writer with recovery is not implemented yet".into());
+            return Err("unsupported option combination: RAR 5 filter writers cannot currently be combined with recovery records".into());
         }
         if filtered && archive_name.is_some() {
-            return Err("RAR 5 filter writer with archive metadata is not implemented yet".into());
+            return Err("unsupported option combination: RAR 5 filter writers cannot currently be combined with archive metadata".into());
         }
         if filtered && archive_comment.is_some() {
-            return Err("RAR 5 filter writer with archive comments is not implemented yet".into());
+            return Err("unsupported option combination: RAR 5 filter writers cannot currently be combined with archive comments".into());
         }
         if volume_size.is_some() && store && input_paths.len() != 1 {
             return Err("RAR 5 stored multivolume writer currently supports one input file".into());
@@ -804,13 +804,13 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
             return Err("RAR 5 header encryption requires --password".into());
         }
         if quick_open && password.is_some() {
-            return Err("RAR 5 quick-open writer with encryption is not implemented yet".into());
+            return Err("unsupported option combination: RAR 5 quick-open cannot currently be combined with encryption".into());
         }
         if quick_open && volume_size.is_some() {
-            return Err("RAR 5 quick-open writer on volumes is not implemented yet".into());
+            return Err("unsupported option combination: RAR 5 quick-open cannot currently be used with --volume-size".into());
         }
         if archive_name.is_some() && volume_size.is_some() {
-            return Err("RAR 5 archive metadata on volumes is not implemented yet".into());
+            return Err("unsupported option combination: RAR 5 archive metadata cannot currently be used with --volume-size".into());
         }
         if recovery_percent.is_some()
             && (archive_comment.is_some() || archive_name.is_some() || quick_open)
@@ -1384,7 +1384,7 @@ fn validate_rar15_40_add_options(
     ) {
         if matches!(target, ArchiveVersion::Rar30 | ArchiveVersion::Rar40) && file_comment.is_some()
         {
-            return Err("RAR 3.x writer file comments are not implemented yet".into());
+            return Err("unsupported option combination: RAR 3.x/4.x file comments are not currently writable".into());
         }
         if header_encryption {
             if !matches!(target, ArchiveVersion::Rar30 | ArchiveVersion::Rar40) {

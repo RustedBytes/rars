@@ -305,9 +305,7 @@ impl FileHeader {
         password: Option<&[u8]>,
     ) -> Result<Vec<u8>> {
         if !self.is_stored() {
-            return Err(Error::InvalidHeader(
-                "RAR 1.5 compressed file extraction is not implemented",
-            ));
+            return Err(self.unsupported_compression());
         }
         if !self.is_encrypted() && self.pack_size != self.unp_size {
             return Err(Error::InvalidHeader(
@@ -341,14 +339,10 @@ impl FileHeader {
             return self.stored_data(archive);
         }
         if self.is_encrypted() {
-            return Err(Error::InvalidHeader(
-                "RAR 1.5 encrypted file extraction is not implemented",
-            ));
+            return Err(self.unsupported_encryption());
         }
         if self.unp_ver < 29 {
-            return Err(Error::InvalidHeader(
-                "RAR 1.5 compressed file extraction is not implemented",
-            ));
+            return Err(self.unsupported_compression());
         }
         decoder
             .decode_member(
@@ -369,14 +363,10 @@ impl FileHeader {
             return self.stored_data(archive);
         }
         if self.is_encrypted() {
-            return Err(Error::InvalidHeader(
-                "RAR 1.5 encrypted file extraction is not implemented",
-            ));
+            return Err(self.unsupported_encryption());
         }
         if self.unp_ver != 15 {
-            return Err(Error::InvalidHeader(
-                "RAR 1.5 compressed file extraction is not implemented",
-            ));
+            return Err(self.unsupported_compression());
         }
         decoder
             .decode_member(
@@ -398,9 +388,7 @@ impl FileHeader {
             return self.stored_data_with_password(archive, password);
         }
         if self.unp_ver != 20 && self.unp_ver != 26 {
-            return Err(Error::InvalidHeader(
-                "RAR 2.0 compressed file extraction is not implemented",
-            ));
+            return Err(self.unsupported_compression());
         }
         decoder
             .decode_member(
@@ -440,9 +428,7 @@ impl FileHeader {
             Rar30Cipher::new(password, self.salt).decrypt_in_place(data);
             return Ok(());
         }
-        Err(Error::InvalidHeader(
-            "RAR 1.5 encrypted file extraction is not implemented",
-        ))
+        Err(self.unsupported_encryption())
     }
 
     pub fn verify_crc32(&self, data: &[u8]) -> Result<()> {
@@ -487,9 +473,7 @@ impl FileHeader {
         out: &mut impl Write,
     ) -> Result<()> {
         if !self.is_stored() {
-            return Err(Error::InvalidHeader(
-                "RAR 1.5 compressed file extraction is not implemented",
-            ));
+            return Err(self.unsupported_compression());
         }
         if !self.is_encrypted() && self.pack_size != self.unp_size {
             return Err(Error::InvalidHeader(
@@ -520,12 +504,11 @@ impl FileHeader {
         }
         match error {
             Error::NeedPassword => Error::NeedPassword,
-            Error::InvalidHeader(message) if message.contains("not implemented") => {
-                Error::InvalidHeader(message)
-            }
             Error::UnsupportedSignature
             | Error::UnsupportedVersion(_)
             | Error::UnsupportedFeature { .. }
+            | Error::UnsupportedCompression { .. }
+            | Error::UnsupportedEncryption { .. }
             | Error::TooShort
             | Error::Io(_)
             | Error::AtArchiveOffset { .. }
@@ -572,14 +555,10 @@ impl FileHeader {
             return self.write_stored_to(archive, None, out);
         }
         if self.is_encrypted() {
-            return Err(Error::InvalidHeader(
-                "RAR 1.5 encrypted file extraction is not implemented",
-            ));
+            return Err(self.unsupported_encryption());
         }
         if self.unp_ver < 29 {
-            return Err(Error::InvalidHeader(
-                "RAR 1.5 compressed file extraction is not implemented",
-            ));
+            return Err(self.unsupported_compression());
         }
 
         let mut packed = archive.range_reader(self.packed_range.clone())?;
@@ -619,9 +598,7 @@ impl FileHeader {
             return self.write_stored_to(archive, password, out);
         }
         if self.unp_ver != 15 {
-            return Err(Error::InvalidHeader(
-                "RAR 1.5 compressed file extraction is not implemented",
-            ));
+            return Err(self.unsupported_compression());
         }
 
         if self.is_encrypted() {
@@ -673,9 +650,7 @@ impl FileHeader {
             return self.write_stored_to(archive, password, out);
         }
         if self.unp_ver != 20 && self.unp_ver != 26 {
-            return Err(Error::InvalidHeader(
-                "RAR 2.0 compressed file extraction is not implemented",
-            ));
+            return Err(self.unsupported_compression());
         }
 
         let mut crc = Crc32::new();
@@ -699,6 +674,21 @@ impl FileHeader {
         }
         let actual = crc.finish();
         self.crc_result(actual, password)
+    }
+
+    fn unsupported_compression(&self) -> Error {
+        Error::UnsupportedCompression {
+            family: "RAR 1.5-4.x",
+            unpack_version: self.unp_ver,
+            method: self.method,
+        }
+    }
+
+    fn unsupported_encryption(&self) -> Error {
+        Error::UnsupportedEncryption {
+            family: "RAR 1.5-4.x",
+            unpack_version: self.unp_ver,
+        }
     }
 }
 
@@ -726,9 +716,11 @@ impl CommentHeader {
         } else if self.unp_ver == 15 {
             Unpack15::default().decode_member(&self.packed_data(archive)?, target, false)?
         } else {
-            return Err(Error::InvalidHeader(
-                "RAR 1.5 comment compression method is not implemented",
-            ));
+            return Err(Error::UnsupportedCompression {
+                family: "RAR 1.5 comment",
+                unpack_version: self.unp_ver,
+                method: self.method,
+            });
         };
         let actual = (crc32(&data) & 0xffff) as u16;
         if actual == self.comment_crc {
