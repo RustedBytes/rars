@@ -63,10 +63,14 @@ fn derive_key_iv(password: &[u8], salt: Option<[u8; 8]>) -> ([u8; 16], [u8; 16])
         return derive_key_iv_fast(&raw);
     }
 
+    derive_key_iv_slow(&mut raw)
+}
+
+fn derive_key_iv_slow(raw: &mut [u8]) -> ([u8; 16], [u8; 16]) {
     let mut sha1 = Sha1::new();
     let mut iv = [0; 16];
     for i in 0..HASH_ROUNDS {
-        sha1.update_rar29(&mut raw);
+        sha1.update_rar29(raw);
         sha1.update(&[
             (i & 0xff) as u8,
             ((i >> 8) & 0xff) as u8,
@@ -252,6 +256,18 @@ fn sha1_transform(state: &mut [u32; 5], block: &[u8], writeback: Option<&mut [u8
 mod tests {
     use super::*;
 
+    fn raw_kdf_material(password: &[u8], salt: Option<[u8; 8]>) -> Vec<u8> {
+        let mut raw = Vec::with_capacity(password.len() * 2 + 8);
+        let password = String::from_utf8_lossy(password);
+        for code_unit in password.encode_utf16() {
+            raw.extend_from_slice(&code_unit.to_le_bytes());
+        }
+        if let Some(salt) = salt {
+            raw.extend_from_slice(&salt);
+        }
+        raw
+    }
+
     #[test]
     fn rar30_aes_encrypt_decrypt_round_trips_blocks() {
         let salt = Some(*b"rarsalt!");
@@ -280,5 +296,26 @@ mod tests {
 
         Rar30Cipher::new(password, salt).decrypt_in_place(&mut data);
         assert_eq!(data, plain);
+    }
+
+    #[test]
+    fn rar30_fast_kdf_matches_reference_path_for_short_material() {
+        for (password, salt) in [
+            (b"".as_slice(), None),
+            (b"password".as_slice(), Some(*b"rarsalt!")),
+            ("páss".as_bytes(), Some([1, 2, 3, 4, 5, 6, 7, 8])),
+        ] {
+            let raw = raw_kdf_material(password, salt);
+            assert!(
+                raw.len() < 64,
+                "case should exercise the fast-path precondition"
+            );
+
+            let fast = derive_key_iv_fast(&raw);
+            let mut reference_raw = raw.clone();
+            let reference = derive_key_iv_slow(&mut reference_raw);
+
+            assert_eq!(fast, reference);
+        }
     }
 }

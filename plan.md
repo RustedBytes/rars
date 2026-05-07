@@ -15,42 +15,12 @@ serialization.
   named domain concepts when they are real.
 - Add failing tests before changing format or codec behaviour.
 
-## Active Objectives
+## Active Development
 
-### 1. Pre-release Hardening
+These are review, architecture, consistency, and refactoring tasks that can move
+forward independently of compression benchmark harness work.
 
-- Add streaming decryptors for encrypted payload paths. RAR15/20/30 and RAR5
-  currently decrypt payload bytes into bounded in-memory buffers before feeding
-  codecs because the cipher APIs are in-place.
-- Reduce remaining codec-level buffers where the decoder state machines still
-  require whole-member decode paths: encrypted RAR15/RAR20/RAR29 entries and
-  any compressed split-volume path that must decrypt before chaining.
-
-### 2. Compression Quality
-
-- Improve RAR29/RAR30/RAR40 policy quality beyond the current default auto
-  selector. Remaining wins are likely filter-block boundary tuning, match-finder
-  quality, lazy parsing, and PPMd tuning.
-- Improve RAR5/RAR7 compressed-writer policy beyond the deterministic method-1
-  bounded hash-chain baseline. RAR5 auto mode now considers ranged x86 filters;
-  remaining useful work is audio/filter placement and match selection.
-
-### 3. RAR 1.5-4.x Reader And Recovery
-
-- Add adversarial PPMd fixtures as corpus bugs appear.
-- Keep the libarchive mixed encrypted fixture as a partial oracle only for the
-  RAR 3.93-validated `b.txt` member.
-
-### 4. RAR 5.0/7.x Reader And Recovery
-
-- Keep the external Unpack70 large-dictionary oracle reproducible with
-  `reference-rar70-large-dict.sh`; the generated sparse fixture stays outside
-  the repository.
-- Keep external-oracle coverage for RAR5 filter records: real RAR-created E8,
-  E8E9, Delta, and ARM fixtures for reading, plus reference checks for
-  rars-written filtered archives.
-
-### 5. API And Error Model
+### 1. API And Error Model
 
 - Decide whether the umbrella `ArchiveWriter` should remain public or whether
   callers should use per-version writer builders directly.
@@ -59,28 +29,53 @@ serialization.
 - Refactor `cmd_add` into a parsed write plan plus one dispatcher, then split
   `rars-cli/src/main.rs` into command modules when touching the CLI next.
 
-### 6. Crypto And Secret Handling
+### 2. RAR 1.5-4.x Reader And Recovery
 
-- Replace straight RAR5 SHA-256/HMAC code with audited `sha2`/`hmac` crates
-  unless a format-specific hook is identified, and add WinRAR-derived KDF known
-  answer tests.
-- Add direct equivalence tests for the RAR3/RAR4 AES KDF fast and slow paths, or
-  remove the fast path.
-- Add `zeroize` for passwords, derived keys, AES state, and temporary KDF
-  buffers where ownership makes that practical.
+- Add adversarial PPMd fixtures as corpus bugs appear.
+- Keep the libarchive mixed encrypted fixture as a partial oracle only for the
+  RAR 3.93-validated `b.txt` member.
 
-### 7. Hardening And Coverage
+### 3. RAR 5.0/7.x Reader And Recovery
 
+- Keep the external Unpack70 large-dictionary oracle reproducible with
+  `reference-rar70-large-dict.sh`; the generated sparse fixture stays outside
+  the repository.
+- Keep external-oracle coverage for RAR5 filter records: real RAR-created E8,
+  E8E9, Delta, and ARM fixtures for reading, plus reference checks for
+  rars-written filtered archives.
+
+### 4. Refactoring
+
+- Add comments/provenance for transliterated Unpack15 state names and embedded
+  RAR3 standard-filter bytecode blobs.
+- Split `rars-recovery/src/lib.rs` into `rar3.rs` and `rar5.rs` modules.
+
+## Optimization Track
+
+Park these until the benchmark/test harness is ready.
+
+- Improve RAR29/RAR30/RAR40 policy quality beyond the current default auto
+  selector. Remaining wins are likely filter-block boundary tuning, match-finder
+  quality, lazy parsing, and PPMd tuning.
+- Improve RAR5/RAR7 compressed-writer policy beyond the deterministic method-1
+  bounded hash-chain baseline. RAR5 auto mode now considers ranged x86 filters;
+  remaining useful work is audio/filter placement and match selection.
+
+## Productionization And Hardening
+
+- Add streaming decryptors for encrypted payload paths. RAR15/20/30 and RAR5
+  currently decrypt payload bytes into bounded in-memory buffers before feeding
+  codecs because the cipher APIs are in-place.
+- Reduce remaining codec-level buffers where the decoder state machines still
+  require whole-member decode paths: encrypted RAR15/RAR20/RAR29 entries and
+  any compressed split-volume path that must decrypt before chaining.
 - Add fuzz targets for `Archive::parse`, `Unpack29::decode_member`, the PPMd
   decoder, and RARVM program parsing/execution. Seed them with the fixture
   corpus.
 - Add rustdoc for the public `rars`, `rars-format`, and CLI-facing API before
   publishing.
-- Add comments/provenance for transliterated Unpack15 state names and embedded
-  RAR3 standard-filter bytecode blobs.
-- Split `rars-recovery/src/lib.rs` into `rar3.rs` and `rar5.rs` modules.
 
-### 9. Fixtures And Oracles
+## Fixtures And Oracles
 
 - Keep useful spec-repo fixtures copied into crate tests when they validate
   stable behaviour.
