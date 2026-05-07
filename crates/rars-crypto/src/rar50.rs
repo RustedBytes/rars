@@ -6,6 +6,7 @@ const SHA256_DIGEST_SIZE: usize = 32;
 const MAX_KDF_COUNT_LOG: u8 = 24;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Error {
     KdfCountTooLarge,
     BadPassword,
@@ -14,6 +15,7 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Rar50Keys {
     pub key: [u8; 32],
     pub hash_key: [u8; 32],

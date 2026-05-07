@@ -544,7 +544,7 @@ impl Archive {
         })
     }
 
-    pub fn repair_inline_recovery(&self) -> Result<Vec<u8>> {
+    pub fn repair_recovery(&self) -> Result<Vec<u8>> {
         let recovery = self
             .services()
             .find(|service| matches!(service.recovery_record(), Ok(Some(_))))
@@ -1066,6 +1066,7 @@ fn map_rar50_crypto_error(error: rars_crypto::rar50::Error) -> Error {
             feature: "RAR 5 KDF count",
         },
         rars_crypto::rar50::Error::BadPassword => Error::WrongPasswordOrCorruptData,
+        _ => Error::InvalidHeader("RAR 5 crypto error"),
     }
 }
 

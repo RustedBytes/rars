@@ -179,7 +179,7 @@ impl Archive {
     pub fn repair_recovery(&self) -> Result<Vec<u8>> {
         match self {
             Self::Rar15To40(archive) => archive.repair_protect_head(),
-            Self::Rar50Plus(archive) => archive.repair_inline_recovery(),
+            Self::Rar50Plus(archive) => archive.repair_recovery(),
             Self::Rar13(_) => Err(Error::UnsupportedFeature {
                 version: ArchiveVersion::Rar14,
                 feature: "recovery repair for RAR 1.3/1.4 archives",
@@ -302,6 +302,7 @@ fn rar50_member_hash(hash: &rar50::FileHash) -> ArchiveMemberHash {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
 pub struct ArchiveReader;
 
 impl ArchiveReader {
@@ -323,6 +324,7 @@ impl ArchiveReader {
             ArchiveFamily::Rar50Plus => Ok(Archive::Rar50Plus(rar50::Archive::parse_with_options(
                 input, options,
             )?)),
+            _ => Err(Error::UnsupportedSignature),
         }
     }
 
@@ -348,6 +350,7 @@ impl ArchiveReader {
             ArchiveFamily::Rar50Plus => Ok(Archive::Rar50Plus(
                 rar50::Archive::parse_path_with_options(path, options)?,
             )),
+            _ => Err(Error::UnsupportedSignature),
         }
     }
 }
@@ -389,6 +392,7 @@ where
                 open(&rar50_meta(meta)?)
             })
         }
+        _ => Err(Error::UnsupportedSignature),
     }
 }
 
@@ -457,6 +461,7 @@ fn rar50_volumes(archives: &[Archive]) -> Result<Vec<rar50::Archive>> {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct ArchiveWriter {
     target: ArchiveVersion,
     features: FeatureSet,
@@ -471,6 +476,7 @@ impl ArchiveWriter {
                     features: FeatureSet::store_only(),
                 })
             }
+            _ => Err(Error::UnsupportedVersion(target)),
         }
     }
 

@@ -328,6 +328,7 @@ fn map_rar50_crypto_error(error: rars_crypto::rar50::Error) -> Error {
             feature: "RAR 5 KDF count",
         },
         rars_crypto::rar50::Error::BadPassword => Error::WrongPasswordOrCorruptData,
+        _ => Error::InvalidHeader("RAR 5 crypto error"),
     }
 }
 

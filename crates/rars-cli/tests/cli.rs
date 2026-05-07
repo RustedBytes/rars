@@ -479,7 +479,7 @@ fn prints_usage_without_command() {
 fn prints_usage_for_help_command() {
     let output = rars().arg("--help").output().unwrap();
     assert!(output.status.success(), "stderr: {}", stderr(&output));
-    assert!(stderr(&output).contains("rars info <archive>"));
+    assert!(stderr(&output).contains("rars info [--password <password>] <archive>"));
 }
 
 #[test]

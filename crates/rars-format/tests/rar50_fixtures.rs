@@ -675,12 +675,11 @@ fn rar50_writer_builder_writes_stored_archive_with_comment_and_metadata() {
         attributes: 0x20,
         host_os: 3,
     }];
+    let mut features = FeatureSet::store_only();
+    features.archive_comment = true;
     let bytes = rar50::Rar50Writer::new(rar50::WriterOptions {
         target: ArchiveVersion::Rar70,
-        features: FeatureSet {
-            archive_comment: true,
-            ..FeatureSet::store_only()
-        },
+        features,
     })
     .stored_entries(&entries)
     .archive_comment(Some(b"builder archive comment"))
@@ -1625,7 +1624,7 @@ fn repairs_rar50_inline_recovery_payload_damage() {
     let damaged_archive = Archive::parse(&damaged).unwrap();
     assert!(collect_extract(&damaged_archive).is_err());
 
-    let repaired = damaged_archive.repair_inline_recovery().unwrap();
+    let repaired = damaged_archive.repair_recovery().unwrap();
 
     assert_eq!(repaired, bytes);
     let repaired_archive = Archive::parse(&repaired).unwrap();
@@ -1730,7 +1729,7 @@ fn repairs_rar50_inline_recovery_with_damaged_recovery_chunk() {
     let damaged_archive = Archive::parse(&damaged).unwrap();
     assert!(collect_extract(&damaged_archive).is_err());
 
-    let repaired = damaged_archive.repair_inline_recovery().unwrap();
+    let repaired = damaged_archive.repair_recovery().unwrap();
 
     assert_eq!(
         repaired[..recovery_range.start],
@@ -1773,7 +1772,7 @@ fn repairs_encrypted_rar50_inline_recovery_payload_damage_with_password() {
     let damaged_archive = Archive::parse_with_password(&damaged, Some(b"password")).unwrap();
     assert!(collect_extract_with_password(&damaged_archive, Some(b"password")).is_err());
 
-    let repaired = damaged_archive.repair_inline_recovery().unwrap();
+    let repaired = damaged_archive.repair_recovery().unwrap();
 
     assert_eq!(repaired, bytes);
     let repaired_archive = Archive::parse_with_password(&repaired, Some(b"password")).unwrap();
@@ -1815,7 +1814,7 @@ fn repairs_header_encrypted_rar50_inline_recovery_payload_damage_with_password()
     let damaged_archive = Archive::parse_with_password(&damaged, Some(b"password")).unwrap();
     assert!(collect_extract_with_password(&damaged_archive, Some(b"password")).is_err());
 
-    let repaired = damaged_archive.repair_inline_recovery().unwrap();
+    let repaired = damaged_archive.repair_recovery().unwrap();
 
     assert_eq!(repaired, bytes);
     let repaired_archive = Archive::parse_with_password(&repaired, Some(b"password")).unwrap();

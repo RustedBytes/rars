@@ -41,6 +41,7 @@ struct OwnedCompressedBlock {
 }
 
 #[derive(Debug)]
+#[doc(hidden)]
 pub enum StreamDecodeError<E> {
     Decode(Error),
     Sink(E),
@@ -53,6 +54,7 @@ impl<E> From<Error> for StreamDecodeError<E> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
 pub enum DecodedChunk<'a> {
     Bytes(&'a [u8]),
     Repeated { byte: u8, len: usize },

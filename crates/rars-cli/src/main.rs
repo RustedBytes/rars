@@ -17,7 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 type CliResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 const ADD_USAGE: &str =
-    "usage: rars a [--password <password>] --format <rar14|rar15|rar20|rar29|rar30|rar40|rar50|rar70> [--store] [--solid] [--encrypt-headers] [--comment <text>] [--archive-name <name>] [--file-comment <text>] [--recovery-percent <1..100>] [--volume-size <bytes>] [--ppmd|--auto-filter|--delta-filter <channels>|--e8-filter|--e8e9-filter|--itanium-filter|--rgb-filter <width>|--audio-filter <channels>|--arm-filter] <archive> <files...>";
+    "usage: rars a [--password <password>] --format <rar14|rar15|rar20|rar29|rar30|rar40|rar50|rar70> [--store] [--solid] [--encrypt-headers] [--quick-open] [--comment <text>] [--archive-name <name>] [--file-comment <text>] [--recovery-percent <1..100>] [--volume-size <bytes>] [--ppmd|--auto-filter|--delta-filter <channels>|--e8-filter|--e8e9-filter|--itanium-filter|--rgb-filter <width>|--audio-filter <channels>|--arm-filter] <archive> <files...>";
 const DOS_DIRECTORY_ATTR: u8 = 0x10;
 const RAR50_STRUCTURAL_RR_WARNING: &str =
     "warning: RAR 5 recovery writer emits validation-ready RR metadata; WinRAR recovery layout matching is not expected";
@@ -1574,7 +1574,7 @@ fn read_inputs(paths: &[String], password: Option<&[u8]>) -> CliResult<Vec<Owned
 fn usage() {
     eprintln!(
         "usage:
-  rars info <archive>...
+  rars info [--password <password>] <archive>...
   rars test [--password <password>] <archive> [parts...]
   rars x [--password <password>] <archive> [parts...] <outdir>
   rars repair [--password <password>] <archive> <repaired-archive>

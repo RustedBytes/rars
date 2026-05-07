@@ -17,7 +17,50 @@ serialization.
 
 ## Active Objectives
 
-### 1. Compression Quality
+### 1. Pre-release Hardening
+
+- Fix malformed RAR 1.5-4.x `FILE_HEAD` salt parsing so optional salt bytes
+  are bounded by `head_end`, with a regression test for `FHD_SALT|FHD_EXTTIME`
+  and no salt room.
+- Bound RAR29 VM control-stream resource use: cap VM code sizes before
+  allocation, cap retained VM program/filter records, and add hostile-control
+  stream regression tests.
+- Replace the RAR5 inline-recovery raw scanner's repeated `windows(4)` rescans
+  with a linear marker search, and pre-screen the CLI raw-repair fallback on the
+  RAR5 signature before scanning arbitrary input.
+- Make RAR5 large-output streaming handle filter records, or fall back to a
+  documented bounded buffered path instead of rejecting filtered members above
+  the streaming threshold.
+- Audit extraction paths that still buffer decoded output despite the streaming
+  API: sub-128 MiB RAR5 compressed members, RAR 1.5-4.x compressed members,
+  encrypted entries, and compressed split-volume reassembly.
+- Remove remaining attacker-controlled `unpacked_size as usize` casts in RAR5
+  extraction and split reassembly; use checked conversion consistently.
+- Fix RARVM `SAR` when byte-mode shift count reaches the operand width, and add
+  a byte-mode boundary regression.
+- Add Kraft/canonical-table validation to Huffman builders, and port the
+  indexed canonical decode table used by RAR5 back to RAR20/RAR29.
+- Use constant-time comparisons for RAR5 password checks and BLAKE2sp/HMAC hash
+  verification.
+- Use a bitset or sorted damaged-shard cursor in RAR5 recovery reconstruction
+  instead of repeated linear `damaged.contains` checks.
+- Extend CLI path traversal tests beyond `../evil.txt` to absolute paths,
+  drive-prefix paths, nested parent traversal, empty/current-dir names, UNC-like
+  names, and embedded NUL names.
+
+### 2. CLI Password And Repair UX
+
+- Add safer password input modes: tty prompt when needed, `--password-file`, and
+  `--password -` for stdin. Keep `--password` for tests and explicit scripting,
+  but document the process-list leak.
+- Add a streaming recovery-repair API for large archives instead of returning
+  only a full repaired `Vec<u8>`.
+- Teach the CLI to recognise or warn about RAR5 redirect/symlink service
+  entries instead of silently treating every extracted member as a regular file.
+- Fix RAR5 volume output naming so an input like `archive.part1.rar` does not
+  become `archive.part1.part1.rar`.
+
+### 3. Compression Quality
 
 - Improve RAR29/RAR30/RAR40 policy quality beyond the current default auto
   selector. Remaining wins are likely filter-block boundary tuning, match-finder
@@ -26,24 +69,66 @@ serialization.
   bounded hash-chain baseline. RAR5 auto mode now considers ranged x86 filters;
   remaining useful work is audio/filter placement and match selection.
 
-### 2. RAR 1.5-4.x Reader And Recovery
+### 4. RAR 1.5-4.x Reader And Recovery
 
 - Add adversarial PPMd fixtures as corpus bugs appear.
 - Keep the libarchive mixed encrypted fixture as a partial oracle only for the
   RAR 3.93-validated `b.txt` member.
+- Rename or reshape authenticity-verification APIs so structural AV presence is
+  not confused with cryptographic verification.
 
-### 3. RAR 5.0/7.x Reader And Recovery
+### 5. RAR 5.0/7.x Reader And Recovery
 
 - Keep the external Unpack70 large-dictionary oracle reproducible with
   `reference-rar70-large-dict.sh`; the generated sparse fixture stays outside
   the repository.
+- Keep external-oracle coverage for RAR5 filter records: real RAR-created E8,
+  E8E9, Delta, and ARM fixtures for reading, plus reference checks for
+  rars-written filtered archives.
 
-### 4. Hardening And Coverage
+### 6. API And Error Model
 
-- Consider adding fuzz targets for `Archive::parse`, `Unpack29::decode_member`,
-  and the PPMd decoder.
+- Pick one `extract_to` shape across the facade and per-version modules.
+- Widen facade-level extracted file attributes to `u64` so RAR5 attributes do
+  not need a synthetic overflow error.
+- Rework `rars-format::Error::Io` so callers can inspect at least
+  `io::ErrorKind`, and consider preserving structured codec/recovery/crypto
+  errors instead of flattening them all to `InvalidHeader`.
+- Decide whether the umbrella `ArchiveWriter` should remain public or whether
+  callers should use per-version writer builders directly.
+- Apply the RAR5 builder pattern to RAR 1.5-4.x writing if another independent
+  option axis lands there.
+- Refactor `cmd_add` into a parsed write plan plus one dispatcher, then split
+  `rars-cli/src/main.rs` into command modules when touching the CLI next.
 
-### 5. Fixtures And Oracles
+### 7. Crypto And Secret Handling
+
+- Replace straight RAR5 SHA-256/HMAC code with audited `sha2`/`hmac` crates
+  unless a format-specific hook is identified, and add WinRAR-derived KDF known
+  answer tests.
+- Add direct equivalence tests for the RAR3/RAR4 AES KDF fast and slow paths, or
+  remove the fast path.
+- Add `zeroize` for passwords, derived keys, AES state, and temporary KDF
+  buffers where ownership makes that practical.
+- Tighten low-level crypto APIs that expose block primitives unnecessarily
+  (for example RAR3 AES block encrypt/decrypt should be private or take
+  `&mut [u8; 16]`).
+
+### 8. Hardening And Coverage
+
+- Add fuzz targets for `Archive::parse`, `Unpack29::decode_member`, the PPMd
+  decoder, and RARVM program parsing/execution. Seed them with the fixture
+  corpus.
+- Add rustdoc for the public `rars`, `rars-format`, and CLI-facing API before
+  publishing.
+- Confirm the workspace `repository` field before publishing.
+- Add comments/provenance for transliterated Unpack15 state names and embedded
+  RAR3 standard-filter bytecode blobs.
+- Split `rars-recovery/src/lib.rs` into `rar3.rs` and `rar5.rs` modules.
+- Add a note or explicit zero handling around `Gf16` multiplication so its
+  zero-result behaviour does not depend silently on over-allocated tables.
+
+### 9. Fixtures And Oracles
 
 - Keep useful spec-repo fixtures copied into crate tests when they validate
   stable behaviour.
@@ -58,6 +143,4 @@ serialization.
 
 - Full cryptographic AV verification for RAR 1.4/2.x.
 - AV writing.
-- CLI module split into command-specific files once the next CLI feature needs
-  non-trivial edits.
 - SFX writer/stub generation.

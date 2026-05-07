@@ -103,6 +103,7 @@ pub struct EncryptedArchiveCommentEntry<'a> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FilterPolicy {
     None,
     AutoSize,
@@ -110,6 +111,7 @@ pub enum FilterPolicy {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Rar50Writer<'a> {
     options: WriterOptions,
     members: Vec<Rar50WriteMember<'a>>,
@@ -122,6 +124,7 @@ pub struct Rar50Writer<'a> {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Rar50VolumeWriter<'a> {
     options: WriterOptions,
     entries: Option<Rar50VolumeEntries<'a>>,
@@ -2737,6 +2740,7 @@ fn map_rar50_crypto_error(error: rars_crypto::rar50::Error) -> Error {
             feature: "RAR 5 KDF count",
         },
         rars_crypto::rar50::Error::BadPassword => Error::WrongPasswordOrCorruptData,
+        _ => Error::InvalidHeader("RAR 5 crypto error"),
     }
 }
 

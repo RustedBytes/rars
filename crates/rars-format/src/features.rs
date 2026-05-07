@@ -2,6 +2,7 @@ use crate::error::{Error, Result};
 use crate::version::ArchiveVersion;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FeatureSet {
     pub solid: bool,
     pub file_encryption: bool,

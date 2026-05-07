@@ -147,6 +147,7 @@ impl From<rars_codec::Error> for Error {
         match error {
             rars_codec::Error::InvalidData(message) => Self::InvalidHeader(message),
             rars_codec::Error::NeedMoreInput => Self::InvalidHeader("codec input is truncated"),
+            _ => Self::InvalidHeader("codec error"),
         }
     }
 }
@@ -178,6 +179,7 @@ impl From<rars_recovery::rar5::Error> for Error {
             rars_recovery::rar5::Error::SingularElement => {
                 Self::InvalidHeader("RAR 5 recovery matrix is singular")
             }
+            _ => Self::InvalidHeader("RAR 5 recovery error"),
         }
     }
 }
@@ -197,6 +199,7 @@ impl From<rars_recovery::rar3::Error> for Error {
             rars_recovery::rar3::Error::DecodeFailed => {
                 Self::InvalidHeader("RAR 3 recovery decode failed")
             }
+            _ => Self::InvalidHeader("RAR 3 recovery error"),
         }
     }
 }

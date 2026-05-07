@@ -9,6 +9,7 @@ pub mod rarvm;
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Error {
     InvalidData(&'static str),
     NeedMoreInput,

@@ -5,6 +5,7 @@ pub const RAR15_SIGNATURE: &[u8; 7] = b"Rar!\x1a\x07\x00";
 pub const RAR50_SIGNATURE: &[u8; 8] = b"Rar!\x1a\x07\x01\x00";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ArchiveSignature {
     pub family: ArchiveFamily,
     pub offset: usize,

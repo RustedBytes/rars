@@ -20,6 +20,29 @@ Some advanced compatibility targets remain active research areas: compression
 policy parity with WinRAR, full historical AV verification, SFX writer/stub
 generation, and external oracle maintenance.
 
+## CLI
+
+Inspect, test, and extract archives:
+
+```sh
+rars info archive.rar
+rars test archive.rar
+rars x archive.rar out/
+```
+
+Create archives by selecting the target RAR generation explicitly:
+
+```sh
+rars a --format rar29 archive.rar files...
+rars a --format rar50 --solid --auto-filter archive.rar files...
+rars a --format rar70 --store --volume-size 10m archive.part1.rar files...
+```
+
+The writer supports stored and compressed members, split volumes, passwords,
+header encryption where implemented, comments, RARVM filters, RAR5 quick-open
+records, and supported recovery records. Run `rars --help` for the exact option
+set.
+
 ## Development
 
 Run the test suite:

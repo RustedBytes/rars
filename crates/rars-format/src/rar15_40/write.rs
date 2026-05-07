@@ -100,6 +100,7 @@ pub fn write_compressed_archive_with_comment(
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum FilterPolicy {
     Auto,
     Explicit(FilterSpec),

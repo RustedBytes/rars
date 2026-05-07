@@ -10,6 +10,7 @@ pub mod rar3 {
     const PRIMITIVE_POLYNOMIAL: u16 = 0x11d;
 
     #[derive(Debug, Clone, PartialEq, Eq)]
+    #[non_exhaustive]
     pub enum Error {
         InvalidParitySize,
         InvalidCodewordSize,
@@ -396,6 +397,7 @@ pub mod rar5 {
     const RAR5_RECOVERY_CHUNK_FIXED_HEADER_SIZE: u64 = 0x48;
 
     #[derive(Debug, Clone, PartialEq, Eq)]
+    #[non_exhaustive]
     pub enum Error {
         BadRecoveryChunk,
         OddShardSize,
@@ -410,6 +412,7 @@ pub mod rar5 {
     pub type Result<T> = std::result::Result<T, Error>;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
     pub struct InlineRecoveryPlan {
         pub data_shards: u64,
         pub recovery_shards: u64,
@@ -963,6 +966,7 @@ pub mod rar5 {
     }
 
     #[derive(Debug, Clone)]
+    #[non_exhaustive]
     pub struct Gf16 {
         exp: Box<[u16]>,
         log: Box<[u32]>,

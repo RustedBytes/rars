@@ -1,4 +1,5 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ArchiveFamily {
     Rar13,
     Rar15To40,
@@ -6,6 +7,7 @@ pub enum ArchiveFamily {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ArchiveVersion {
     Rar13,
     Rar14,
