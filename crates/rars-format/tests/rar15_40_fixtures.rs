@@ -4257,6 +4257,32 @@ fn parses_rar300_newsub_recovery_record() {
 }
 
 #[test]
+fn parses_compressed_rar300_newsub_recovery_record_fixture() {
+    let bytes = std::fs::read(fixture(
+        "rar300/with_compressed_recovery_header_synthetic.rar",
+    ))
+    .unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    assert!(archive.main.has_recovery_record());
+
+    let recovery = archive
+        .new_subs()
+        .find(|sub| sub.kind == NewSubKind::RecoveryRecord)
+        .unwrap();
+    assert_eq!(recovery.file.name, b"RR");
+    assert_eq!(recovery.file.method, 0x33);
+
+    let err = archive.repair_protect_head().unwrap_err();
+    assert!(matches!(
+        err,
+        Error::UnsupportedFeature {
+            version: ArchiveVersion::Rar30,
+            feature: "compressed RAR 3.x NEWSUB recovery record",
+        }
+    ));
+}
+
+#[test]
 fn repairs_rar250_protect_head_single_damaged_sector() {
     let bytes = std::fs::read(fixture("rar250_protect_head_rr5.rar")).unwrap();
     let clean = Archive::parse(&bytes).unwrap();
@@ -4279,6 +4305,27 @@ fn repairs_rar250_protect_head_single_damaged_sector() {
 }
 
 #[test]
+fn protect_head_does_not_repair_trailing_partial_sector_before_record() {
+    let bytes = std::fs::read(fixture("rar250_protect_head_rr5.rar")).unwrap();
+    let clean = Archive::parse(&bytes).unwrap();
+    let protect: &ProtectHeader = clean.protect_records().next().unwrap();
+    assert_ne!(protect.block.offset % 512, 0);
+
+    let mut damaged = bytes.clone();
+    let damage_offset = protect.block.offset - 16;
+    damaged[damage_offset..damage_offset + 8].fill(0xa5);
+
+    let damaged_archive = Archive::parse(&damaged).unwrap();
+    assert!(damaged_archive.extract().is_err());
+
+    let repaired = damaged_archive.repair_protect_head().unwrap();
+
+    assert_eq!(repaired, damaged);
+    assert_ne!(repaired, bytes);
+    assert!(Archive::parse(&repaired).unwrap().extract().is_err());
+}
+
+#[test]
 fn repairs_rar300_newsub_recovery_single_damaged_sector() {
     let bytes = std::fs::read(fixture("rar300/with_recovery_rar300.rar")).unwrap();
     let mut damaged = bytes.clone();
@@ -4292,6 +4339,32 @@ fn repairs_rar300_newsub_recovery_single_damaged_sector() {
     assert_eq!(repaired, bytes);
     let repaired_archive = Archive::parse(&repaired).unwrap();
     let extracted = repaired_archive.extract().unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].name, b"bigtext_64k.bin");
+    assert_eq!(crc32(&extracted[0].data), 0xddc95682);
+}
+
+#[test]
+fn newsub_recovery_repairs_trailing_partial_sector_before_record() {
+    let bytes = std::fs::read(fixture("rar300/with_recovery_rar300.rar")).unwrap();
+    let clean = Archive::parse(&bytes).unwrap();
+    let recovery = clean
+        .new_subs()
+        .find(|sub| sub.kind == NewSubKind::RecoveryRecord)
+        .unwrap();
+    assert_ne!(recovery.file.block.offset % 512, 0);
+
+    let mut damaged = bytes.clone();
+    let damage_offset = recovery.file.block.offset - 16;
+    damaged[damage_offset..damage_offset + 8].fill(0xa5);
+
+    let damaged_archive = Archive::parse(&damaged).unwrap();
+    assert!(damaged_archive.extract().is_err());
+
+    let repaired = damaged_archive.repair_protect_head().unwrap();
+
+    assert_eq!(repaired, bytes);
+    let extracted = Archive::parse(&repaired).unwrap().extract().unwrap();
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"bigtext_64k.bin");
     assert_eq!(crc32(&extracted[0].data), 0xddc95682);
