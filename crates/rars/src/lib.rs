@@ -2808,6 +2808,25 @@ mod tests {
     }
 
     #[test]
+    fn archive_facade_repairs_rar3_newsub_recovery_as_full_archive_bytes() {
+        let bytes = std::fs::read(rar15_40_fixture("rar300/with_recovery_rar300.rar")).unwrap();
+        let mut damaged = bytes.clone();
+        damaged[512 + 16..512 + 80].fill(0xa5);
+        let damaged_archive = ArchiveReader::read(&damaged).unwrap();
+        assert!(collect_extract(&damaged_archive, None).is_err());
+
+        let mut repaired = Vec::new();
+        damaged_archive.repair_recovery_to(&mut repaired).unwrap();
+
+        assert_eq!(repaired, bytes);
+        let repaired_archive = ArchiveReader::read(&repaired).unwrap();
+        assert_eq!(
+            collect_extract(&repaired_archive, None).unwrap()[0].name,
+            b"bigtext_64k.bin"
+        );
+    }
+
+    #[test]
     fn direct_writer_creates_rar50_compressed_archive_with_recovery_service() {
         let mut features = FeatureSet::store_only();
         features.recovery_record = true;
