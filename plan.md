@@ -24,7 +24,6 @@
 
 ## Hardening
 
-- Add streaming decryptors for encrypted payload paths.
 - Reduce remaining whole-member codec buffers for encrypted RAR15/RAR20/RAR29
   entries and compressed split-volume decrypt-before-chain paths.
 - Add fuzz targets for `Archive::parse`, `Unpack29::decode_member`, PPMd decode,

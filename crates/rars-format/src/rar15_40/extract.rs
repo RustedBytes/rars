@@ -44,15 +44,22 @@ impl CodecState {
         match self {
             Self::Unpack15(decoder) => {
                 if file.is_encrypted() {
+                    let mut packed = file
+                        .packed_reader_for_decode(archive, password)
+                        .map_err(|error| file.map_encrypted_payload_error(password, error))?;
+                    let mut out = Vec::new();
                     decoder
-                        .decode_member(
-                            &file.packed_data_for_decode(archive, password)?,
+                        .decode_member_from_reader(
+                            &mut packed,
                             usize::try_from(file.unp_size).map_err(|_| {
                                 Error::InvalidHeader("RAR 1.5 unpacked size overflows usize")
                             })?,
                             solid,
+                            &mut out,
                         )
+                        .map(|_| out)
                         .map_err(Into::into)
+                        .map_err(|error| file.map_encrypted_payload_error(password, error))
                 } else {
                     file.unpacked_data_with_unpack15(archive, decoder, solid)
                 }
@@ -60,14 +67,21 @@ impl CodecState {
             Self::Unpack20(decoder) => file.unpacked_data_with_unpack20(archive, decoder, password),
             Self::Unpack29(decoder) => {
                 if file.is_encrypted() {
+                    let mut packed = file
+                        .packed_reader_for_decode(archive, password)
+                        .map_err(|error| file.map_encrypted_payload_error(password, error))?;
+                    let mut out = Vec::new();
                     decoder
-                        .decode_member(
-                            &file.packed_data_for_decode(archive, password)?,
+                        .decode_member_from_reader(
+                            &mut packed,
                             usize::try_from(file.unp_size).map_err(|_| {
                                 Error::InvalidHeader("RAR 2.9 unpacked size overflows usize")
                             })?,
+                            &mut out,
                         )
+                        .map(|_| out)
                         .map_err(Into::into)
+                        .map_err(|error| file.map_encrypted_payload_error(password, error))
                 } else {
                     file.unpacked_data_with_rar29(archive, decoder)
                 }
@@ -95,16 +109,19 @@ impl CodecState {
                         inner: out,
                         crc: &mut crc,
                     };
-                    let data = decoder
-                        .decode_member(
-                            &file.packed_data_for_decode(archive, password)?,
+                    let mut packed = file
+                        .packed_reader_for_decode(archive, password)
+                        .map_err(|error| file.map_encrypted_payload_error(password, error))?;
+                    decoder
+                        .decode_member_from_reader(
+                            &mut packed,
                             usize::try_from(file.unp_size).map_err(|_| {
                                 Error::InvalidHeader("RAR 1.5 unpacked size overflows usize")
                             })?,
+                            &mut crc_writer,
                         )
                         .map_err(Error::from)
                         .map_err(|error| file.map_encrypted_payload_error(password, error))?;
-                    crc_writer.write_all(&data)?;
                     let actual = crc.finish();
                     file.crc_result(actual, password)
                 } else {
@@ -509,7 +526,7 @@ impl SplitCipher {
     }
 }
 
-struct DecryptingReader<R> {
+pub(super) struct DecryptingReader<R> {
     inner: R,
     cipher: SplitCipher,
     encrypted_block: Vec<u8>,
@@ -518,7 +535,12 @@ struct DecryptingReader<R> {
 }
 
 impl<R: Read> DecryptingReader<R> {
-    fn new(inner: R, unp_ver: u8, password: &[u8], salt: Option<[u8; 8]>) -> Result<Self> {
+    pub(super) fn new(
+        inner: R,
+        unp_ver: u8,
+        password: &[u8],
+        salt: Option<[u8; 8]>,
+    ) -> Result<Self> {
         Ok(Self {
             inner,
             cipher: SplitCipher::new(unp_ver, password, salt)?,
@@ -579,7 +601,7 @@ impl<R: Read> DecryptingReader<R> {
         } else if self.eof && !self.encrypted_block.is_empty() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "RAR encrypted split payload is not block aligned",
+                "RAR encrypted payload is not block aligned",
             ));
         }
         Ok(())
@@ -609,6 +631,7 @@ mod tests {
         FHD_SPLIT_AFTER, FHD_SPLIT_BEFORE,
     };
     use super::*;
+    use std::io::Cursor;
     use std::sync::Arc;
 
     fn block(flags: u16) -> BlockHeader {
@@ -639,6 +662,53 @@ mod tests {
             ext_time: Vec::new(),
             packed_range: 0..0,
         }
+    }
+
+    #[test]
+    fn decrypting_reader_streams_rar15_payload() {
+        let plain = b"RAR 1.5 encrypted payload read in pieces";
+        let mut encrypted = plain.to_vec();
+        Rar15Cipher::new(b"pw").crypt_in_place(&mut encrypted);
+        let mut reader = DecryptingReader::new(Cursor::new(encrypted), 15, b"pw", None).unwrap();
+        let mut out = Vec::new();
+        let mut buf = [0u8; 3];
+
+        loop {
+            let count = reader.read(&mut buf).unwrap();
+            if count == 0 {
+                break;
+            }
+            out.extend_from_slice(&buf[..count]);
+        }
+
+        assert_eq!(out, plain);
+    }
+
+    #[test]
+    fn decrypting_reader_streams_rar20_blocks() {
+        let plain = *b"0123456789abcdefRAR2 block two!!";
+        let mut encrypted = plain;
+        Rar20Cipher::new(b"pw")
+            .encrypt_in_place(&mut encrypted)
+            .unwrap();
+        let mut reader = DecryptingReader::new(Cursor::new(encrypted), 20, b"pw", None).unwrap();
+        let mut out = Vec::new();
+        reader.read_to_end(&mut out).unwrap();
+
+        assert_eq!(out, plain);
+    }
+
+    #[test]
+    fn decrypting_reader_streams_rar30_blocks() {
+        let salt = Some([7u8; 8]);
+        let plain = *b"0123456789abcdefRAR3 block two!!";
+        let mut encrypted = plain;
+        Rar30Cipher::new(b"pw", salt).encrypt_in_place(&mut encrypted);
+        let mut reader = DecryptingReader::new(Cursor::new(encrypted), 29, b"pw", salt).unwrap();
+        let mut out = Vec::new();
+        reader.read_to_end(&mut out).unwrap();
+
+        assert_eq!(out, plain);
     }
 
     #[test]

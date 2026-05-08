@@ -55,23 +55,33 @@ impl FileHeader {
         archive: &Archive,
         password: Option<&[u8]>,
     ) -> Result<(Vec<u8>, Option<Rar50Keys>)> {
-        let mut packed = self.packed_data(archive)?;
+        let (mut reader, keys) = self.packed_reader_with_password(archive, password)?;
+        let mut packed = Vec::new();
+        reader.read_to_end(&mut packed)?;
+        Ok((packed, keys))
+    }
+
+    fn packed_reader_with_password<'a>(
+        &self,
+        archive: &'a Archive,
+        password: Option<&[u8]>,
+    ) -> Result<(Box<dyn Read + 'a>, Option<Rar50Keys>)> {
+        let reader = archive.range_reader(self.block.data_range.clone())?;
         if !self.encrypted {
-            return Ok((packed, None));
+            return Ok((reader, None));
         }
-        if packed.len() % 16 != 0 {
+        if !self.packed_size().is_multiple_of(16) {
             return Err(Error::InvalidHeader(
                 "RAR 5 encrypted file payload is not block aligned",
             ));
         }
-
         let keys = self
             .crypto_with_password(password)?
             .ok_or(Error::InvalidHeader(
                 "RAR 5 encrypted file is missing encryption keys",
             ))?;
-        Rar50Cipher::new(keys.key, self.encryption_iv()?).decrypt_in_place(&mut packed);
-        Ok((packed, Some(keys)))
+        let reader = Rar50DecryptingReader::new(reader, keys.key, self.encryption_iv()?);
+        Ok((Box::new(reader), Some(keys)))
     }
 
     fn verify_integrity_with_keys(&self, data: &[u8], keys: Option<&Rar50Keys>) -> Result<()> {
@@ -240,9 +250,9 @@ impl FileHeader {
             .map_err(Error::from)
     }
 
-    fn stream_packed_with_decoder(
+    fn stream_packed_with_decoder<R: Read>(
         &self,
-        packed: &[u8],
+        packed: &mut R,
         keys: Option<&Rar50Keys>,
         decoder: &mut Unpack50Decoder,
         writer: &mut dyn Write,
@@ -259,12 +269,11 @@ impl FileHeader {
         })?;
         let output_size = usize::try_from(self.unpacked_size)
             .map_err(|_| Error::InvalidHeader("RAR 5 unpacked size overflows host address size"))?;
-        let mut input = std::io::Cursor::new(packed);
         let mut crc = StreamingCrc32::new();
         let mut hash = streaming_hash_verifier(self)?;
         decoder
             .decode_member_from_reader_with_dictionary_to_sink(
-                &mut input,
+                packed,
                 info.algorithm_version,
                 output_size,
                 dictionary_size,
@@ -287,6 +296,44 @@ impl FileHeader {
                 StreamDecodeError::Sink(error) => Error::from(error),
             })?;
         self.verify_streaming_integrity(crc, hash, keys)
+    }
+
+    fn write_stored_to(
+        &self,
+        archive: &Archive,
+        password: Option<&[u8]>,
+        writer: &mut dyn Write,
+    ) -> Result<()> {
+        let (mut reader, keys) = self.packed_reader_with_password(archive, password)?;
+        let mut crc = StreamingCrc32::new();
+        let mut hash = streaming_hash_verifier(self)?;
+        let mut written = 0u64;
+        let mut buf = [0u8; 64 * 1024];
+
+        loop {
+            let count = reader.read(&mut buf)?;
+            if count == 0 {
+                break;
+            }
+            let remaining =
+                usize::try_from(self.unpacked_size.saturating_sub(written)).unwrap_or(usize::MAX);
+            let chunk = &buf[..count.min(remaining)];
+            written = written
+                .checked_add(chunk.len() as u64)
+                .ok_or(Error::InvalidHeader("RAR 5 stored size overflows"))?;
+            crc.update(chunk);
+            if let Some((_, hasher)) = &mut hash {
+                hasher.update(chunk);
+            }
+            writer.write_all(chunk)?;
+        }
+
+        if written != self.unpacked_size {
+            return Err(Error::InvalidHeader(
+                "RAR 5 stored file has mismatched packed and unpacked sizes",
+            ));
+        }
+        self.verify_streaming_integrity(crc, hash, keys.as_ref())
     }
 
     fn entry_error(&self, operation: &'static str, error: Error) -> Error {
@@ -377,6 +424,11 @@ impl<'a> DecoderSession<'a> {
         file: &FileHeader,
         writer: &mut dyn Write,
     ) -> Result<()> {
+        if file.is_stored() {
+            return file
+                .write_stored_to(archive, self.password, writer)
+                .map_err(|error| file.entry_error("decoding", error));
+        }
         if file.should_stream_decode() {
             return self.stream_file_to(archive, file, writer);
         }
@@ -401,27 +453,34 @@ impl<'a> DecoderSession<'a> {
             return self.write_buffered_large_member(archive, file, writer);
         }
 
-        let (packed, keys) = file
-            .packed_data_with_password(archive, self.password)
-            .map_err(|error| file.entry_error("reading", error))?;
-
         let mut preflight_decoder = self.decoder.clone();
+        let (mut packed, keys) = file
+            .packed_reader_with_password(archive, self.password)
+            .map_err(|error| file.entry_error("reading", error))?;
         let mut sink = std::io::sink();
-        file.stream_packed_with_decoder(&packed, keys.as_ref(), &mut preflight_decoder, &mut sink)
-            .map_err(|error| {
-                if is_stream_filter_error(&error) {
-                    Error::UnsupportedFeature {
-                        version: crate::version::ArchiveVersion::Rar50,
-                        feature: "RAR 5 filtered compressed member above buffered fallback limit",
-                    }
-                } else {
-                    error
+        file.stream_packed_with_decoder(
+            &mut packed,
+            keys.as_ref(),
+            &mut preflight_decoder,
+            &mut sink,
+        )
+        .map_err(|error| {
+            if is_stream_filter_error(&error) {
+                Error::UnsupportedFeature {
+                    version: crate::version::ArchiveVersion::Rar50,
+                    feature: "RAR 5 filtered compressed member above buffered fallback limit",
                 }
-            })
-            .map_err(|error| file.entry_error("decoding", error))?;
+            } else {
+                error
+            }
+        })
+        .map_err(|error| file.entry_error("decoding", error))?;
 
         let mut streaming_decoder = self.decoder.clone();
-        file.stream_packed_with_decoder(&packed, keys.as_ref(), &mut streaming_decoder, writer)
+        let (mut packed, keys) = file
+            .packed_reader_with_password(archive, self.password)
+            .map_err(|error| file.entry_error("reading", error))?;
+        file.stream_packed_with_decoder(&mut packed, keys.as_ref(), &mut streaming_decoder, writer)
             .map_err(|error| file.entry_error("decoding", error))?;
         self.decoder = streaming_decoder;
         Ok(())
@@ -1001,6 +1060,7 @@ mod tests {
     use super::*;
     use crate::rar15_40::crc32;
     use std::cell::RefCell;
+    use std::io::Cursor;
     use std::rc::Rc;
     use std::sync::Arc;
 
@@ -1022,6 +1082,28 @@ mod tests {
             encryption: None,
             crypto: None,
         }
+    }
+
+    #[test]
+    fn decrypting_reader_streams_rar50_blocks() {
+        let key = [3u8; 32];
+        let iv = [4u8; 16];
+        let plain = *b"0123456789abcdefRAR5 block two!!";
+        let mut encrypted = plain;
+        Rar50Cipher::new(key, iv).encrypt_in_place(&mut encrypted);
+        let mut reader = Rar50DecryptingReader::new(Cursor::new(encrypted), key, iv);
+        let mut out = Vec::new();
+        let mut buf = [0u8; 5];
+
+        loop {
+            let count = reader.read(&mut buf).unwrap();
+            if count == 0 {
+                break;
+            }
+            out.extend_from_slice(&buf[..count]);
+        }
+
+        assert_eq!(out, plain);
     }
 
     #[test]
