@@ -3424,7 +3424,7 @@ fn extract_to_reports_rar50_entry_context_on_write_failure() {
             name,
             operation: "writing",
             source
-        }) if name == b"hello.txt" && matches!(*source, Error::Io { .. })
+        }) if name == b"hello.txt" && matches!(*source, Error::Io(_))
     ));
 }
 

@@ -227,7 +227,7 @@ impl Archive {
                 archive.extract_to(read_options(password), |meta| open(&rar15_40_meta(meta)))
             }
             Self::Rar50Plus(archive) => {
-                archive.extract_to(read_options(password), |meta| open(&rar50_meta(meta)?))
+                archive.extract_to(read_options(password), |meta| open(&rar50_meta(meta)))
             }
         }
     }
@@ -387,6 +387,11 @@ impl ArchiveReader {
         Self::read_with_options(input, ArchiveReadOptions::default())
     }
 
+    /// Parses an archive from an owned memory buffer with default read options.
+    pub fn read_owned(input: Vec<u8>) -> Result<Archive> {
+        Self::read_owned_with_options(input, ArchiveReadOptions::default())
+    }
+
     /// Parses an archive from memory using explicit read options.
     pub fn read_with_options(input: &[u8], options: ArchiveReadOptions<'_>) -> Result<Archive> {
         let signature = find_archive_start(input, 128 * 1024).ok_or(Error::UnsupportedSignature)?;
@@ -398,6 +403,25 @@ impl ArchiveReader {
             ArchiveFamily::Rar50Plus => Ok(Archive::Rar50Plus(rar50::Archive::parse_with_options(
                 input, options,
             )?)),
+            _ => Err(Error::UnsupportedSignature),
+        }
+    }
+
+    /// Parses an archive from an owned memory buffer using explicit read options.
+    pub fn read_owned_with_options(
+        input: Vec<u8>,
+        options: ArchiveReadOptions<'_>,
+    ) -> Result<Archive> {
+        let signature =
+            find_archive_start(&input, 128 * 1024).ok_or(Error::UnsupportedSignature)?;
+        match signature.family {
+            ArchiveFamily::Rar13 => Ok(Archive::Rar13(rar13::Archive::parse_owned(input)?)),
+            ArchiveFamily::Rar15To40 => Ok(Archive::Rar15To40(
+                rar15_40::Archive::parse_owned_with_options(input, options)?,
+            )),
+            ArchiveFamily::Rar50Plus => Ok(Archive::Rar50Plus(
+                rar50::Archive::parse_owned_with_options(input, options)?,
+            )),
             _ => Err(Error::UnsupportedSignature),
         }
     }
@@ -465,7 +489,7 @@ where
         ArchiveFamily::Rar50Plus => {
             let typed = rar50_volumes(archives)?;
             rar50::extract_volumes_to(&typed, read_options(password), |meta| {
-                open(&rar50_meta(meta)?)
+                open(&rar50_meta(meta))
             })
         }
         _ => Err(Error::UnsupportedSignature),
@@ -490,13 +514,13 @@ fn rar15_40_meta(meta: &rar15_40::ExtractedEntryMeta) -> ExtractedEntryMeta {
     }
 }
 
-fn rar50_meta(meta: &rar50::ExtractedEntryMeta) -> Result<ExtractedEntryMeta> {
-    Ok(ExtractedEntryMeta {
+fn rar50_meta(meta: &rar50::ExtractedEntryMeta) -> ExtractedEntryMeta {
+    ExtractedEntryMeta {
         name: meta.name.clone(),
         file_time: meta.file_time,
         file_attr: meta.attr,
         is_directory: meta.is_directory,
-    })
+    }
 }
 
 fn rar13_volumes(archives: &[Archive]) -> Result<Vec<rar13::Archive>> {
@@ -771,6 +795,65 @@ mod tests {
         let extracted = collect_extract(&archive, None).unwrap();
         assert_eq!(extracted.len(), 1);
         assert_eq!(extracted[0].data, b"hello via facade\n");
+    }
+
+    #[test]
+    fn archive_reader_accepts_owned_buffers_without_changing_dispatch() {
+        let rar13_bytes = rar13::write_stored_archive(
+            &[rar13::StoredEntry {
+                name: b"old.txt",
+                data: b"owned rar13\n",
+                file_time: 0,
+                file_attr: 0x20,
+                password: None,
+                file_comment: None,
+            }],
+            rar13_options(ArchiveVersion::Rar14),
+        )
+        .unwrap();
+        let rar13_archive = ArchiveReader::read_owned(rar13_bytes).unwrap();
+        assert_eq!(rar13_archive.family(), ArchiveFamily::Rar13);
+        assert_eq!(
+            collect_extract(&rar13_archive, None).unwrap()[0].data,
+            b"owned rar13\n"
+        );
+
+        let rar15_bytes = rar15_40::write_stored_archive(
+            &[rar15_40::StoredEntry {
+                name: b"mid.txt",
+                data: b"owned rar15\n",
+                file_time: 0,
+                file_attr: 0x20,
+                host_os: 3,
+                password: None,
+                file_comment: None,
+            }],
+            rar15_options(ArchiveVersion::Rar15),
+        )
+        .unwrap();
+        let rar15_archive = ArchiveReader::read_owned(rar15_bytes).unwrap();
+        assert_eq!(rar15_archive.family(), ArchiveFamily::Rar15To40);
+        assert_eq!(
+            collect_extract(&rar15_archive, None).unwrap()[0].data,
+            b"owned rar15\n"
+        );
+
+        let rar50_bytes = rar50::Rar50Writer::new(rar50_options(ArchiveVersion::Rar50))
+            .stored_entries(&[rar50::StoredEntry {
+                name: b"new.txt",
+                data: b"owned rar50\n",
+                mtime: None,
+                attributes: 0x20,
+                host_os: 3,
+            }])
+            .finish()
+            .unwrap();
+        let rar50_archive = ArchiveReader::read_owned(rar50_bytes).unwrap();
+        assert_eq!(rar50_archive.family(), ArchiveFamily::Rar50Plus);
+        assert_eq!(
+            collect_extract(&rar50_archive, None).unwrap()[0].data,
+            b"owned rar50\n"
+        );
     }
 
     #[test]

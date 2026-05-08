@@ -1,6 +1,28 @@
 use crate::version::ArchiveVersion;
+use std::sync::Arc;
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug, Clone)]
+pub struct IoError {
+    pub kind: std::io::ErrorKind,
+    pub message: String,
+    source: Arc<std::io::Error>,
+}
+
+impl IoError {
+    pub fn source(&self) -> &(dyn std::error::Error + 'static) {
+        self.source.as_ref()
+    }
+}
+
+impl PartialEq for IoError {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind && self.message == other.message
+    }
+}
+
+impl Eq for IoError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -31,10 +53,7 @@ pub enum Error {
         family: &'static str,
         unpack_version: u8,
     },
-    Io {
-        kind: std::io::ErrorKind,
-        message: String,
-    },
+    Io(IoError),
     NeedPassword,
     WrongPasswordOrCorruptData,
     CrcMismatch {
@@ -93,7 +112,7 @@ impl std::fmt::Display for Error {
                 f,
                 "{family} encryption is not supported: unpack version {unpack_version}"
             ),
-            Self::Io { message, .. } => write!(f, "I/O error: {message}"),
+            Self::Io(error) => write!(f, "I/O error: {}", error.message),
             Self::NeedPassword => write!(f, "a password is required"),
             Self::WrongPasswordOrCorruptData => {
                 write!(f, "wrong password or corrupt encrypted data")
@@ -123,10 +142,11 @@ impl std::fmt::Display for Error {
 
 impl From<std::io::Error> for Error {
     fn from(error: std::io::Error) -> Self {
-        Self::Io {
+        Self::Io(IoError {
             kind: error.kind(),
             message: error.to_string(),
-        }
+            source: Arc::new(error),
+        })
     }
 }
 
@@ -135,6 +155,7 @@ impl std::error::Error for Error {
         match self {
             Self::AtArchiveOffset { source, .. } | Self::AtEntry { source, .. } => Some(source),
             Self::Codec(source) => Some(source),
+            Self::Io(source) => Some(source.source()),
             _ => None,
         }
     }
@@ -275,12 +296,13 @@ mod tests {
 
         assert!(matches!(
             error,
-            Error::Io {
-                kind: std::io::ErrorKind::PermissionDenied,
-                ..
-            }
+            Error::Io(ref source) if source.kind == std::io::ErrorKind::PermissionDenied
         ));
         assert_eq!(error.to_string(), "I/O error: locked");
+        assert_eq!(
+            std::error::Error::source(&error).map(ToString::to_string),
+            Some("locked".to_string())
+        );
     }
 
     #[test]

@@ -1787,7 +1787,7 @@ fn error_needs_password(error: &Error) -> bool {
 
 fn read_archive_error(path: &str, err: Error) -> String {
     match err {
-        Error::Io { message, .. } => format!("failed to read archive '{path}': {message}"),
+        Error::Io(error) => format!("failed to read archive '{path}': {}", error.message),
         Error::UnsupportedSignature => {
             format!(
                 "failed to identify archive '{path}': {}",

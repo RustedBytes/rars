@@ -544,7 +544,7 @@ impl FileHeader {
             | Error::UnsupportedCompression { .. }
             | Error::UnsupportedEncryption { .. }
             | Error::TooShort
-            | Error::Io { .. }
+            | Error::Io(_)
             | Error::AtArchiveOffset { .. }
             | Error::AtEntry { .. } => error,
             Error::InvalidHeader(_)
@@ -767,6 +767,10 @@ impl Archive {
         Self::parse_with_options(input, crate::ArchiveReadOptions::default())
     }
 
+    pub fn parse_owned(input: Vec<u8>) -> Result<Self> {
+        Self::parse_owned_with_options(input, crate::ArchiveReadOptions::default())
+    }
+
     pub fn parse_with_options(
         input: &[u8],
         options: crate::ArchiveReadOptions<'_>,
@@ -775,8 +779,19 @@ impl Archive {
         Self::parse_shared(data, options.password)
     }
 
+    pub fn parse_owned_with_options(
+        input: Vec<u8>,
+        options: crate::ArchiveReadOptions<'_>,
+    ) -> Result<Self> {
+        Self::parse_shared(Arc::from(input.into_boxed_slice()), options.password)
+    }
+
     pub fn parse_with_password(input: &[u8], password: Option<&[u8]>) -> Result<Self> {
         Self::parse_with_options(input, crate::ArchiveReadOptions { password })
+    }
+
+    pub fn parse_owned_with_password(input: Vec<u8>, password: Option<&[u8]>) -> Result<Self> {
+        Self::parse_owned_with_options(input, crate::ArchiveReadOptions { password })
     }
 
     pub fn parse_path(path: impl AsRef<Path>) -> Result<Self> {

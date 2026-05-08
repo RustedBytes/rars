@@ -392,6 +392,10 @@ impl Archive {
         Self::parse_with_options(input, crate::ArchiveReadOptions::default())
     }
 
+    pub fn parse_owned(input: Vec<u8>) -> Result<Self> {
+        Self::parse_owned_with_options(input, crate::ArchiveReadOptions::default())
+    }
+
     pub fn parse_with_options(
         input: &[u8],
         options: crate::ArchiveReadOptions<'_>,
@@ -400,8 +404,19 @@ impl Archive {
         Self::parse_shared(data, options.password)
     }
 
+    pub fn parse_owned_with_options(
+        input: Vec<u8>,
+        options: crate::ArchiveReadOptions<'_>,
+    ) -> Result<Self> {
+        Self::parse_shared(Arc::from(input.into_boxed_slice()), options.password)
+    }
+
     pub fn parse_with_password(input: &[u8], password: Option<&[u8]>) -> Result<Self> {
         Self::parse_with_options(input, crate::ArchiveReadOptions { password })
+    }
+
+    pub fn parse_owned_with_password(input: Vec<u8>, password: Option<&[u8]>) -> Result<Self> {
+        Self::parse_owned_with_options(input, crate::ArchiveReadOptions { password })
     }
 
     pub fn parse_path(path: impl AsRef<Path>) -> Result<Self> {
@@ -449,9 +464,9 @@ impl Archive {
         }
         let archive = input.get(sig.offset..).ok_or(Error::TooShort)?;
         let mut parsed = Self::parse_seekable(
-            archive.to_vec(),
+            archive,
             sig.offset,
-            ArchiveSource::Memory(input),
+            ArchiveSource::Memory(Arc::clone(&input)),
             password,
         )?;
         parsed.sfx_offset = sig.offset;
@@ -459,7 +474,7 @@ impl Archive {
     }
 
     fn parse_seekable(
-        input: Vec<u8>,
+        input: &[u8],
         sfx_offset: usize,
         source: ArchiveSource,
         password: Option<&[u8]>,
@@ -472,9 +487,9 @@ impl Archive {
         let (main, blocks) = parse_archive_blocks(
             archive_len,
             password,
-            |offset| parse_block_header_bytes(&input, offset, archive_len, sfx_offset),
+            |offset| parse_block_header_bytes(input, offset, archive_len, sfx_offset),
             |offset, keys| {
-                parse_encrypted_block_header_bytes(&input, offset, archive_len, sfx_offset, keys)
+                parse_encrypted_block_header_bytes(input, offset, archive_len, sfx_offset, keys)
             },
         )?;
 

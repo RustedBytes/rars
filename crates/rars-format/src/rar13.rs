@@ -246,6 +246,10 @@ impl Archive {
         Self::parse_shared(data)
     }
 
+    pub fn parse_owned(input: Vec<u8>) -> Result<Self> {
+        Self::parse_shared(Arc::from(input.into_boxed_slice()))
+    }
+
     pub fn parse_path(path: impl AsRef<Path>) -> Result<Self> {
         let path = Arc::new(path.as_ref().to_path_buf());
         let mut file = File::open(path.as_ref())?;

@@ -156,7 +156,7 @@ fn extract_to_reports_rar13_entry_context_on_write_failure() {
         } => {
             assert_eq!(name, b"README");
             assert_eq!(operation, "extracting");
-            assert!(matches!(*source, Error::Io { .. }));
+            assert!(matches!(*source, Error::Io(_)));
         }
         other => panic!("expected entry context, got {other:?}"),
     }

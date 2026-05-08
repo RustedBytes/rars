@@ -2,14 +2,6 @@
 
 ## Active Tasks
 
-- Review pass 3, batch 7: API and resource cleanup.
-  - Preserve `std::io::Error` sources instead of flattening them to strings.
-  - Remove the unnecessary `Result` wrapper from total facade metadata
-    conversions.
-  - Add owned-buffer parse entry points or equivalent plumbing to avoid
-    cloning caller-owned archive bytes.
-  - Decide whether RAR5 recovery repair needs a streaming sector path before
-    large-archive repair is considered production-ready.
 - Review pass 3, batch 8: workspace, scripts, and remaining test polish.
   - Add workspace MSRV/dependency/docs metadata suitable for publishing.
   - Add uniform tool prechecks to oracle scripts and make coverage keep
@@ -29,6 +21,9 @@
   heavily.
 - Add a RAR 1.5-4.x writer builder only if another independent option axis
   lands there.
+- Review pass 3, final recovery batch: decide and implement or explicitly
+  document the streaming sector path needed before RAR5 large-archive recovery
+  repair is considered production-ready.
 
 ## Optimization
 
