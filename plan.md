@@ -16,8 +16,6 @@
   `update_model`) with focused malformed-stream regression tests.
 - Tighten RAR5 REV metadata parsing so table reads use checked slice helpers
   and forward-compatible trailing bytes are accepted deliberately.
-- Reduce remaining whole-member codec buffers for encrypted RAR15/RAR20/RAR29
-  entries and compressed split-volume decrypt-before-chain paths.
 - Add fuzz targets for `Archive::parse`, `Unpack29::decode_member`, PPMd decode,
   and RARVM program parsing/execution.
 

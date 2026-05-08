@@ -540,6 +540,7 @@ pub(super) struct DecryptingReader<R> {
     cipher: SplitCipher,
     encrypted_block: Vec<u8>,
     decrypted: Vec<u8>,
+    decrypted_pos: usize,
     eof: bool,
 }
 
@@ -555,26 +556,29 @@ impl<R: Read> DecryptingReader<R> {
             cipher: SplitCipher::new(unp_ver, password, salt)?,
             encrypted_block: Vec::new(),
             decrypted: Vec::new(),
+            decrypted_pos: 0,
             eof: false,
         })
     }
 
     fn fill_decrypted(&mut self) -> std::io::Result<()> {
-        if !self.decrypted.is_empty() || self.eof {
+        if self.decrypted_pos < self.decrypted.len() || self.eof {
             return Ok(());
         }
+        self.decrypted.clear();
+        self.decrypted_pos = 0;
 
         match &mut self.cipher {
             SplitCipher::Rar15(cipher) => {
-                let mut buf = vec![0u8; 64 * 1024];
-                let count = self.inner.read(&mut buf)?;
+                self.decrypted.resize(64 * 1024, 0);
+                let count = self.inner.read(&mut self.decrypted)?;
                 if count == 0 {
                     self.eof = true;
+                    self.decrypted.clear();
                     return Ok(());
                 }
-                buf.truncate(count);
-                cipher.crypt_in_place(&mut buf);
-                self.decrypted = buf;
+                self.decrypted.truncate(count);
+                cipher.crypt_in_place(&mut self.decrypted);
             }
             SplitCipher::Rar20(_) | SplitCipher::Rar30(_) => self.fill_block_decrypted()?,
         }
@@ -594,7 +598,8 @@ impl<R: Read> DecryptingReader<R> {
 
         let full_len = (self.encrypted_block.len() / 16) * 16;
         if full_len != 0 {
-            let mut data: Vec<u8> = self.encrypted_block.drain(..full_len).collect();
+            let tail = self.encrypted_block.split_off(full_len);
+            let mut data = std::mem::replace(&mut self.encrypted_block, tail);
             match &mut self.cipher {
                 SplitCipher::Rar15(_) => unreachable!("RAR 1.5 is byte-stream decrypted"),
                 SplitCipher::Rar20(cipher) => cipher
@@ -606,6 +611,7 @@ impl<R: Read> DecryptingReader<R> {
                     .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?,
             }
             self.decrypted = data;
+            self.decrypted_pos = 0;
         } else if self.eof && !self.encrypted_block.is_empty() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -622,12 +628,13 @@ impl<R: Read> Read for DecryptingReader<R> {
             return Ok(0);
         }
         self.fill_decrypted()?;
-        if self.decrypted.is_empty() {
+        if self.decrypted_pos == self.decrypted.len() {
             return Ok(0);
         }
-        let count = out.len().min(self.decrypted.len());
-        out[..count].copy_from_slice(&self.decrypted[..count]);
-        self.decrypted.drain(..count);
+        let count = out.len().min(self.decrypted.len() - self.decrypted_pos);
+        out[..count]
+            .copy_from_slice(&self.decrypted[self.decrypted_pos..self.decrypted_pos + count]);
+        self.decrypted_pos += count;
         Ok(count)
     }
 }
@@ -672,6 +679,37 @@ mod tests {
         }
     }
 
+    struct ChunkedReader<R> {
+        inner: R,
+        chunk: usize,
+    }
+
+    impl<R: Read> ChunkedReader<R> {
+        fn new(inner: R, chunk: usize) -> Self {
+            Self { inner, chunk }
+        }
+    }
+
+    impl<R: Read> Read for ChunkedReader<R> {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            let take = out.len().min(self.chunk);
+            self.inner.read(&mut out[..take])
+        }
+    }
+
+    fn read_in_small_chunks(mut reader: impl Read) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut buf = [0u8; 7];
+        loop {
+            let count = reader.read(&mut buf).unwrap();
+            if count == 0 {
+                break;
+            }
+            out.extend_from_slice(&buf[..count]);
+        }
+        out
+    }
+
     #[test]
     fn decrypting_reader_streams_rar15_payload() {
         let plain = b"RAR 1.5 encrypted payload read in pieces";
@@ -693,21 +731,26 @@ mod tests {
     }
 
     #[test]
-    fn decrypting_reader_streams_rar20_blocks() {
+    fn decrypting_reader_streams_rar20_blocks_from_short_inner_reads() {
         let plain = *b"0123456789abcdefRAR2 block two!!";
         let mut encrypted = plain;
         Rar20Cipher::new(b"pw")
             .encrypt_in_place(&mut encrypted)
             .unwrap();
-        let mut reader = DecryptingReader::new(Cursor::new(encrypted), 20, b"pw", None).unwrap();
-        let mut out = Vec::new();
-        reader.read_to_end(&mut out).unwrap();
+        let reader = DecryptingReader::new(
+            ChunkedReader::new(Cursor::new(encrypted), 5),
+            20,
+            b"pw",
+            None,
+        )
+        .unwrap();
+        let out = read_in_small_chunks(reader);
 
         assert_eq!(out, plain);
     }
 
     #[test]
-    fn decrypting_reader_streams_rar30_blocks() {
+    fn decrypting_reader_streams_rar30_blocks_from_short_inner_reads() {
         let salt = Some([7u8; 8]);
         let plain = *b"0123456789abcdefRAR3 block two!!";
         let mut encrypted = plain;
@@ -715,9 +758,14 @@ mod tests {
             .unwrap()
             .encrypt_in_place(&mut encrypted)
             .unwrap();
-        let mut reader = DecryptingReader::new(Cursor::new(encrypted), 29, b"pw", salt).unwrap();
-        let mut out = Vec::new();
-        reader.read_to_end(&mut out).unwrap();
+        let reader = DecryptingReader::new(
+            ChunkedReader::new(Cursor::new(encrypted), 5),
+            29,
+            b"pw",
+            salt,
+        )
+        .unwrap();
+        let out = read_in_small_chunks(reader);
 
         assert_eq!(out, plain);
     }
@@ -814,6 +862,54 @@ mod tests {
         let mut archive = empty_archive();
         archive.blocks = blocks;
         archive
+    }
+
+    fn archive_with_source(blocks: Vec<Block>, source: Vec<u8>) -> Archive {
+        Archive {
+            sfx_offset: 0,
+            main: MainHeader {
+                head_crc: 0,
+                flags: 0,
+                head_size: 0,
+                reserved1: 0,
+                reserved2: 0,
+                encrypt_version: None,
+            },
+            blocks,
+            source: ArchiveSource::Memory(Arc::from(source.into_boxed_slice())),
+        }
+    }
+
+    #[test]
+    fn encrypted_split_fragment_reader_decrypts_after_chaining_fragments() {
+        let plain = *b"0123456789abcdefRAR2 block two!!";
+        let mut encrypted = plain;
+        Rar20Cipher::new(b"pw")
+            .encrypt_in_place(&mut encrypted)
+            .unwrap();
+        let split = 7;
+
+        let mut first = file(b"a.txt", FHD_PASSWORD | FHD_SPLIT_AFTER);
+        first.unp_ver = 20;
+        first.pack_size = split as u64;
+        first.packed_range = 0..split;
+
+        let mut second = file(b"a.txt", FHD_PASSWORD | FHD_SPLIT_BEFORE);
+        second.unp_ver = 20;
+        second.pack_size = (encrypted.len() - split) as u64;
+        second.packed_range = 0..(encrypted.len() - split);
+
+        let mut pending = PendingSplitRefs::new(&first, 0, 0);
+        pending.append(&second, 1, 0);
+        let volumes = vec![
+            archive_with_source(vec![Block::File(first)], encrypted[..split].to_vec()),
+            archive_with_source(vec![Block::File(second)], encrypted[split..].to_vec()),
+        ];
+
+        let reader = pending.fragment_reader(&volumes, Some(b"pw")).unwrap();
+        let out = read_in_small_chunks(reader);
+
+        assert_eq!(out, plain);
     }
 
     fn never_open(_meta: &ExtractedEntryMeta) -> Result<Box<dyn Write>> {

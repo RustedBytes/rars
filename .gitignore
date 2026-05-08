@@ -1,4 +1,6 @@
 target
-.codex
-review.md
 __pycache__/
+
+.codex
+.claude
+review.md
