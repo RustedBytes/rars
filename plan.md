@@ -2,12 +2,6 @@
 
 ## Active Tasks
 
-- Review pass 2, release polish:
-  - Add rustdoc for the public `rars`, `rars-format`, and CLI-facing APIs before
-    publishing.
-  - Add Cargo package metadata required for publication.
-  - Decide whether ignored oracle tests should read tool paths from environment
-    variables and skip cleanly when unavailable.
 - Add adversarial PPMd fixtures as corpus bugs appear.
 - Add real RAR-created RAR5 filter fixtures for E8, E8E9, Delta, and ARM
   reader coverage.
@@ -35,8 +29,6 @@
   entries and compressed split-volume decrypt-before-chain paths.
 - Add fuzz targets for `Archive::parse`, `Unpack29::decode_member`, PPMd decode,
   and RARVM program parsing/execution.
-- Add rustdoc for the public `rars`, `rars-format`, and CLI-facing APIs before
-  publishing.
 
 ## Optional Oracles
 

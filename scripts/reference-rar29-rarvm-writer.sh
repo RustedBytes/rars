@@ -4,17 +4,29 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
-winrar300_prefix="/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar300"
-winrar420_prefix="/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar420"
-unrar300="$winrar300_prefix/drive_c/Program Files (x86)/WinRAR/UnRAR.exe"
-unrar420="$winrar420_prefix/drive_c/Program Files (x86)/WinRAR/UnRAR.exe"
+if [[ -z "${RARS_WINRAR300_PREFIX:-}" || -z "${RARS_WINRAR420_PREFIX:-}" ]]; then
+  cat >&2 <<'EOF'
+missing reference Wine prefix
+
+Set RARS_WINRAR300_PREFIX and RARS_WINRAR420_PREFIX before running this
+script. Set RARS_UNRAR300 or RARS_UNRAR420 as well if UnRAR.exe is not in
+the standard Wine install path.
+EOF
+  exit 1
+fi
+
+winrar300_prefix="$RARS_WINRAR300_PREFIX"
+winrar420_prefix="$RARS_WINRAR420_PREFIX"
+unrar300="${RARS_UNRAR300:-$winrar300_prefix/drive_c/Program Files (x86)/WinRAR/UnRAR.exe}"
+unrar420="${RARS_UNRAR420:-$winrar420_prefix/drive_c/Program Files (x86)/WinRAR/UnRAR.exe}"
 
 for tool in "$unrar300" "$unrar420"; do
   if [[ ! -f "$tool" ]]; then
     cat >&2 <<EOF
 missing reference tool: $tool
 
-Install the matching WinRAR/UnRAR Wine prefix before running this script.
+Set the matching RARS_UNRAR300 or RARS_UNRAR420 variable if UnRAR.exe is
+not in the standard Wine install path.
 EOF
     exit 1
   fi

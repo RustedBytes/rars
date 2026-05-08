@@ -1,8 +1,12 @@
 [package]
 name = "rars-codec"
 version = "0.1.0"
+description = "RAR compression codecs, filters, PPMd, and RARVM components."
 edition.workspace = true
 license.workspace = true
+readme.workspace = true
 repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]

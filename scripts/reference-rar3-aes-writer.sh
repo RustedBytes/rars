@@ -4,16 +4,28 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
-winrar420_prefix="/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar420"
-unrar420="$winrar420_prefix/drive_c/Program Files (x86)/WinRAR/UnRAR.exe"
+if [[ -z "${RARS_WINRAR420_PREFIX:-}" ]]; then
+  cat >&2 <<'EOF'
+missing RARS_WINRAR420_PREFIX
+
+Set RARS_WINRAR420_PREFIX to the WinRAR/UnRAR 4.20 Wine prefix before
+running this script. Set RARS_UNRAR420 as well if UnRAR.exe is not in the
+standard Wine install path.
+EOF
+  exit 1
+fi
+
+winrar420_prefix="$RARS_WINRAR420_PREFIX"
+unrar420="${RARS_UNRAR420:-$winrar420_prefix/drive_c/Program Files (x86)/WinRAR/UnRAR.exe}"
 
 if [[ ! -f "$unrar420" ]]; then
   cat >&2 <<EOF
 missing reference tool: $unrar420
 
-Install the WinRAR/UnRAR 4.20 Wine prefix before running this script.
+Set RARS_UNRAR420 to the UnRAR 4.20 executable if it is not in the
+standard Wine install path.
 EOF
-  exit 1
+    exit 1
 fi
 
 tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/rars-rar3-aes-ref.XXXXXX")"

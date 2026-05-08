@@ -1250,7 +1250,7 @@ mod tests {
     fn decode_packed_rejects_stored_size_mismatch() {
         let mut decoder = Unpack50Decoder::new();
 
-        let mut file = plain_file(b"a.txt", &vec![0u8; 32], None);
+        let mut file = plain_file(b"a.txt", &[0u8; 32], None);
         file.unpacked_size = 32;
         let short = vec![0u8; 16];
         assert!(matches!(
@@ -1258,7 +1258,7 @@ mod tests {
             Err(Error::InvalidHeader(_))
         ));
 
-        let mut encrypted = plain_file(b"b.txt", &vec![0u8; 32], None);
+        let mut encrypted = plain_file(b"b.txt", &[0u8; 32], None);
         encrypted.encrypted = true;
         encrypted.unpacked_size = 32;
         let too_short = vec![0u8; 16];

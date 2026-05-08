@@ -157,6 +157,50 @@ fn read_options(password: Option<&[u8]>) -> ArchiveReadOptions<'_> {
     }
 }
 
+#[derive(Debug, Clone)]
+struct ReferenceUnrar {
+    wineprefix: String,
+    unrar: String,
+}
+
+fn reference_unrar(prefix_env: &str, unrar_env: &str) -> Option<ReferenceUnrar> {
+    let wineprefix = match std::env::var(prefix_env) {
+        Ok(value) => value,
+        Err(_) => {
+            eprintln!("skipping reference test: set {prefix_env} to the WinRAR Wine prefix");
+            return None;
+        }
+    };
+    let unrar = std::env::var(unrar_env)
+        .unwrap_or_else(|_| format!("{wineprefix}/drive_c/Program Files (x86)/WinRAR/UnRAR.exe"));
+    if !Path::new(&unrar).is_file() {
+        eprintln!("skipping reference test: missing reference tool {unrar}");
+        return None;
+    }
+    Some(ReferenceUnrar { wineprefix, unrar })
+}
+
+fn reference_unrar300() -> Option<ReferenceUnrar> {
+    reference_unrar("RARS_WINRAR300_PREFIX", "RARS_UNRAR300")
+}
+
+fn reference_unrar420() -> Option<ReferenceUnrar> {
+    reference_unrar("RARS_WINRAR420_PREFIX", "RARS_UNRAR420")
+}
+
+fn run_reference_unrar(reference: &ReferenceUnrar, archive_path: &Path) -> std::process::Output {
+    let wine_archive = format!("Z:{}", archive_path.to_string_lossy().replace('/', "\\"));
+    Command::new("env")
+        .arg(format!("WINEPREFIX={}", reference.wineprefix))
+        .arg("wine")
+        .arg(&reference.unrar)
+        .arg("t")
+        .arg("-inul")
+        .arg(wine_archive)
+        .output()
+        .unwrap()
+}
+
 fn repair_rev3_volumes(
     data_volumes: &[Option<&[u8]>],
     recovery_count: usize,
@@ -559,20 +603,14 @@ fn generated_rar30_header_encrypted_e8_filtered_archive_round_trips() {
 }
 
 #[test]
-#[ignore = "requires local WinRAR/UnRAR 3.00 and 4.20 Wine prefixes"]
+#[ignore = "requires WinRAR/UnRAR 3.00 and 4.20 Wine prefixes"]
 fn reference_unrar_accepts_rar29_solid_e8_filter_record() {
-    const UNRAR300_PREFIX: &str = "/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar300";
-    const UNRAR300: &str =
-        "/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar300/drive_c/Program Files (x86)/WinRAR/UnRAR.exe";
-    const UNRAR420_PREFIX: &str = "/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar420";
-    const UNRAR420: &str =
-        "/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar420/drive_c/Program Files (x86)/WinRAR/UnRAR.exe";
-
-    for tool in [UNRAR300, UNRAR420] {
-        if !Path::new(tool).is_file() {
-            panic!("missing reference tool: {tool}");
-        }
-    }
+    let Some(unrar300) = reference_unrar300() else {
+        return;
+    };
+    let Some(unrar420) = reference_unrar420() else {
+        return;
+    };
 
     let dir = std::env::temp_dir().join(format!("rars-rar29-solid-e8-ref-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -608,20 +646,12 @@ fn reference_unrar_accepts_rar29_solid_e8_filter_record() {
     );
     std::fs::write(&archive_path, bytes).unwrap();
 
-    for (wineprefix, unrar) in [(UNRAR300_PREFIX, UNRAR300), (UNRAR420_PREFIX, UNRAR420)] {
-        let wine_archive = format!("Z:{}", archive_path.to_string_lossy().replace('/', "\\"));
-        let output = Command::new("env")
-            .arg(format!("WINEPREFIX={wineprefix}"))
-            .arg("wine")
-            .arg(unrar)
-            .arg("t")
-            .arg("-inul")
-            .arg(wine_archive)
-            .output()
-            .unwrap();
+    for reference in [&unrar300, &unrar420] {
+        let output = run_reference_unrar(reference, &archive_path);
         assert!(
             output.status.success(),
-            "{unrar} rejected solid E8 archive: status={:?}\nstdout={}\nstderr={}",
+            "{} rejected solid E8 archive: status={:?}\nstdout={}\nstderr={}",
+            reference.unrar,
             output.status.code(),
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
@@ -630,15 +660,11 @@ fn reference_unrar_accepts_rar29_solid_e8_filter_record() {
 }
 
 #[test]
-#[ignore = "requires local WinRAR/UnRAR 4.20 Wine prefix"]
+#[ignore = "requires WinRAR/UnRAR 4.20 Wine prefix"]
 fn reference_unrar_accepts_rar29_segmented_e8_filter_record() {
-    const WINEPREFIX: &str = "/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar420";
-    const UNRAR: &str =
-        "/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar420/drive_c/Program Files (x86)/WinRAR/UnRAR.exe";
-
-    if !Path::new(UNRAR).is_file() {
-        panic!("missing reference tool: {UNRAR}");
-    }
+    let Some(reference) = reference_unrar420() else {
+        return;
+    };
 
     let dir = std::env::temp_dir().join(format!(
         "rars-rar29-segmented-e8-ref-{}",
@@ -668,16 +694,7 @@ fn reference_unrar_accepts_rar29_segmented_e8_filter_record() {
     );
     std::fs::write(&archive_path, bytes).unwrap();
 
-    let wine_archive = format!("Z:{}", archive_path.to_string_lossy().replace('/', "\\"));
-    let output = Command::new("env")
-        .arg(format!("WINEPREFIX={WINEPREFIX}"))
-        .arg("wine")
-        .arg(UNRAR)
-        .arg("t")
-        .arg("-inul")
-        .arg(wine_archive)
-        .output()
-        .unwrap();
+    let output = run_reference_unrar(&reference, &archive_path);
     assert!(
         output.status.success(),
         "UnRAR 4.20 rejected segmented E8 archive: status={:?}\nstdout={}\nstderr={}",
@@ -688,15 +705,11 @@ fn reference_unrar_accepts_rar29_segmented_e8_filter_record() {
 }
 
 #[test]
-#[ignore = "requires local WinRAR/UnRAR 4.20 Wine prefix"]
+#[ignore = "requires WinRAR/UnRAR 4.20 Wine prefix"]
 fn reference_unrar_accepts_rar29_segmented_e8e9_filter_record() {
-    const WINEPREFIX: &str = "/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar420";
-    const UNRAR: &str =
-        "/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar420/drive_c/Program Files (x86)/WinRAR/UnRAR.exe";
-
-    if !Path::new(UNRAR).is_file() {
-        panic!("missing reference tool: {UNRAR}");
-    }
+    let Some(reference) = reference_unrar420() else {
+        return;
+    };
 
     let dir = std::env::temp_dir().join(format!(
         "rars-rar29-segmented-e8e9-ref-{}",
@@ -726,16 +739,7 @@ fn reference_unrar_accepts_rar29_segmented_e8e9_filter_record() {
     );
     std::fs::write(&archive_path, bytes).unwrap();
 
-    let wine_archive = format!("Z:{}", archive_path.to_string_lossy().replace('/', "\\"));
-    let output = Command::new("env")
-        .arg(format!("WINEPREFIX={WINEPREFIX}"))
-        .arg("wine")
-        .arg(UNRAR)
-        .arg("t")
-        .arg("-inul")
-        .arg(wine_archive)
-        .output()
-        .unwrap();
+    let output = run_reference_unrar(&reference, &archive_path);
     assert!(
         output.status.success(),
         "UnRAR 4.20 rejected segmented E8E9 archive: status={:?}\nstdout={}\nstderr={}",
@@ -836,15 +840,11 @@ fn generated_rar29_segmented_delta_filtered_archive_round_trips() {
 }
 
 #[test]
-#[ignore = "requires local WinRAR/UnRAR 4.20 Wine prefix"]
+#[ignore = "requires WinRAR/UnRAR 4.20 Wine prefix"]
 fn reference_unrar_accepts_rar29_segmented_delta_filter_record() {
-    const WINEPREFIX: &str = "/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar420";
-    const UNRAR: &str =
-        "/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar420/drive_c/Program Files (x86)/WinRAR/UnRAR.exe";
-
-    if !Path::new(UNRAR).is_file() {
-        panic!("missing reference tool: {UNRAR}");
-    }
+    let Some(reference) = reference_unrar420() else {
+        return;
+    };
 
     let dir = std::env::temp_dir().join(format!(
         "rars-rar29-segmented-delta-ref-{}",
@@ -874,16 +874,7 @@ fn reference_unrar_accepts_rar29_segmented_delta_filter_record() {
     );
     std::fs::write(&archive_path, bytes).unwrap();
 
-    let wine_archive = format!("Z:{}", archive_path.to_string_lossy().replace('/', "\\"));
-    let output = Command::new("env")
-        .arg(format!("WINEPREFIX={WINEPREFIX}"))
-        .arg("wine")
-        .arg(UNRAR)
-        .arg("t")
-        .arg("-inul")
-        .arg(wine_archive)
-        .output()
-        .unwrap();
+    let output = run_reference_unrar(&reference, &archive_path);
     assert!(
         output.status.success(),
         "UnRAR 4.20 rejected segmented DELTA archive: status={:?}\nstdout={}\nstderr={}",
@@ -961,15 +952,11 @@ fn generated_rar29_segmented_itanium_filtered_archive_round_trips() {
 }
 
 #[test]
-#[ignore = "requires local WinRAR/UnRAR 4.20 Wine prefix"]
+#[ignore = "requires WinRAR/UnRAR 4.20 Wine prefix"]
 fn reference_unrar_accepts_rar29_segmented_itanium_filter_record() {
-    const WINEPREFIX: &str = "/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar420";
-    const UNRAR: &str =
-        "/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar420/drive_c/Program Files (x86)/WinRAR/UnRAR.exe";
-
-    if !Path::new(UNRAR).is_file() {
-        panic!("missing reference tool: {UNRAR}");
-    }
+    let Some(reference) = reference_unrar420() else {
+        return;
+    };
 
     let dir = std::env::temp_dir().join(format!(
         "rars-rar29-segmented-itanium-ref-{}",
@@ -1002,16 +989,7 @@ fn reference_unrar_accepts_rar29_segmented_itanium_filter_record() {
     );
     std::fs::write(&archive_path, bytes).unwrap();
 
-    let wine_archive = format!("Z:{}", archive_path.to_string_lossy().replace('/', "\\"));
-    let output = Command::new("env")
-        .arg(format!("WINEPREFIX={WINEPREFIX}"))
-        .arg("wine")
-        .arg(UNRAR)
-        .arg("t")
-        .arg("-inul")
-        .arg(wine_archive)
-        .output()
-        .unwrap();
+    let output = run_reference_unrar(&reference, &archive_path);
     assert!(
         output.status.success(),
         "UnRAR 4.20 rejected segmented ITANIUM archive: status={:?}\nstdout={}\nstderr={}",
@@ -1085,15 +1063,11 @@ fn generated_rar29_segmented_rgb_filtered_archive_round_trips() {
 }
 
 #[test]
-#[ignore = "requires local WinRAR/UnRAR 4.20 Wine prefix"]
+#[ignore = "requires WinRAR/UnRAR 4.20 Wine prefix"]
 fn reference_unrar_accepts_rar29_segmented_rgb_filter_record() {
-    const WINEPREFIX: &str = "/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar420";
-    const UNRAR: &str =
-        "/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar420/drive_c/Program Files (x86)/WinRAR/UnRAR.exe";
-
-    if !Path::new(UNRAR).is_file() {
-        panic!("missing reference tool: {UNRAR}");
-    }
+    let Some(reference) = reference_unrar420() else {
+        return;
+    };
 
     let dir = std::env::temp_dir().join(format!(
         "rars-rar29-segmented-rgb-ref-{}",
@@ -1124,16 +1098,7 @@ fn reference_unrar_accepts_rar29_segmented_rgb_filter_record() {
     );
     std::fs::write(&archive_path, bytes).unwrap();
 
-    let wine_archive = format!("Z:{}", archive_path.to_string_lossy().replace('/', "\\"));
-    let output = Command::new("env")
-        .arg(format!("WINEPREFIX={WINEPREFIX}"))
-        .arg("wine")
-        .arg(UNRAR)
-        .arg("t")
-        .arg("-inul")
-        .arg(wine_archive)
-        .output()
-        .unwrap();
+    let output = run_reference_unrar(&reference, &archive_path);
     assert!(
         output.status.success(),
         "UnRAR 4.20 rejected segmented RGB archive: status={:?}\nstdout={}\nstderr={}",
@@ -1207,15 +1172,11 @@ fn generated_rar29_segmented_audio_filtered_archive_round_trips() {
 }
 
 #[test]
-#[ignore = "requires local WinRAR/UnRAR 3.00 Wine prefix"]
+#[ignore = "requires WinRAR/UnRAR 3.00 Wine prefix"]
 fn reference_unrar300_accepts_rar29_segmented_filter_records() {
-    const WINEPREFIX: &str = "/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar300";
-    const UNRAR: &str =
-        "/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar300/drive_c/Program Files (x86)/WinRAR/UnRAR.exe";
-
-    if !Path::new(UNRAR).is_file() {
-        panic!("missing reference tool: {UNRAR}");
-    }
+    let Some(reference) = reference_unrar300() else {
+        return;
+    };
 
     let dir = std::env::temp_dir().join(format!(
         "rars-rar29-segmented-unrar300-ref-{}",
@@ -1358,16 +1319,7 @@ fn reference_unrar300_accepts_rar29_segmented_filter_records() {
         "segmented-audio.rar",
     ] {
         let archive_path = dir.join(archive_path);
-        let wine_archive = format!("Z:{}", archive_path.to_string_lossy().replace('/', "\\"));
-        let output = Command::new("env")
-            .arg(format!("WINEPREFIX={WINEPREFIX}"))
-            .arg("wine")
-            .arg(UNRAR)
-            .arg("t")
-            .arg("-inul")
-            .arg(wine_archive)
-            .output()
-            .unwrap();
+        let output = run_reference_unrar(&reference, &archive_path);
         assert!(
             output.status.success(),
             "UnRAR 3.00 rejected {}: status={:?}\nstdout={}\nstderr={}",
@@ -1403,15 +1355,11 @@ fn write_reference_segmented_archive(
 }
 
 #[test]
-#[ignore = "requires local WinRAR/UnRAR 4.20 Wine prefix"]
+#[ignore = "requires WinRAR/UnRAR 4.20 Wine prefix"]
 fn reference_unrar_accepts_rar29_segmented_audio_filter_record() {
-    const WINEPREFIX: &str = "/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar420";
-    const UNRAR: &str =
-        "/home/gaz/src/tmp/rar/_refs/wineprefixes/winrar420/drive_c/Program Files (x86)/WinRAR/UnRAR.exe";
-
-    if !Path::new(UNRAR).is_file() {
-        panic!("missing reference tool: {UNRAR}");
-    }
+    let Some(reference) = reference_unrar420() else {
+        return;
+    };
 
     let dir = std::env::temp_dir().join(format!(
         "rars-rar29-segmented-audio-ref-{}",
@@ -1441,16 +1389,7 @@ fn reference_unrar_accepts_rar29_segmented_audio_filter_record() {
     );
     std::fs::write(&archive_path, bytes).unwrap();
 
-    let wine_archive = format!("Z:{}", archive_path.to_string_lossy().replace('/', "\\"));
-    let output = Command::new("env")
-        .arg(format!("WINEPREFIX={WINEPREFIX}"))
-        .arg("wine")
-        .arg(UNRAR)
-        .arg("t")
-        .arg("-inul")
-        .arg(wine_archive)
-        .output()
-        .unwrap();
+    let output = run_reference_unrar(&reference, &archive_path);
     assert!(
         output.status.success(),
         "UnRAR 4.20 rejected segmented AUDIO archive: status={:?}\nstdout={}\nstderr={}",

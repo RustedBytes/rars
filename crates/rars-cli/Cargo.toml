@@ -1,13 +1,17 @@
 [package]
 name = "rars-cli"
 version = "0.1.0"
+description = "Command-line interface for the rars RAR archive toolkit."
 edition.workspace = true
 license.workspace = true
+readme.workspace = true
 repository.workspace = true
+keywords.workspace = true
+categories = ["command-line-utilities", "compression"]
 
 [[bin]]
 name = "rars"
 path = "src/main.rs"
 
 [dependencies]
-rars = { path = "../rars" }
+rars = { version = "0.1.0", path = "../rars" }

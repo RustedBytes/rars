@@ -12,4 +12,7 @@ resolver = "2"
 [workspace.package]
 edition = "2021"
 license = "MIT OR Apache-2.0"
+readme = "README.md"
 repository = "https://github.com/bitplane/rars"
+keywords = ["rar", "archive", "compression"]
+categories = ["compression"]

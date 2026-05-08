@@ -1,3 +1,5 @@
+//! Command-line frontend for the `rars` RAR archive toolkit.
+
 use rars::rar13::{
     self, FileEntry, StoredEntry as Rar13StoredEntry, WriterOptions as Rar13WriterOptions,
 };

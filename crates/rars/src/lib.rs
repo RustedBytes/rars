@@ -1,3 +1,10 @@
+//! High-level RAR archive API.
+//!
+//! This crate is the public facade over the version-specific format modules. It
+//! detects archive families, exposes common member metadata, and streams
+//! extraction or recovery output to caller-provided writers without requiring
+//! callers to buffer whole archives in memory.
+
 pub use rars_format::{
     detect_archive_family, find_archive_start, rar13, rar15_40, rar50, ArchiveFamily,
     ArchiveReadOptions, ArchiveSignature, ArchiveVersion, Error, FeatureSet, Result,
@@ -7,81 +14,127 @@ use std::path::Path;
 
 #[derive(Debug, Clone)]
 #[non_exhaustive]
+/// A parsed RAR archive, preserving the concrete archive family.
 pub enum Archive {
+    /// RAR 1.3/1.4 archive.
     Rar13(rar13::Archive),
+    /// RAR 1.5 through RAR 4.x archive.
     Rar15To40(rar15_40::Archive),
+    /// RAR 5.0 or later archive, including RAR 7 archives.
     Rar50Plus(rar50::Archive),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
+/// Metadata supplied to streaming extraction callbacks.
 pub struct ExtractedEntryMeta {
+    /// Raw entry name bytes as stored by the archive family.
     pub name: Vec<u8>,
+    /// DOS/FAT timestamp when the archive family exposes one.
     pub file_time: u32,
+    /// File attributes widened to a common integer type.
     pub file_attr: u64,
+    /// Whether the entry is a directory.
     pub is_directory: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
+/// Common member view plus family-specific detail.
 pub struct ArchiveMember {
+    /// Metadata shared across archive families.
     pub meta: ArchiveMemberMeta,
+    /// Extra metadata that is meaningful only for one archive family.
     pub detail: ArchiveMemberDetail,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
+/// Family-independent metadata for a file-like archive member.
 pub struct ArchiveMemberMeta {
+    /// Archive family that produced this member.
     pub family: ArchiveFamily,
+    /// Raw entry name bytes as stored by the archive.
     pub name: Vec<u8>,
+    /// Packed payload size in bytes.
     pub packed_size: u64,
+    /// Unpacked file size in bytes.
     pub unpacked_size: u64,
+    /// DOS/FAT timestamp when present.
     pub file_time: Option<u32>,
+    /// File attributes widened to a common integer type.
     pub file_attr: u64,
+    /// Host OS discriminator when present in the archive format.
     pub host_os: Option<u64>,
+    /// Whether the member is a directory.
     pub is_directory: bool,
+    /// Whether the member payload is encrypted.
     pub is_encrypted: bool,
+    /// Whether the member payload is stored without compression.
     pub is_stored: bool,
+    /// Whether the member continues from a previous volume.
     pub is_split_before: bool,
+    /// Whether the member continues into the next volume.
     pub is_split_after: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
+/// Family-specific member metadata.
 pub enum ArchiveMemberDetail {
+    /// RAR 1.3/1.4 member fields.
     #[non_exhaustive]
     Rar13 {
+        /// Compression method byte from the file header.
         method: u8,
+        /// Minimum unpacker version byte from the file header.
         unpack_version: u8,
+        /// Legacy 16-bit file checksum.
         file_checksum: u16,
+        /// Whether the member carries a file-comment extension.
         has_file_comment: bool,
     },
+    /// RAR 1.5 through RAR 4.x member fields.
     #[non_exhaustive]
     Rar15To40 {
+        /// Compression method byte from the file header.
         method: u8,
+        /// Minimum unpacker version byte from the file header.
         unpack_version: u8,
+        /// Stored CRC-32 of the unpacked data.
         crc32: u32,
+        /// Whether this member participates in a solid stream.
         solid: bool,
+        /// Per-file salt when file encryption is used.
         salt: Option<[u8; 8]>,
+        /// Whether the member carries a file-comment extension.
         has_file_comment: bool,
     },
+    /// RAR 5.0 and later member fields.
     #[non_exhaustive]
     Rar50Plus {
+        /// Raw compression-info field from the RAR5 file header.
         compression_info: u64,
+        /// Stored CRC-32 when present.
         crc32: Option<u32>,
+        /// Strong file hash when present.
         hash: Option<ArchiveMemberHash>,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
+/// Strong hash metadata attached to an archive member.
 pub enum ArchiveMemberHash {
+    /// RAR5 BLAKE2sp file hash.
     Blake2sp([u8; 32]),
+    /// Unknown hash record retained for inspection.
     Other { hash_type: u64, data: Vec<u8> },
 }
 
 #[derive(Debug, Clone)]
 #[non_exhaustive]
+/// Lazy iterator returned by [`Archive::members`].
 pub struct ArchiveMembers<'a> {
     inner: ArchiveMembersInner<'a>,
     index: usize,
@@ -127,6 +180,7 @@ impl Iterator for ArchiveMembers<'_> {
 }
 
 impl Archive {
+    /// Returns the detected archive family.
     pub fn family(&self) -> ArchiveFamily {
         match self {
             Self::Rar13(_) => ArchiveFamily::Rar13,
@@ -135,6 +189,7 @@ impl Archive {
         }
     }
 
+    /// Returns the byte offset where the RAR archive begins after any SFX stub.
     pub fn sfx_offset(&self) -> usize {
         match self {
             Self::Rar13(archive) => archive.sfx_offset,
@@ -143,6 +198,7 @@ impl Archive {
         }
     }
 
+    /// Iterates over file-like members using a common cross-version metadata view.
     pub fn members(&self) -> ArchiveMembers<'_> {
         match self {
             Self::Rar13(archive) => ArchiveMembers {
@@ -176,12 +232,14 @@ impl Archive {
         }
     }
 
+    /// Repairs archive data using the archive's embedded recovery records.
     pub fn repair_recovery(&self) -> Result<Vec<u8>> {
         let mut repaired = Vec::new();
         self.repair_recovery_to(&mut repaired)?;
         Ok(repaired)
     }
 
+    /// Streams repaired archive data to `writer` using embedded recovery records.
     pub fn repair_recovery_to(&self, writer: &mut dyn Write) -> Result<()> {
         match self {
             Self::Rar15To40(archive) => {
@@ -196,6 +254,7 @@ impl Archive {
         }
     }
 
+    /// Returns the concrete RAR 1.3/1.4 archive when this archive has that family.
     pub fn as_rar13(&self) -> Option<&rar13::Archive> {
         match self {
             Self::Rar13(archive) => Some(archive),
@@ -204,6 +263,7 @@ impl Archive {
         }
     }
 
+    /// Returns the concrete RAR 1.5 through RAR 4.x archive when applicable.
     pub fn as_rar15_40(&self) -> Option<&rar15_40::Archive> {
         match self {
             Self::Rar13(_) => None,
@@ -212,6 +272,7 @@ impl Archive {
         }
     }
 
+    /// Returns the concrete RAR 5.0 or later archive when applicable.
     pub fn as_rar50(&self) -> Option<&rar50::Archive> {
         match self {
             Self::Rar13(_) | Self::Rar15To40(_) => None,
@@ -312,17 +373,21 @@ fn rar50_member_hash(hash: &rar50::FileHash) -> ArchiveMemberHash {
 
 #[derive(Debug, Clone, Copy, Default)]
 #[non_exhaustive]
+/// Archive reader facade with signature-based dispatch.
 pub struct ArchiveReader;
 
 impl ArchiveReader {
+    /// Detects the archive signature in a byte slice.
     pub fn detect(input: &[u8]) -> Result<ArchiveSignature> {
         detect_archive_family(input).ok_or(Error::UnsupportedSignature)
     }
 
+    /// Parses an archive from memory with default read options.
     pub fn read(input: &[u8]) -> Result<Archive> {
         Self::read_with_options(input, ArchiveReadOptions::default())
     }
 
+    /// Parses an archive from memory using explicit read options.
     pub fn read_with_options(input: &[u8], options: ArchiveReadOptions<'_>) -> Result<Archive> {
         let signature = find_archive_start(input, 128 * 1024).ok_or(Error::UnsupportedSignature)?;
         match signature.family {
@@ -337,10 +402,12 @@ impl ArchiveReader {
         }
     }
 
+    /// Parses an archive from a path with default read options.
     pub fn read_path(path: impl AsRef<Path>) -> Result<Archive> {
         Self::read_path_with_options(path, ArchiveReadOptions::default())
     }
 
+    /// Parses an archive from a path using explicit read options.
     pub fn read_path_with_options(
         path: impl AsRef<Path>,
         options: ArchiveReadOptions<'_>,
