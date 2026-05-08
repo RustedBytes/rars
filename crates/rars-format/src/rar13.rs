@@ -1,14 +1,15 @@
-use crate::detect::{find_archive_start, RAR13_SIGNATURE};
+use crate::detect::{find_archive_start, ArchiveSignature, RAR13_SIGNATURE};
 use crate::error::{Error, Result};
 use crate::features::FeatureSet;
 use crate::io_util::{read_exact_at, read_u16, read_u32};
+pub(crate) use crate::source::ArchiveSource;
 use crate::version::{ArchiveFamily, ArchiveVersion};
 use rars_codec::rar13::{unpack15_decode, unpack15_encode, Unpack15, Unpack15Encoder};
 use rars_crypto::rar13::{Rar13Cipher, Rar13DecryptReader};
 use std::fs::File;
-use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 const MAIN_HEAD_SIZE: u16 = 7;
@@ -69,12 +70,6 @@ pub struct Archive {
     pub main: MainHeader,
     pub entries: Vec<Entry>,
     source: ArchiveSource,
-}
-
-#[derive(Debug, Clone)]
-enum ArchiveSource {
-    Memory(Arc<[u8]>),
-    File(Arc<PathBuf>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -265,6 +260,19 @@ impl Archive {
         Self::parse_seekable(file, len, sig.offset, ArchiveSource::File(path))
     }
 
+    pub fn parse_path_with_signature(
+        path: impl AsRef<Path>,
+        signature: ArchiveSignature,
+    ) -> Result<Self> {
+        if signature.family != ArchiveFamily::Rar13 {
+            return Err(Error::UnsupportedSignature);
+        }
+        let path = Arc::new(path.as_ref().to_path_buf());
+        let file = File::open(path.as_ref())?;
+        let len = file.metadata()?.len();
+        Self::parse_seekable(file, len, signature.offset, ArchiveSource::File(path))
+    }
+
     fn parse_shared(input: Arc<[u8]>) -> Result<Self> {
         let sig = find_archive_start(&input, 128 * 1024).ok_or(Error::UnsupportedSignature)?;
         if sig.family != ArchiveFamily::Rar13 {
@@ -356,33 +364,11 @@ impl Archive {
     }
 
     fn copy_range_to(&self, range: Range<usize>, out: &mut impl Write) -> Result<()> {
-        match &self.source {
-            ArchiveSource::Memory(data) => {
-                let data = data.get(range).ok_or(Error::TooShort)?;
-                out.write_all(data)?;
-            }
-            ArchiveSource::File(path) => {
-                let mut file = File::open(path.as_ref())?;
-                file.seek(SeekFrom::Start(range.start as u64))?;
-                let mut limited = file.take(range.len() as u64);
-                std::io::copy(&mut limited, out)?;
-            }
-        }
-        Ok(())
+        self.source.copy_range_to(range, out)
     }
 
     fn range_reader(&self, range: Range<usize>) -> Result<Box<dyn Read + '_>> {
-        match &self.source {
-            ArchiveSource::Memory(data) => {
-                let data = data.get(range).ok_or(Error::TooShort)?;
-                Ok(Box::new(Cursor::new(data)))
-            }
-            ArchiveSource::File(path) => {
-                let mut file = File::open(path.as_ref())?;
-                file.seek(SeekFrom::Start(range.start as u64))?;
-                Ok(Box::new(file.take(range.len() as u64)))
-            }
-        }
+        self.source.range_reader(range)
     }
 
     fn copy_decrypted_range_to(

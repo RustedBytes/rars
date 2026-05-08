@@ -445,12 +445,14 @@ impl ArchiveReader {
         file.read_exact(&mut scan)?;
         let signature = find_archive_start(&scan, 128 * 1024).ok_or(Error::UnsupportedSignature)?;
         match signature.family {
-            ArchiveFamily::Rar13 => Ok(Archive::Rar13(rar13::Archive::parse_path(path)?)),
+            ArchiveFamily::Rar13 => Ok(Archive::Rar13(rar13::Archive::parse_path_with_signature(
+                path, signature,
+            )?)),
             ArchiveFamily::Rar15To40 => Ok(Archive::Rar15To40(
-                rar15_40::Archive::parse_path_with_options(path, options)?,
+                rar15_40::Archive::parse_path_with_signature(path, signature, options)?,
             )),
             ArchiveFamily::Rar50Plus => Ok(Archive::Rar50Plus(
-                rar50::Archive::parse_path_with_options(path, options)?,
+                rar50::Archive::parse_path_with_signature(path, signature, options)?,
             )),
             _ => Err(Error::UnsupportedSignature),
         }

@@ -1,7 +1,8 @@
-use crate::detect::{find_archive_start, RAR15_SIGNATURE};
+use crate::detect::{find_archive_start, ArchiveSignature, RAR15_SIGNATURE};
 use crate::error::{Error, Result};
 use crate::features::FeatureSet;
 use crate::io_util::{align16 as checked_align16, read_exact_at, read_u16, read_u32};
+pub(crate) use crate::source::ArchiveSource;
 use crate::version::ArchiveFamily;
 use crate::ArchiveVersion;
 use rars_codec::rar13::Unpack15;
@@ -12,9 +13,9 @@ use rars_crypto::rar15::Rar15Cipher;
 use rars_crypto::rar20::Rar20Cipher;
 use rars_crypto::rar30::{Error as Rar30Error, Rar30Cipher};
 use std::fs::File;
-use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+use std::io::{Read, Write};
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 mod extract;
@@ -63,12 +64,6 @@ pub struct Archive {
     pub main: MainHeader,
     pub blocks: Vec<Block>,
     source: ArchiveSource,
-}
-
-#[derive(Debug, Clone)]
-enum ArchiveSource {
-    Memory(Arc<[u8]>),
-    File(Arc<PathBuf>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -836,6 +831,34 @@ impl Archive {
         Self::parse_seekable(file, len, sig.offset, ArchiveSource::File(path), password)
     }
 
+    pub fn parse_path_with_signature(
+        path: impl AsRef<Path>,
+        signature: ArchiveSignature,
+        options: crate::ArchiveReadOptions<'_>,
+    ) -> Result<Self> {
+        Self::parse_path_with_signature_and_password(path, signature, options.password)
+    }
+
+    pub fn parse_path_with_signature_and_password(
+        path: impl AsRef<Path>,
+        signature: ArchiveSignature,
+        password: Option<&[u8]>,
+    ) -> Result<Self> {
+        if signature.family != ArchiveFamily::Rar15To40 {
+            return Err(Error::UnsupportedSignature);
+        }
+        let path = Arc::new(path.as_ref().to_path_buf());
+        let file = File::open(path.as_ref())?;
+        let len = file.metadata()?.len();
+        Self::parse_seekable(
+            file,
+            len,
+            signature.offset,
+            ArchiveSource::File(path),
+            password,
+        )
+    }
+
     fn parse_shared(input: Arc<[u8]>, password: Option<&[u8]>) -> Result<Self> {
         let sig = find_archive_start(&input, 128 * 1024).ok_or(Error::UnsupportedSignature)?;
         if sig.family != ArchiveFamily::Rar15To40 {
@@ -1047,46 +1070,15 @@ impl Archive {
     }
 
     fn read_range(&self, range: Range<usize>) -> Result<Vec<u8>> {
-        match &self.source {
-            ArchiveSource::Memory(data) => data
-                .get(range)
-                .map(|data| data.to_vec())
-                .ok_or(Error::TooShort),
-            ArchiveSource::File(path) => {
-                let mut file = File::open(path.as_ref())?;
-                read_exact_at(&mut file, range.start, range.len())
-            }
-        }
+        self.source.read_range(range)
     }
 
     fn copy_range_to(&self, range: Range<usize>, out: &mut impl Write) -> Result<()> {
-        match &self.source {
-            ArchiveSource::Memory(data) => {
-                let data = data.get(range).ok_or(Error::TooShort)?;
-                out.write_all(data)?;
-            }
-            ArchiveSource::File(path) => {
-                let mut file = File::open(path.as_ref())?;
-                file.seek(SeekFrom::Start(range.start as u64))?;
-                let mut limited = file.take(range.len() as u64);
-                std::io::copy(&mut limited, out)?;
-            }
-        }
-        Ok(())
+        self.source.copy_range_to(range, out)
     }
 
     fn range_reader(&self, range: Range<usize>) -> Result<Box<dyn Read + '_>> {
-        match &self.source {
-            ArchiveSource::Memory(data) => {
-                let data = data.get(range).ok_or(Error::TooShort)?;
-                Ok(Box::new(Cursor::new(data)))
-            }
-            ArchiveSource::File(path) => {
-                let mut file = File::open(path.as_ref())?;
-                file.seek(SeekFrom::Start(range.start as u64))?;
-                Ok(Box::new(file.take(range.len() as u64)))
-            }
-        }
+        self.source.range_reader(range)
     }
 
     pub fn files(&self) -> impl Iterator<Item = &FileHeader> {
@@ -1111,10 +1103,7 @@ impl Archive {
     }
 
     fn source_bytes(&self) -> Result<Vec<u8>> {
-        match &self.source {
-            ArchiveSource::Memory(data) => Ok(data.to_vec()),
-            ArchiveSource::File(path) => Ok(std::fs::read(path.as_ref())?),
-        }
+        self.source.bytes()
     }
 
     pub fn repair_protect_head(&self) -> Result<Vec<u8>> {

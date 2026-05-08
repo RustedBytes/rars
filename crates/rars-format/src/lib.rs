@@ -14,6 +14,7 @@ pub mod rar50;
 pub mod version;
 
 mod io_util;
+mod source;
 mod volume_extract;
 mod x86_filter_scan;
 

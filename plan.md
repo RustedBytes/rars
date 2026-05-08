@@ -11,11 +11,6 @@
 
 ## Hardening
 
-- Review #4 batch 7: path/source parser consolidation:
-  - Avoid the facade and family parsers both scanning path-backed archives for
-    the same signature.
-  - Factor the repeated family-local `ArchiveSource` range-reader/copy-range
-    plumbing where it can be shared without flattening wire-format types.
 - Review #4 batch 8: recovery performance:
   - Amortise RAR5 GF(2^16) table construction across recovery operations.
   - Avoid cloning the same recovery linear-system equations for every shard
