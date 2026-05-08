@@ -339,6 +339,7 @@ impl FileHeader {
         &self,
         archive: &Archive,
         decoder: &mut Unpack29,
+        solid: bool,
     ) -> Result<Vec<u8>> {
         if self.is_stored() {
             return self.stored_data(archive);
@@ -349,13 +350,15 @@ impl FileHeader {
         if self.unp_ver < 29 {
             return Err(self.unsupported_compression());
         }
-        decoder
-            .decode_member(
-                &self.packed_data(archive)?,
-                usize::try_from(self.unp_size)
-                    .map_err(|_| Error::InvalidHeader("RAR 2.9 unpacked size overflows usize"))?,
-            )
-            .map_err(Into::into)
+        let packed = self.packed_data(archive)?;
+        let target = usize::try_from(self.unp_size)
+            .map_err(|_| Error::InvalidHeader("RAR 2.9 unpacked size overflows usize"))?;
+        if solid {
+            decoder.decode_member(&packed, target)
+        } else {
+            decoder.decode_non_solid_member(&packed, target)
+        }
+        .map_err(Into::into)
     }
 
     pub(crate) fn unpacked_data_with_unpack15(

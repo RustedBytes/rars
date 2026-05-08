@@ -146,6 +146,9 @@ pub(crate) fn delta_decode(
     if channels == 0 {
         return Err(Error::InvalidData(messages.zero_channels));
     }
+    if channels > 32 {
+        return Err(Error::InvalidData(messages.invalid_channels));
+    }
     let mut out = vec![0u8; data.len()];
     let mut src = 0usize;
     for channel in 0..channels {
@@ -256,6 +259,21 @@ mod tests {
         .unwrap();
 
         assert_eq!(filtered, input);
+    }
+
+    #[test]
+    fn delta_decode_rejects_channel_counts_above_writer_limit() {
+        let mut filtered = vec![0; 64];
+
+        assert_eq!(
+            decode_in_place(
+                FilterOp::Delta { channels: 33 },
+                &mut filtered,
+                0,
+                DeltaErrorMessages::generic(),
+            ),
+            Err(Error::InvalidData("DELTA filter channel count is invalid"))
+        );
     }
 
     #[test]

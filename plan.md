@@ -2,13 +2,6 @@
 
 ## Active Tasks
 
-- Review pass 3, batch 6: codec hardening and state hygiene.
-  - Reduce the RAR29 filtered-range O(N^2) filter clone pattern.
-  - Add an explicit non-solid reset API or guard for reusable `Unpack29`
-    decoder instances.
-  - Align filter validation edges: cap DELTA decode channel counts, document
-    the Itanium tail requirement, and reject malformed RGB register values
-    before applying the filter.
 - Review pass 3, batch 7: API and resource cleanup.
   - Preserve `std::io::Error` sources instead of flattening them to strings.
   - Remove the unnecessary `Result` wrapper from total facade metadata

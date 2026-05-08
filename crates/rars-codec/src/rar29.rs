@@ -109,7 +109,7 @@ const RAR3_AUDIO_FILTER_BYTECODE: &[u8] = &[
 
 pub fn unpack29_decode(input: &[u8], output_size: usize) -> Result<Vec<u8>> {
     let mut decoder = Unpack29::new();
-    decoder.decode_member(input, output_size)
+    decoder.decode_non_solid_member(input, output_size)
 }
 
 pub fn unpack29_encode_literals(input: &[u8]) -> Result<Vec<u8>> {
@@ -1056,6 +1056,35 @@ impl Unpack29 {
         }
     }
 
+    pub fn reset_non_solid(&mut self) {
+        *self = Self::new();
+    }
+
+    pub fn decode_non_solid_member(&mut self, input: &[u8], output_size: usize) -> Result<Vec<u8>> {
+        self.reset_non_solid();
+        self.decode_member(input, output_size)
+    }
+
+    pub fn decode_non_solid_member_to(
+        &mut self,
+        input: &[u8],
+        output_size: usize,
+        out: &mut impl Write,
+    ) -> Result<()> {
+        self.reset_non_solid();
+        self.decode_member_to(input, output_size, out)
+    }
+
+    pub fn decode_non_solid_member_from_reader(
+        &mut self,
+        input: &mut impl Read,
+        output_size: usize,
+        out: &mut impl Write,
+    ) -> Result<()> {
+        self.reset_non_solid();
+        self.decode_member_from_reader(input, output_size, out)
+    }
+
     pub fn decode_member(&mut self, input: &[u8], output_size: usize) -> Result<Vec<u8>> {
         let start = self.current_pos();
         let target = start
@@ -1683,39 +1712,53 @@ impl Unpack29 {
         let filters: Vec<_> = self
             .filters
             .iter()
-            .filter(|filter| filter.start >= start && filter.start + filter.size <= end)
-            .cloned()
+            .enumerate()
+            .filter_map(|(index, filter)| {
+                (filter.start >= start && filter.start + filter.size <= end).then_some(index)
+            })
             .collect();
-        for filter in filters {
-            if filter.start < pos {
+        for filter_index in filters {
+            let (program_index, filter_start, filter_size, regs, global_data) = {
+                let filter = self
+                    .filters
+                    .get(filter_index)
+                    .ok_or(Error::InvalidData("RAR 2.9 VM filter is missing"))?;
+                (
+                    filter.program,
+                    filter.start,
+                    filter.size,
+                    filter.regs,
+                    filter.global_data.clone(),
+                )
+            };
+            if filter_start < pos {
                 continue;
             }
-            out.extend_from_slice(self.raw_range(pos, filter.start)?);
+            out.extend_from_slice(self.raw_range(pos, filter_start)?);
             let mut block = self
-                .raw_range(filter.start, filter.start + filter.size)?
+                .raw_range(filter_start, filter_start + filter_size)?
                 .to_vec();
-            let file_offset = filter
-                .start
+            let file_offset = filter_start
                 .checked_sub(member_start)
                 .ok_or(Error::InvalidData("RAR 2.9 VM filter starts before file"))?
                 as u32;
             let program = self
                 .programs
-                .get_mut(filter.program)
+                .get_mut(program_index)
                 .ok_or(Error::InvalidData("RAR 2.9 VM program is missing"))?;
             match &program.kind {
                 VmProgramKind::Standard(standard) => {
-                    apply_standard_filter(*standard, &mut block, file_offset, &filter.regs)?
+                    apply_standard_filter(*standard, &mut block, file_offset, &regs)?
                 }
                 VmProgramKind::Generic(generic) => {
-                    let globals = if filter.global_data.is_empty() {
+                    let globals = if global_data.is_empty() {
                         program.globals.as_slice()
                     } else {
-                        filter.global_data.as_slice()
+                        global_data.as_slice()
                     };
                     let result = generic.execute(rarvm::Invocation {
                         input: &block,
-                        regs: filter.regs,
+                        regs,
                         global_data: globals,
                         file_offset: file_offset as u64,
                         exec_count: program.exec_count,
@@ -1725,7 +1768,7 @@ impl Unpack29 {
                 }
             }
             out.extend_from_slice(&block);
-            pos = filter.start + filter.size;
+            pos = filter_start + filter_size;
         }
         out.extend_from_slice(self.raw_range(pos, end)?);
         Ok(out)
@@ -2135,7 +2178,12 @@ fn apply_standard_filter(
             )?;
         }
         StandardFilter::Rgb => {
-            let width = (regs[0] as usize).saturating_sub(3);
+            if regs[0] < 3 || regs[1] > 2 {
+                return Err(Error::InvalidData(
+                    "RAR 2.9 RGB filter parameters are invalid",
+                ));
+            }
+            let width = regs[0] as usize - 3;
             let pos_r = regs[1] as usize;
             *data = rgb_decode(data, width, pos_r)?;
         }
@@ -2155,6 +2203,9 @@ fn itanium_decode(data: &mut [u8], file_offset: u32) {
         return;
     }
     let base_offset = file_offset >> 4;
+    // Each 16-byte Itanium bundle can inspect a 4-byte instruction field that
+    // starts up to 13 bytes into the bundle. Keeping a 21-byte tail prevents
+    // decoding a partial final bundle.
     let block_count = (data.len() - 21).div_ceil(16);
     for block in 0..block_count {
         let pos = block * 16;
@@ -2306,11 +2357,11 @@ mod tests {
     use std::ops::Range;
 
     use super::{
-        encode_ppmd_tokens, encode_tokens, itanium_decode, itanium_encode, unpack29_decode,
-        unpack29_encode_literals, unpack29_encode_ppmd, unpack29_encode_ppmd_literals,
-        unpack29_encode_ppmd_with_filter, BitWriter, EncodeToken, Error, Huffman, PpmdEncodeToken,
-        Rar29FilterKind, Rar29FilterSpec, Result, StandardFilter, Unpack29, Unpack29Encoder,
-        VmFilter, VmProgram, VmProgramKind,
+        apply_standard_filter, encode_ppmd_tokens, encode_tokens, itanium_decode, itanium_encode,
+        unpack29_decode, unpack29_encode_literals, unpack29_encode_ppmd,
+        unpack29_encode_ppmd_literals, unpack29_encode_ppmd_with_filter, BitWriter, EncodeToken,
+        Error, Huffman, PpmdEncodeToken, Rar29FilterKind, Rar29FilterSpec, Result, StandardFilter,
+        Unpack29, Unpack29Encoder, VmFilter, VmProgram, VmProgramKind,
     };
 
     const COMPRESSED_TEXT: &[u8] = &[
@@ -2663,6 +2714,26 @@ mod tests {
     }
 
     #[test]
+    fn decode_non_solid_member_resets_reusable_decoder_state() {
+        let mut decoder = Unpack29::new();
+        decoder.output.extend_from_slice(b"stale history");
+        decoder.filters.push(VmFilter {
+            program: 0,
+            start: 0,
+            size: 1,
+            regs: [0; 7],
+            global_data: vec![1, 2, 3],
+        });
+
+        let output = decoder
+            .decode_non_solid_member(COMPRESSED_TEXT, 2400)
+            .unwrap();
+
+        assert_eq!(output, expected_text());
+        assert!(decoder.filters.is_empty());
+    }
+
+    #[test]
     fn e8_filter_uses_member_relative_offset_in_solid_stream() {
         let mut decoder = Unpack29::new();
         let member_start = 1000usize;
@@ -2736,6 +2807,37 @@ mod tests {
         let filtered = decoder.filtered_range(0, 3, 0).unwrap();
 
         assert_eq!(filtered, [0x44, 0x22, 0x33]);
+    }
+
+    #[test]
+    fn standard_filters_reject_malformed_delta_and_rgb_registers() {
+        let mut delta = vec![0; 32];
+        let mut delta_regs = [0; 7];
+        delta_regs[0] = 33;
+        assert_eq!(
+            apply_standard_filter(StandardFilter::Delta, &mut delta, 0, &delta_regs),
+            Err(Error::InvalidData(
+                "RAR 2.9 DELTA filter channel count is invalid"
+            ))
+        );
+
+        let mut rgb = vec![0; 32];
+        let mut rgb_regs = [0; 7];
+        rgb_regs[0] = 2;
+        assert_eq!(
+            apply_standard_filter(StandardFilter::Rgb, &mut rgb, 0, &rgb_regs),
+            Err(Error::InvalidData(
+                "RAR 2.9 RGB filter parameters are invalid"
+            ))
+        );
+        rgb_regs[0] = 15;
+        rgb_regs[1] = 3;
+        assert_eq!(
+            apply_standard_filter(StandardFilter::Rgb, &mut rgb, 0, &rgb_regs),
+            Err(Error::InvalidData(
+                "RAR 2.9 RGB filter parameters are invalid"
+            ))
+        );
     }
 
     #[test]

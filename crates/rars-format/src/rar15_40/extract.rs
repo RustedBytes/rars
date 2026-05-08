@@ -83,7 +83,7 @@ impl CodecState {
                         .map_err(Into::into)
                         .map_err(|error| file.map_encrypted_payload_error(password, error))
                 } else {
-                    file.unpacked_data_with_rar29(archive, decoder)
+                    file.unpacked_data_with_rar29(archive, decoder, solid)
                 }
             }
         }
@@ -112,16 +112,20 @@ impl CodecState {
                     let mut packed = file
                         .packed_reader_for_decode(archive, password)
                         .map_err(|error| file.map_encrypted_payload_error(password, error))?;
-                    decoder
-                        .decode_member_from_reader(
+                    let target = usize::try_from(file.unp_size).map_err(|_| {
+                        Error::InvalidHeader("RAR 1.5 unpacked size overflows usize")
+                    })?;
+                    if solid {
+                        decoder.decode_member_from_reader(&mut packed, target, &mut crc_writer)
+                    } else {
+                        decoder.decode_non_solid_member_from_reader(
                             &mut packed,
-                            usize::try_from(file.unp_size).map_err(|_| {
-                                Error::InvalidHeader("RAR 1.5 unpacked size overflows usize")
-                            })?,
+                            target,
                             &mut crc_writer,
                         )
-                        .map_err(Error::from)
-                        .map_err(|error| file.map_encrypted_payload_error(password, error))?;
+                    }
+                    .map_err(Error::from)
+                    .map_err(|error| file.map_encrypted_payload_error(password, error))?;
                     let actual = crc.finish();
                     file.crc_result(actual, password)
                 } else {
@@ -155,10 +159,13 @@ impl CodecState {
                 .decode_member_from_reader(input, target, &mut crc_writer)
                 .map_err(Error::from)
                 .map_err(|error| file.map_encrypted_payload_error(password, error))?,
-            Self::Unpack29(decoder) => decoder
-                .decode_member_from_reader(input, target, &mut crc_writer)
-                .map_err(Error::from)
-                .map_err(|error| file.map_encrypted_payload_error(password, error))?,
+            Self::Unpack29(decoder) => if solid {
+                decoder.decode_member_from_reader(input, target, &mut crc_writer)
+            } else {
+                decoder.decode_non_solid_member_from_reader(input, target, &mut crc_writer)
+            }
+            .map_err(Error::from)
+            .map_err(|error| file.map_encrypted_payload_error(password, error))?,
         }
         let actual = crc.finish();
         file.crc_result(actual, password)
