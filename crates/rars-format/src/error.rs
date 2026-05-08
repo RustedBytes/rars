@@ -313,6 +313,32 @@ mod tests {
     }
 
     #[test]
+    fn io_error_partial_eq_compares_kind_and_message_ignoring_source_identity() {
+        let permission = Error::from(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "locked",
+        ));
+        let permission_again = Error::from(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "locked",
+        ));
+        let different_kind = Error::from(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "locked",
+        ));
+        let different_message = Error::from(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "elsewhere",
+        ));
+
+        // Same kind + same message → equal even though Arc<io::Error> differs.
+        assert_eq!(permission, permission_again);
+        // Differing kind or message → not equal.
+        assert_ne!(permission, different_kind);
+        assert_ne!(permission, different_message);
+    }
+
+    #[test]
     fn unsupported_codec_errors_are_not_reported_as_invalid_headers() {
         assert_eq!(
             Error::UnsupportedCompression {

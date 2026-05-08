@@ -2383,4 +2383,455 @@ mod tests {
         std::fs::remove_file(&path).ok();
         std::fs::remove_dir(&dir).ok();
     }
+
+    fn parse_volumes(bytes: &[Vec<u8>]) -> Vec<Archive> {
+        bytes.iter().map(|b| Archive::parse(b).unwrap()).collect()
+    }
+
+    fn split_volumes_for(name: &[u8], data: &[u8]) -> Vec<Vec<u8>> {
+        write_stored_volumes(
+            StoredEntry {
+                name,
+                data,
+                file_time: 0,
+                file_attr: 0x20,
+                password: None,
+                file_comment: None,
+            },
+            WriterOptions::default(),
+            10,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn extract_volumes_to_rejects_pending_split_interrupted_by_regular_entry() {
+        let bytes = split_volumes_for(b"split.bin", b"abcdefghijklmnopqrstuvwxyz");
+        let mut volumes = parse_volumes(&bytes);
+
+        // After volume 0's split_after entry, append a regular entry to the
+        // same volume so the loop sees pending=Some when it hits a non-split.
+        let mut intruder = volumes[0].entries[0].clone();
+        intruder.header.flags &= !(LHD_SPLIT_BEFORE | LHD_SPLIT_AFTER);
+        intruder.name = b"intruder.bin".to_vec();
+        volumes[0].entries.push(intruder);
+
+        let err = collect_extract_volumes(&volumes, None).unwrap_err();
+        assert_eq!(
+            err,
+            Error::InvalidHeader("RAR 1.3 split entry is interrupted by a regular entry"),
+        );
+    }
+
+    #[test]
+    fn extract_volumes_to_rejects_split_with_inconsistent_flags() {
+        let bytes = split_volumes_for(b"split.bin", b"abcdefghijklmnopqrstuvwxyz");
+        let volumes = parse_volumes(&bytes);
+
+        // Take just the *middle* volume in isolation: it has split_before=true
+        // but no preceding pending state, which the match arm treats as
+        // structurally inconsistent.
+        let middle = volumes.into_iter().nth(1).unwrap();
+        let err = collect_extract_volumes(std::slice::from_ref(&middle), None).unwrap_err();
+        assert_eq!(
+            err,
+            Error::InvalidHeader("RAR 1.3 split entry flags are inconsistent"),
+        );
+    }
+
+    #[test]
+    fn extract_volumes_to_rejects_pending_split_left_incomplete_at_end() {
+        let bytes = split_volumes_for(b"split.bin", b"abcdefghijklmnopqrstuvwxyz");
+        let volumes = parse_volumes(&bytes);
+
+        // Use only the first volume, which leaves pending=Some after the loop.
+        let err =
+            collect_extract_volumes(std::slice::from_ref(&volumes[0]), None).unwrap_err();
+        assert_eq!(err, Error::InvalidHeader("RAR 1.3 split entry is incomplete"));
+    }
+
+    #[test]
+    fn extract_volumes_to_rejects_split_fragments_with_drifted_attributes() {
+        let bytes = split_volumes_for(b"split.bin", b"abcdefghijklmnopqrstuvwxyz");
+        let mut volumes = parse_volumes(&bytes);
+
+        // Mutate the second volume's entry name so PendingSplitRefs::append
+        // refuses it on a name-mismatch.
+        volumes[1].entries[0].name = b"different.bin".to_vec();
+
+        let err = collect_extract_volumes(&volumes, None).unwrap_err();
+        assert_eq!(err, Error::InvalidHeader("RAR 1.3 split entry name changed"));
+    }
+
+    #[test]
+    fn extract_volumes_to_rejects_split_fragments_with_drifted_method() {
+        let bytes = split_volumes_for(b"split.bin", b"abcdefghijklmnopqrstuvwxyz");
+        let mut volumes = parse_volumes(&bytes);
+
+        // Drift the compression method on the second fragment.
+        volumes[1].entries[0].header.method = METHOD_BEST;
+        let err = collect_extract_volumes(&volumes, None).unwrap_err();
+        assert_eq!(
+            err,
+            Error::InvalidHeader("RAR 1.3 split entry compression method changed"),
+        );
+    }
+
+    #[test]
+    fn extract_volumes_to_carries_directory_entries_across_volume_array() {
+        // A directory entry has zero-length data and gets the open() callback
+        // invoked but no payload write. Putting it in a volumes array keeps
+        // the directory branch in extract_volumes_to (rather than extract_to)
+        // exercised.
+        let input = [StoredEntry {
+            name: b"docs",
+            data: b"",
+            file_time: 0,
+            file_attr: 0x10,
+            password: None,
+            file_comment: None,
+        }];
+        let bytes = write_stored_archive(&input, WriterOptions::default()).unwrap();
+        let archive = Archive::parse(&bytes).unwrap();
+
+        let extracted = collect_extract_volumes(std::slice::from_ref(&archive), None).unwrap();
+        assert_eq!(extracted.len(), 1);
+        assert!(extracted[0].is_directory);
+        assert_eq!(extracted[0].name, b"docs");
+    }
+
+    #[test]
+    fn extract_volumes_to_routes_pending_split_reader_through_fragment_chain() {
+        // Larger payload over more volumes guarantees that the chained
+        // fragment reader reads from each volume's range_reader at least once,
+        // exercising the success arms of fragment_reader, write_to, and
+        // ChainedReader::read across multiple volumes.
+        let payload: Vec<u8> = (0..96).map(|i| ((i * 53) ^ 0xa5) as u8).collect();
+        let bytes = split_volumes_for(b"chain.bin", &payload);
+        assert!(bytes.len() >= 3, "need at least three volumes for the chain");
+        let volumes = parse_volumes(&bytes);
+
+        let extracted = collect_extract_volumes(&volumes, None).unwrap();
+        assert_eq!(extracted.len(), 1);
+        assert_eq!(extracted[0].data, payload);
+    }
+
+    #[test]
+    fn write_compressed_archive_with_comment_round_trips_through_archive_comment() {
+        let data = b"compressed archive comment payload payload payload";
+        let comment = b"This is a compressed archive comment.";
+        let input = [FileEntry {
+            name: b"payload.txt",
+            data,
+            file_time: 0,
+            file_attr: 0x20,
+            password: None,
+            file_comment: None,
+        }];
+
+        let bytes = write_compressed_archive_with_comment(
+            &input,
+            WriterOptions::default(),
+            Some(comment),
+        )
+        .unwrap();
+        let archive = Archive::parse(&bytes).unwrap();
+        assert!(archive.main.has_archive_comment());
+        assert!(archive.main.has_packed_comment());
+        assert_eq!(archive.archive_comment().unwrap().as_deref(), Some(&comment[..]));
+
+        let extracted = collect_extract(&archive, None).unwrap();
+        assert_eq!(extracted[0].data, data);
+    }
+
+    #[test]
+    fn write_compressed_archive_with_comment_emits_solid_compressed_archive() {
+        let data1 = b"solid compressed payload one with overlap overlap overlap";
+        let data2 = b"solid compressed payload two with overlap overlap overlap";
+        let mut features = FeatureSet::store_only();
+        features.solid = true;
+        let options = WriterOptions {
+            target: ArchiveVersion::Rar14,
+            features,
+        };
+        let input = [
+            FileEntry {
+                name: b"a.txt",
+                data: data1,
+                file_time: 0,
+                file_attr: 0x20,
+                password: None,
+                file_comment: None,
+            },
+            FileEntry {
+                name: b"b.txt",
+                data: data2,
+                file_time: 0,
+                file_attr: 0x20,
+                password: None,
+                file_comment: None,
+            },
+        ];
+
+        let bytes = write_compressed_archive_with_comment(&input, options, None).unwrap();
+        let archive = Archive::parse(&bytes).unwrap();
+        assert!(archive.main.is_solid());
+        assert_eq!(archive.entries.len(), 2);
+
+        let extracted = collect_extract(&archive, None).unwrap();
+        assert_eq!(extracted[0].data, data1);
+        assert_eq!(extracted[1].data, data2);
+    }
+
+    #[test]
+    fn write_compressed_archive_with_comment_rejects_non_rar13_target() {
+        let mut options = WriterOptions::default();
+        options.target = ArchiveVersion::Rar15;
+        let err = write_compressed_archive_with_comment(&[], options, None).unwrap_err();
+        assert_eq!(err, Error::UnsupportedVersion(ArchiveVersion::Rar15));
+    }
+
+    #[test]
+    fn parse_path_round_trips_multi_entry_archive_via_file_backed_seekable_path() {
+        // Two entries plus an archive comment forces parse_seekable to walk
+        // through more than one file-header read iteration.
+        let input = [
+            StoredEntry {
+                name: b"first.txt",
+                data: b"first payload",
+                file_time: 0,
+                file_attr: 0x20,
+                password: None,
+                file_comment: None,
+            },
+            StoredEntry {
+                name: b"second.txt",
+                data: b"second payload",
+                file_time: 0,
+                file_attr: 0x20,
+                password: None,
+                file_comment: None,
+            },
+        ];
+        let bytes = write_stored_archive_with_comment(
+            &input,
+            WriterOptions::default(),
+            Some(b"file-backed comment"),
+        )
+        .unwrap();
+
+        let dir = std::env::temp_dir().join(format!(
+            "rars-rar13-parse-seekable-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("multi.rar");
+        std::fs::write(&path, &bytes).unwrap();
+
+        let archive = Archive::parse_path(&path).unwrap();
+        assert_eq!(archive.entries.len(), 2);
+        assert_eq!(archive.entries[0].name, b"first.txt");
+        assert_eq!(archive.entries[1].name, b"second.txt");
+        assert_eq!(
+            archive.archive_comment().unwrap().as_deref(),
+            Some(&b"file-backed comment"[..])
+        );
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn parse_path_rejects_files_without_rar13_signature() {
+        let dir = std::env::temp_dir().join(format!(
+            "rars-rar13-parse-path-bad-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("not_a_rar.bin");
+        std::fs::write(&path, &[0u8; 64]).unwrap();
+
+        let err = Archive::parse_path(&path).unwrap_err();
+        assert_eq!(err, Error::UnsupportedSignature);
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn extract_to_encrypted_archive_reads_through_file_backed_decrypted_range() {
+        // The Memory-backed path is already exercised; this test takes the
+        // same encrypted archive out to disk so copy_decrypted_range_to runs
+        // its ArchiveSource::File branch.
+        let input = [StoredEntry {
+            name: b"secret.bin",
+            data: b"file-backed secret payload",
+            file_time: 0,
+            file_attr: 0x20,
+            password: Some(b"pw"),
+            file_comment: None,
+        }];
+        let bytes = write_stored_archive(&input, WriterOptions::default()).unwrap();
+
+        let dir = std::env::temp_dir().join(format!(
+            "rars-rar13-decrypt-file-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("encrypted.rar");
+        std::fs::write(&path, &bytes).unwrap();
+
+        let archive = Archive::parse_path(&path).unwrap();
+        let extracted = collect_extract(&archive, Some(b"pw")).unwrap();
+        assert_eq!(extracted[0].data, b"file-backed secret payload");
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn write_stored_volumes_rejects_password_protected_entries() {
+        let entry = StoredEntry {
+            name: b"locked.bin",
+            data: b"data",
+            file_time: 0,
+            file_attr: 0x20,
+            password: Some(b"pw"),
+            file_comment: None,
+        };
+        let err = write_stored_volumes(entry, WriterOptions::default(), 16).unwrap_err();
+        assert_eq!(
+            err,
+            Error::UnsupportedFeature {
+                version: ArchiveVersion::Rar14,
+                feature: "volume_password",
+            }
+        );
+    }
+
+    #[test]
+    fn write_compressed_volumes_rejects_archive_comment_feature() {
+        let mut features = FeatureSet::store_only();
+        features.archive_comment = true;
+        let entry = FileEntry {
+            name: b"with-comment.bin",
+            data: b"data",
+            file_time: 0,
+            file_attr: 0x20,
+            password: None,
+            file_comment: None,
+        };
+        let err = write_compressed_volumes(
+            entry,
+            WriterOptions {
+                target: ArchiveVersion::Rar14,
+                features,
+            },
+            16,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            Error::UnsupportedFeature {
+                version: ArchiveVersion::Rar14,
+                feature: "volume_archive_comment",
+            }
+        );
+    }
+
+    #[test]
+    fn write_compressed_volumes_rejects_non_rar13_target() {
+        let mut options = WriterOptions::default();
+        options.target = ArchiveVersion::Rar20;
+        let entry = FileEntry {
+            name: b"x.bin",
+            data: b"data",
+            file_time: 0,
+            file_attr: 0x20,
+            password: None,
+            file_comment: None,
+        };
+        let err = write_compressed_volumes(entry, options, 16).unwrap_err();
+        assert_eq!(err, Error::UnsupportedVersion(ArchiveVersion::Rar20));
+    }
+
+    #[test]
+    fn file_header_parse_rejects_input_below_base_size() {
+        let err = FileHeader::parse(&[0u8; FILE_HEAD_BASE_SIZE - 1]).unwrap_err();
+        assert_eq!(err, Error::TooShort);
+    }
+
+    #[test]
+    fn file_header_parse_rejects_truncated_input_against_declared_head_size() {
+        // Build a syntactically OK FILE_HEAD_BASE_SIZE buffer that declares a
+        // head_size larger than the slice we pass in — exercises the
+        // post-name-size length check at the end of FileHeader::parse.
+        let mut header = [0u8; FILE_HEAD_BASE_SIZE];
+        // pack_size, unp_size, file_crc, file_time stay zero.
+        let declared_head_size: u16 = (FILE_HEAD_BASE_SIZE + 32) as u16;
+        header[10..12].copy_from_slice(&declared_head_size.to_le_bytes());
+        // name_size = 0 keeps minimum_size == FILE_HEAD_BASE_SIZE so the
+        // earlier "shorter than its name" branch is bypassed.
+        header[19] = 0;
+        let err = FileHeader::parse(&header).unwrap_err();
+        assert_eq!(err, Error::TooShort);
+    }
+
+    #[test]
+    fn archive_comment_rejects_size_field_shorter_than_two_bytes() {
+        // Build a valid stored archive then patch its main header so the
+        // declared comment field is shorter than two bytes — exercises the
+        // "packed archive comment is shorter than size field" arm.
+        let input = [StoredEntry {
+            name: b"file.bin",
+            data: b"data",
+            file_time: 0,
+            file_attr: 0x20,
+            password: None,
+            file_comment: None,
+        }];
+        let bytes = write_stored_archive_with_comment(
+            &input,
+            WriterOptions::default(),
+            Some(b"hi"),
+        )
+        .unwrap();
+        let mut archive = Archive::parse(&bytes).unwrap();
+        // The first two bytes of `main.extra` are the comment_field length —
+        // overwrite them with 1 to declare a sub-2-byte payload while keeping
+        // the packed-comment flag set.
+        archive.main.extra[0] = 1;
+        archive.main.extra[1] = 0;
+        assert_eq!(
+            archive.archive_comment(),
+            Err(Error::InvalidHeader(
+                "RAR 1.3 packed archive comment is shorter than size field"
+            ))
+        );
+    }
+
+    #[test]
+    fn archive_comment_rejects_packed_payload_extending_past_extra_buffer() {
+        let input = [StoredEntry {
+            name: b"file.bin",
+            data: b"data",
+            file_time: 0,
+            file_attr: 0x20,
+            password: None,
+            file_comment: None,
+        }];
+        let bytes = write_stored_archive_with_comment(
+            &input,
+            WriterOptions::default(),
+            Some(b"hi"),
+        )
+        .unwrap();
+        let mut archive = Archive::parse(&bytes).unwrap();
+        // Pump the declared comment field length up so the packed range walks
+        // past the end of `main.extra`.
+        let inflated = (archive.main.extra.len() as u16 + 16).to_le_bytes();
+        archive.main.extra[0] = inflated[0];
+        archive.main.extra[1] = inflated[1];
+        assert_eq!(archive.archive_comment(), Err(Error::TooShort));
+    }
 }
