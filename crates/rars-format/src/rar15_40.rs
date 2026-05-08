@@ -2622,4 +2622,245 @@ mod tests {
         assert_eq!(explicit.target, ArchiveVersion::Rar20);
         assert_eq!(explicit.features, FeatureSet::store_only());
     }
+
+    fn stored_archive_bytes(name: &[u8], data: &[u8]) -> Vec<u8> {
+        write_stored_archive(
+            &[StoredEntry {
+                name,
+                data,
+                file_time: 0,
+                file_attr: 0x20,
+                host_os: 3,
+                password: None,
+                file_comment: None,
+            }],
+            WriterOptions::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn archive_parse_owned_consumes_buffer_without_changing_dispatch() {
+        let bytes = stored_archive_bytes(b"owned.txt", b"hello rar15 owned");
+        let archive = Archive::parse_owned(bytes.clone()).unwrap();
+        assert_eq!(archive.files().count(), 1);
+        let file = archive.files().next().unwrap();
+        assert_eq!(file.name, b"owned.txt");
+
+        // Default ArchiveReadOptions delegate also drives the same code path.
+        let with_options = Archive::parse_owned_with_options(
+            bytes.clone(),
+            crate::ArchiveReadOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(with_options.files().count(), 1);
+
+        let no_password = Archive::parse_owned_with_password(bytes, None).unwrap();
+        assert_eq!(no_password.files().count(), 1);
+    }
+
+    #[test]
+    fn archive_parse_owned_with_password_unlocks_encrypted_archive() {
+        let mut features = FeatureSet::store_only();
+        features.file_encryption = true;
+        let bytes = write_stored_archive(
+            &[StoredEntry {
+                name: b"locked.txt",
+                data: b"encrypted owned payload",
+                file_time: 0,
+                file_attr: 0x20,
+                host_os: 3,
+                password: Some(b"pw"),
+                file_comment: None,
+            }],
+            WriterOptions {
+                target: ArchiveVersion::Rar20,
+                features,
+                compression_level: None,
+            },
+        )
+        .unwrap();
+
+        let archive = Archive::parse_owned_with_password(bytes, Some(b"pw")).unwrap();
+        let file = archive.files().next().unwrap();
+        assert!(file.is_encrypted());
+    }
+
+    #[test]
+    fn file_header_write_packed_data_streams_through_writer() {
+        let payload = b"write_packed_data direct dump";
+        let bytes = stored_archive_bytes(b"dump.bin", payload);
+        let archive = Archive::parse(&bytes).unwrap();
+        let file = archive.files().next().unwrap();
+
+        let mut sink = Vec::new();
+        file.write_packed_data(&archive, &mut sink).unwrap();
+        assert_eq!(sink, payload);
+    }
+
+    #[test]
+    fn file_header_unsupported_compression_describes_method_and_unpack_version() {
+        let mut header = file_header_with(0);
+        header.method = 0x33;
+        header.unp_ver = 26;
+        let err = header.unsupported_compression();
+        assert!(matches!(
+            err,
+            Error::UnsupportedCompression {
+                family: "RAR 1.5-4.x",
+                unpack_version: 26,
+                method: 0x33,
+            }
+        ));
+    }
+
+    #[test]
+    fn file_header_unsupported_encryption_describes_unpack_version() {
+        let mut header = file_header_with(FHD_PASSWORD);
+        header.unp_ver = 36;
+        let err = header.unsupported_encryption();
+        assert!(matches!(
+            err,
+            Error::UnsupportedEncryption {
+                family: "RAR 1.5-4.x",
+                unpack_version: 36,
+            }
+        ));
+    }
+
+    #[test]
+    fn crc_writer_flush_propagates_to_inner_writer() {
+        struct FlushSpy {
+            data: Vec<u8>,
+            flushed: usize,
+        }
+        impl Write for FlushSpy {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.data.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.flushed += 1;
+                Ok(())
+            }
+        }
+        let mut inner = FlushSpy {
+            data: Vec::new(),
+            flushed: 0,
+        };
+        let mut crc = Crc32::new();
+        let mut writer = CrcWriter {
+            inner: &mut inner,
+            crc: &mut crc,
+        };
+        writer.write_all(b"hi").unwrap();
+        writer.flush().unwrap();
+        assert_eq!(inner.data, b"hi");
+        assert_eq!(inner.flushed, 1);
+    }
+
+    #[test]
+    fn parse_main_header_rejects_block_size_below_minimum() {
+        let block = BlockHeader {
+            head_crc: 0,
+            head_type: MAIN_HEAD,
+            flags: 0,
+            head_size: 12,
+            add_size: None,
+            offset: 0,
+        };
+        let err = parse_main_header(&[0u8; 32], &block).unwrap_err();
+        assert_eq!(err, Error::InvalidHeader("RAR 1.5 main header is too short"));
+    }
+
+    #[test]
+    fn parse_main_header_rejects_block_extending_past_input_buffer() {
+        let block = BlockHeader {
+            head_crc: 0,
+            head_type: MAIN_HEAD,
+            flags: 0,
+            head_size: 13,
+            add_size: None,
+            offset: 8,
+        };
+        // Buffer is shorter than offset + head_size.
+        let err = parse_main_header(&[0u8; 16], &block).unwrap_err();
+        assert_eq!(err, Error::TooShort);
+    }
+
+    #[test]
+    fn parse_main_header_reads_encrypt_version_when_flag_is_set() {
+        // Build a synthetic main header at offset 0: 13 bytes of base + 1 byte
+        // for the encrypt_version field at position 13.
+        let mut input = vec![0u8; 14];
+        input[13] = 0x29;
+        let block = BlockHeader {
+            head_crc: 0,
+            head_type: MAIN_HEAD,
+            flags: MHD_ENCRYPTVER,
+            head_size: 14,
+            add_size: None,
+            offset: 0,
+        };
+        let main = parse_main_header(&input, &block).unwrap();
+        assert_eq!(main.encrypt_version, Some(0x29));
+    }
+
+    #[test]
+    fn decode_file_name_returns_raw_when_unicode_flag_is_clear() {
+        let raw = b"plain.txt";
+        let decoded = decode_file_name(raw, 0);
+        assert_eq!(decoded, raw);
+    }
+
+    #[test]
+    fn decode_file_name_returns_raw_when_unicode_marker_is_missing() {
+        // FHD_UNICODE set but no zero byte to split fallback from encoded
+        // payload — the decoder falls back to the raw bytes.
+        let raw = b"no-zero-marker";
+        let decoded = decode_file_name(raw, FHD_UNICODE);
+        assert_eq!(decoded, raw);
+    }
+
+    #[test]
+    fn decode_file_name_returns_fallback_when_no_encoded_payload_follows_zero() {
+        // Zero byte present but nothing after it — the decoder returns just
+        // the fallback prefix.
+        let mut raw = b"fallback".to_vec();
+        raw.push(0);
+        let decoded = decode_file_name(&raw, FHD_UNICODE);
+        assert_eq!(decoded, b"fallback");
+    }
+
+    #[test]
+    fn decode_file_name_decodes_mode_zero_low_byte_only_units() {
+        // Mode 0 emits one ASCII byte per code unit. Encoded payload format:
+        //   high_byte, flag_byte, byte0, byte1, ...
+        // flag_byte = 0b00_00_00_00 → four mode-0 emits.
+        let mut raw = b"orig".to_vec();
+        raw.push(0); // separator
+        raw.push(0); // high_byte (unused for mode 0)
+        raw.push(0b00_00_00_00); // flag_byte: four mode-0 codes
+        raw.extend_from_slice(b"abcd");
+        let decoded = decode_file_name(&raw, FHD_UNICODE);
+        assert_eq!(decoded, b"abcd");
+    }
+
+    #[test]
+    fn decode_file_name_decodes_mode_two_full_two_byte_units() {
+        // Mode 2 reads (low, high) bytes for a full UTF-16 code unit.
+        // Encode "Hi" via mode 2 twice: flag_byte = 0b10_10_00_00.
+        let mut raw = b"".to_vec();
+        raw.push(0); // separator (zero_pos = 0)
+        raw.push(0); // high_byte placeholder
+        raw.push(0b10_10_00_00); // two mode-2, then two mode-0 (which we won't reach)
+        // First unit 'H' = U+0048: low=0x48, high=0x00
+        raw.extend_from_slice(&[0x48, 0x00]);
+        // Second unit 'i' = U+0069
+        raw.extend_from_slice(&[0x69, 0x00]);
+        let decoded = decode_file_name(&raw, FHD_UNICODE);
+        // The decoder may emit further units from the trailing flag bits;
+        // accept any output that begins with "Hi".
+        assert!(decoded.starts_with(b"Hi"), "got {decoded:?}");
+    }
 }

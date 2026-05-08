@@ -1431,4 +1431,34 @@ mod tests {
             third
         );
     }
+
+    #[test]
+    fn decode_member_to_streams_decoded_payload_through_writer_sink() {
+        let input = b"abcabcabcabcabcabcabcabcabcabcabcabc";
+        let packed = unpack20_encode_literals(input).unwrap();
+
+        let mut decoder = Unpack20::new();
+        let mut sink = Vec::new();
+        decoder
+            .decode_member_to(&packed, input.len(), &mut sink)
+            .unwrap();
+        assert_eq!(sink, input);
+
+        // The error-mapping closure inside decode_member_to fires when the
+        // sink's write_all returns Err — feed it a writer that always fails.
+        struct FailingWriter;
+        impl std::io::Write for FailingWriter {
+            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("disk full"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut decoder = Unpack20::new();
+        let err = decoder
+            .decode_member_to(&packed, input.len(), &mut FailingWriter)
+            .unwrap_err();
+        assert_eq!(err, Error::InvalidData("RAR 2.0 output write failed"));
+    }
 }

@@ -500,4 +500,24 @@ mod tests {
             "bad symbol"
         );
     }
+
+    #[test]
+    fn unsupported_family_feature_display_renders_family_and_feature() {
+        assert_eq!(
+            Error::UnsupportedFamilyFeature {
+                family: ArchiveFamily::Rar13,
+                feature: "recovery repair for RAR 1.3/1.4 archives",
+            }
+            .to_string(),
+            "feature recovery repair for RAR 1.3/1.4 archives is not supported by Rar13",
+        );
+    }
+
+    #[test]
+    fn rar50_crypto_unaligned_input_display_uses_named_message() {
+        assert_eq!(
+            Error::from(rars_crypto::rar50::Error::UnalignedInput).to_string(),
+            "RAR 5 AES input is not block aligned"
+        );
+    }
 }

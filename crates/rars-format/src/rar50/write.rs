@@ -2990,4 +2990,11 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+
+    #[test]
+    fn writer_options_default_targets_rar50_with_store_only_features() {
+        let options = WriterOptions::default();
+        assert_eq!(options.target, crate::ArchiveVersion::Rar50);
+        assert_eq!(options.features, crate::FeatureSet::store_only());
+    }
 }

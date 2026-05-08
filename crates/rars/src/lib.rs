@@ -4193,4 +4193,102 @@ mod tests {
         assert_eq!(extracted[1].name, b"solid-volume-two.txt");
         assert_eq!(extracted[1].data, second);
     }
+
+    #[test]
+    fn archive_as_rar13_returns_some_only_for_rar13_family() {
+        let bytes = rar13::write_stored_archive(
+            &[rar13::StoredEntry {
+                name: b"old.txt",
+                data: b"r13 downcast",
+                file_time: 0,
+                file_attr: 0x20,
+                password: None,
+                file_comment: None,
+            }],
+            rar13_options(ArchiveVersion::Rar14),
+        )
+        .unwrap();
+        let archive = ArchiveReader::read(&bytes).unwrap();
+        let raw = archive.as_rar13().unwrap();
+        assert_eq!(raw.entries[0].name, b"old.txt");
+        assert!(archive.as_rar15_40().is_none());
+        assert!(archive.as_rar50().is_none());
+
+        // Other-family archives should refuse the rar13 downcast.
+        let rar15_bytes = rar15_40::write_stored_archive(
+            &[rar15_40::StoredEntry {
+                name: b"mid.txt",
+                data: b"r15 downcast",
+                file_time: 0,
+                file_attr: 0x20,
+                host_os: 3,
+                password: None,
+                file_comment: None,
+            }],
+            rar15_options(ArchiveVersion::Rar15),
+        )
+        .unwrap();
+        let rar15_archive = ArchiveReader::read(&rar15_bytes).unwrap();
+        assert!(rar15_archive.as_rar13().is_none());
+
+        let rar50_bytes = rar50::Rar50Writer::new(rar50_options(ArchiveVersion::Rar50))
+            .stored_entries(&[rar50::StoredEntry {
+                name: b"new.txt",
+                data: b"r50 downcast",
+                mtime: None,
+                attributes: 0x20,
+                host_os: 3,
+            }])
+            .finish()
+            .unwrap();
+        let rar50_archive = ArchiveReader::read(&rar50_bytes).unwrap();
+        assert!(rar50_archive.as_rar13().is_none());
+    }
+
+    #[test]
+    fn archive_facade_repair_recovery_returns_full_repaired_archive_bytes() {
+        let bytes = std::fs::read(rar15_40_fixture("rar250_protect_head_rr5.rar")).unwrap();
+        let mut damaged = bytes.clone();
+        damaged[512 + 16..512 + 80].fill(0xa5);
+        let damaged_archive = ArchiveReader::read(&damaged).unwrap();
+
+        let repaired = damaged_archive.repair_recovery().unwrap();
+        assert_eq!(repaired, bytes);
+    }
+
+    #[test]
+    fn archive_facade_repair_recovery_rejects_rar13_archives() {
+        let bytes = rar13::write_stored_archive(
+            &[rar13::StoredEntry {
+                name: b"old.txt",
+                data: b"old data",
+                file_time: 0,
+                file_attr: 0x20,
+                password: None,
+                file_comment: None,
+            }],
+            rar13_options(ArchiveVersion::Rar14),
+        )
+        .unwrap();
+        let archive = ArchiveReader::read(&bytes).unwrap();
+        assert_eq!(
+            archive.repair_recovery(),
+            Err(Error::UnsupportedFamilyFeature {
+                family: ArchiveFamily::Rar13,
+                feature: "recovery repair for RAR 1.3/1.4 archives",
+            })
+        );
+    }
+
+    #[test]
+    fn archive_reader_read_path_dispatches_to_default_options() {
+        // Existing tests cover read_path_with_options; this ensures the
+        // zero-arg convenience wrapper actually delegates to it.
+        let archive = ArchiveReader::read_path(rar15_40_fixture(
+            "rar250_protect_head_rr5.rar",
+        ))
+        .unwrap();
+        assert_eq!(archive.family(), ArchiveFamily::Rar15To40);
+        assert!(archive.as_rar15_40().unwrap().main.has_recovery_record());
+    }
 }
