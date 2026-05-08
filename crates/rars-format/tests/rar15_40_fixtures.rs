@@ -23,6 +23,23 @@ fn fixture(name: &str) -> PathBuf {
 const RARS_GENERATED_PAYLOAD: &[u8] = b"rar15 oracle payload\n";
 const RARS_GENERATED_SECOND: &[u8] = b"rar15 oracle second file\n";
 
+fn level_sensitive_payload() -> Vec<u8> {
+    let pattern: Vec<u8> = (0..=255).collect();
+    let mut data = Vec::new();
+    for round in 0..8u8 {
+        data.extend_from_slice(&pattern);
+        for index in 0..32u8 {
+            let mut decoy = pattern.clone();
+            for byte in decoy.iter_mut().skip(7).step_by(11) {
+                *byte = byte.wrapping_add(index).wrapping_add(round).wrapping_add(1);
+            }
+            data.extend_from_slice(&decoy);
+        }
+        data.extend_from_slice(&pattern);
+    }
+    data
+}
+
 const RARS_GENERATED_FIXTURE_BYTES: &[(&str, usize, u32)] = &[
     ("comments.rar", 122, 0x23ef_1c79),
     ("compressed.rar", 87, 0x13ca_0571),
@@ -2459,6 +2476,56 @@ fn default_rar29_writer_uses_auto_policy_for_x86() {
     assert_eq!(default, explicit_auto);
     assert_eq!(default_archive.files().next().unwrap().method, 0x33);
     assert_eq!(collect_extract(&auto_archive).unwrap()[0].data, payload);
+}
+
+#[test]
+fn rar29_family_writer_levels_increase_lz_match_effort() {
+    let payload = level_sensitive_payload();
+    let entries = [FileEntry {
+        name: b"rar29-level-effort.bin",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+
+    for target in [
+        ArchiveVersion::Rar29,
+        ArchiveVersion::Rar30,
+        ArchiveVersion::Rar40,
+    ] {
+        let level_one = write_compressed_archive(
+            &entries,
+            WriterOptions::new(target, FeatureSet::store_only()).with_compression_level(1),
+        )
+        .unwrap();
+        let level_three = write_compressed_archive(
+            &entries,
+            WriterOptions::new(target, FeatureSet::store_only()).with_compression_level(3),
+        )
+        .unwrap();
+        let level_one_archive = Archive::parse(&level_one).unwrap();
+        let level_three_archive = Archive::parse(&level_three).unwrap();
+        let level_one_file = level_one_archive.files().next().unwrap();
+        let level_three_file = level_three_archive.files().next().unwrap();
+
+        assert_eq!(level_one_file.method, 0x33, "{target:?} level 1");
+        assert_eq!(level_three_file.method, 0x33, "{target:?} level 3");
+        assert!(
+            level_three_file.pack_size < level_one_file.pack_size,
+            "{target:?}"
+        );
+        assert_eq!(
+            collect_extract(&level_one_archive).unwrap()[0].data,
+            payload
+        );
+        assert_eq!(
+            collect_extract(&level_three_archive).unwrap()[0].data,
+            payload
+        );
+    }
 }
 
 #[test]

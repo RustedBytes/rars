@@ -2,8 +2,8 @@ use super::*;
 use rars_codec::rar13::{unpack15_encode, Unpack15Encoder};
 use rars_codec::rar20::{unpack20_encode_literals, Unpack20Encoder};
 use rars_codec::rar29::{
-    unpack29_encode_literals, unpack29_encode_ppmd, unpack29_encode_ppmd_with_filter,
-    Unpack29Encoder,
+    unpack29_encode_literals, unpack29_encode_literals_with_options, unpack29_encode_ppmd,
+    unpack29_encode_ppmd_with_filter, EncodeOptions as Rar29EncodeOptions, Unpack29Encoder,
 };
 pub use rars_codec::rar29::{Rar29FilterKind as FilterKind, Rar29FilterSpec as FilterSpec};
 use std::ops::Range;
@@ -16,6 +16,7 @@ const AUTO_X86_MAX_SPAN_RANGES: usize = 2;
 const AUTO_X86_MIN_SPAN_OPCODES: usize = 4;
 const AUTO_RGB_WIDTHS: [usize; 4] = [24, 48, 96, 192];
 const MIN_STORE_FALLBACK_SIZE: usize = 1024;
+const RAR29_MAX_MATCH_CANDIDATES_DEFAULT: usize = 256;
 
 pub fn write_stored_archive(
     entries: &[StoredEntry<'_>],
@@ -78,7 +79,11 @@ pub fn write_compressed_archive_with_comment(
     }
     write_main_header(&mut out, main_flags);
     write_archive_comment(&mut out, archive_comment, options.target)?;
-    let mut solid_encoder = SolidEncoder::for_target(options.target, options.features.solid);
+    let mut solid_encoder = SolidEncoder::for_target(
+        options.target,
+        options.features.solid,
+        options.compression_level,
+    )?;
     let mut solid_run_has_member = false;
     for entry in entries {
         let payload = encode_or_store_payload(entry.data, options, &mut solid_encoder)?;
@@ -115,20 +120,22 @@ pub fn write_rar29_compressed_archive_with_filter_policy(
     policy: FilterPolicy,
 ) -> Result<Vec<u8>> {
     validate_rar29_filter_policy(&policy)?;
+    let encode_options = rar29_encode_options_for_level(options.compression_level)?;
     write_rar29_filtered_archive(entries, options, |entry| {
-        encode_rar29_policy_filtered_payload(entry.data, &policy)
+        encode_rar29_policy_filtered_payload(entry.data, &policy, encode_options)
     })
 }
 
 fn encode_rar29_policy_filtered_payload(
     data: &[u8],
     policy: &FilterPolicy,
+    options: Rar29EncodeOptions,
 ) -> Result<EncodedPayload> {
     match policy {
-        FilterPolicy::Lz => encode_rar29_lz_member(data),
-        FilterPolicy::Auto => encode_rar29_auto_filtered_member(data),
+        FilterPolicy::Lz => encode_rar29_lz_member(data, options),
+        FilterPolicy::Auto => encode_rar29_auto_filtered_member(data, options),
         FilterPolicy::Explicit(filter) => Ok(EncodedPayload {
-            data: encode_rar29_filtered_member(data, filter.clone())?,
+            data: encode_rar29_filtered_member(data, filter.clone(), options)?,
             method: 0x33,
         }),
         FilterPolicy::Ppmd => Ok(EncodedPayload {
@@ -174,8 +181,8 @@ fn validate_rar29_filter_policy(policy: &FilterPolicy) -> Result<()> {
     Ok(())
 }
 
-fn encode_rar29_lz_member(data: &[u8]) -> Result<EncodedPayload> {
-    let compressed = unpack29_encode_literals(data).map_err(Error::from)?;
+fn encode_rar29_lz_member(data: &[u8], options: Rar29EncodeOptions) -> Result<EncodedPayload> {
+    let compressed = unpack29_encode_literals_with_options(data, options).map_err(Error::from)?;
     if data.len() >= MIN_STORE_FALLBACK_SIZE && compressed.len() >= data.len() {
         return Ok(EncodedPayload {
             data: data.to_vec(),
@@ -188,15 +195,22 @@ fn encode_rar29_lz_member(data: &[u8]) -> Result<EncodedPayload> {
     })
 }
 
-fn encode_rar29_filtered_member(data: &[u8], filter: FilterSpec) -> Result<Vec<u8>> {
-    Unpack29Encoder::new()
+fn encode_rar29_filtered_member(
+    data: &[u8],
+    filter: FilterSpec,
+    options: Rar29EncodeOptions,
+) -> Result<Vec<u8>> {
+    Unpack29Encoder::with_options(options)
         .encode_member_with_filter(data, filter)
         .map_err(Error::from)
 }
 
-fn encode_rar29_auto_filtered_member(data: &[u8]) -> Result<EncodedPayload> {
+fn encode_rar29_auto_filtered_member(
+    data: &[u8],
+    options: Rar29EncodeOptions,
+) -> Result<EncodedPayload> {
     let mut best = EncodedPayload {
-        data: unpack29_encode_literals(data).map_err(Error::from)?,
+        data: unpack29_encode_literals_with_options(data, options).map_err(Error::from)?,
         method: 0x33,
     };
     let mut candidates = vec![
@@ -205,27 +219,39 @@ fn encode_rar29_auto_filtered_member(data: &[u8]) -> Result<EncodedPayload> {
             method: 0x35,
         },
         EncodedPayload {
-            data: encode_rar29_filtered_member(data, FilterSpec::whole(FilterKind::E8))?,
+            data: encode_rar29_filtered_member(data, FilterSpec::whole(FilterKind::E8), options)?,
             method: 0x33,
         },
         EncodedPayload {
-            data: encode_rar29_filtered_member(data, FilterSpec::whole(FilterKind::E8E9))?,
+            data: encode_rar29_filtered_member(data, FilterSpec::whole(FilterKind::E8E9), options)?,
             method: 0x33,
         },
         EncodedPayload {
-            data: encode_rar29_filtered_member(data, FilterSpec::whole(FilterKind::Itanium))?,
+            data: encode_rar29_filtered_member(
+                data,
+                FilterSpec::whole(FilterKind::Itanium),
+                options,
+            )?,
             method: 0x33,
         },
     ];
     for range in auto_x86_filter_ranges(data, false) {
         candidates.push(EncodedPayload {
-            data: encode_rar29_filtered_member(data, FilterSpec::range(FilterKind::E8, range))?,
+            data: encode_rar29_filtered_member(
+                data,
+                FilterSpec::range(FilterKind::E8, range),
+                options,
+            )?,
             method: 0x33,
         });
     }
     for range in auto_x86_filter_ranges(data, true) {
         candidates.push(EncodedPayload {
-            data: encode_rar29_filtered_member(data, FilterSpec::range(FilterKind::E8E9, range))?,
+            data: encode_rar29_filtered_member(
+                data,
+                FilterSpec::range(FilterKind::E8E9, range),
+                options,
+            )?,
             method: 0x33,
         });
     }
@@ -234,6 +260,7 @@ fn encode_rar29_auto_filtered_member(data: &[u8]) -> Result<EncodedPayload> {
             data: encode_rar29_filtered_member(
                 data,
                 FilterSpec::whole(FilterKind::Delta { channels }),
+                options,
             )?,
             method: 0x33,
         });
@@ -241,6 +268,7 @@ fn encode_rar29_auto_filtered_member(data: &[u8]) -> Result<EncodedPayload> {
             data: encode_rar29_filtered_member(
                 data,
                 FilterSpec::whole(FilterKind::Audio { channels }),
+                options,
             )?,
             method: 0x33,
         });
@@ -251,6 +279,7 @@ fn encode_rar29_auto_filtered_member(data: &[u8]) -> Result<EncodedPayload> {
                 data: encode_rar29_filtered_member(
                     data,
                     FilterSpec::whole(FilterKind::Rgb { width, pos_r: 0 }),
+                    options,
                 )?,
                 method: 0x33,
             });
@@ -440,7 +469,11 @@ fn write_header_encrypted_compressed_archive(
     out.extend_from_slice(RAR15_SIGNATURE);
     let main_flags = MHD_PASSWORD | if options.features.solid { MHD_SOLID } else { 0 };
     write_main_header(&mut out, main_flags);
-    let mut solid_encoder = SolidEncoder::for_target(options.target, options.features.solid);
+    let mut solid_encoder = SolidEncoder::for_target(
+        options.target,
+        options.features.solid,
+        options.compression_level,
+    )?;
     let mut solid_run_has_member = false;
     for entry in entries {
         let payload = encode_or_store_payload(entry.data, options, &mut solid_encoder)?;
@@ -701,6 +734,24 @@ fn validate_compression_level(options: WriterOptions) -> Result<()> {
     Ok(())
 }
 
+fn rar29_encode_options_for_level(level: Option<u8>) -> Result<Rar29EncodeOptions> {
+    let candidates = match level {
+        None => RAR29_MAX_MATCH_CANDIDATES_DEFAULT,
+        Some(0) => 0,
+        Some(1) => 8,
+        Some(2) => 32,
+        Some(3) => 96,
+        Some(4) => RAR29_MAX_MATCH_CANDIDATES_DEFAULT,
+        Some(5) => 512,
+        Some(_) => {
+            return Err(Error::InvalidHeader(
+                "RAR compression level must be in the range 0..5",
+            ))
+        }
+    };
+    Ok(Rar29EncodeOptions::new(candidates))
+}
+
 enum SolidEncoder {
     Rar15(Box<Unpack15Encoder>),
     Rar20(Unpack20Encoder),
@@ -708,18 +759,23 @@ enum SolidEncoder {
 }
 
 impl SolidEncoder {
-    fn for_target(target: ArchiveVersion, solid: bool) -> Option<Self> {
+    fn for_target(
+        target: ArchiveVersion,
+        solid: bool,
+        compression_level: Option<u8>,
+    ) -> Result<Option<Self>> {
         if !solid {
-            return None;
+            return Ok(None);
         }
-        match target {
-            ArchiveVersion::Rar15 => Some(Self::Rar15(Box::new(Unpack15Encoder::new()))),
-            ArchiveVersion::Rar20 => Some(Self::Rar20(Unpack20Encoder::new())),
-            ArchiveVersion::Rar29 | ArchiveVersion::Rar30 | ArchiveVersion::Rar40 => {
-                Some(Self::Rar29(Unpack29Encoder::new()))
-            }
-            _ => None,
-        }
+        let encoder = match target {
+            ArchiveVersion::Rar15 => Self::Rar15(Box::new(Unpack15Encoder::new())),
+            ArchiveVersion::Rar20 => Self::Rar20(Unpack20Encoder::new()),
+            ArchiveVersion::Rar29 | ArchiveVersion::Rar30 | ArchiveVersion::Rar40 => Self::Rar29(
+                Unpack29Encoder::with_options(rar29_encode_options_for_level(compression_level)?),
+            ),
+            _ => return Ok(None),
+        };
+        Ok(Some(encoder))
     }
 }
 
@@ -747,15 +803,16 @@ fn encode_or_store_payload(
             ArchiveVersion::Rar29 | ArchiveVersion::Rar30 | ArchiveVersion::Rar40
         )
     {
+        let encode_options = rar29_encode_options_for_level(options.compression_level)?;
         if matches!(options.compression_level, Some(1..=3)) {
-            return encode_rar29_lz_member(data);
+            return encode_rar29_lz_member(data, encode_options);
         }
-        return encode_rar29_auto_filtered_member(data);
+        return encode_rar29_auto_filtered_member(data, encode_options);
     }
     let compressed = encode_compressed_payload(data, target, solid_encoder.as_mut())?;
     if data.len() >= MIN_STORE_FALLBACK_SIZE && compressed.len() >= data.len() {
         if solid {
-            *solid_encoder = SolidEncoder::for_target(target, true);
+            *solid_encoder = SolidEncoder::for_target(target, true, options.compression_level)?;
         }
         return Ok(EncodedPayload {
             data: data.to_vec(),

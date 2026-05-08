@@ -33,14 +33,6 @@
 - Improve RAR29/RAR30/RAR40 max-level policy after `--level` is wired:
   filter-block boundary tuning, match-finder quality, lazy parsing, and PPMd
   tuning against WinRAR 2.90/3.x/4.x oracles.
-- Add intermediate RAR29/RAR30/RAR40 writer tiers for `--level 1..3`.
-  Current output has only two strategies (`m1..m3` fast LZ, `m4..m5`
-  best auto). Bench data shows the best tier is competitive, but the low and
-  default levels trail WinRAR because they lack graded match-finder/filter
-  effort.
-- Differentiate RAR5/RAR7 `--level 1..5`. Current output collapses every
-  non-zero level to the same method-1 stream; add graded match-finder/filter
-  effort before treating the writer policy as production-quality.
 - Add RAR7-specific writer policy once fixtures/oracles identify useful
   version-7-only behaviour. RAR70 currently uses the RAR5 writer shape and
   emits byte-identical archives for the benchmark corpus.

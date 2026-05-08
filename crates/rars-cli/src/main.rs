@@ -1157,7 +1157,10 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
             features.quick_open = quick_open;
             features.recovery_record = recovery_percent.is_some();
             features.solid = solid;
-            let options = rars::rar50::WriterOptions::new(target, features);
+            let mut options = rars::rar50::WriterOptions::new(target, features);
+            if let Some(level) = compression_level {
+                options = options.with_compression_level(level);
+            }
             if let Some(volume_size) = volume_size {
                 if archive_comment.is_some() {
                     return Err("RAR 5 writer does not support comments on volumes yet".into());

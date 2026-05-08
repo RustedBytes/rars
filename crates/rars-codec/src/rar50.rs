@@ -447,12 +447,55 @@ pub fn encode_lz_member(data: &[u8], algorithm_version: u8) -> Result<Vec<u8>> {
     encode_lz_member_with_history(data, &[], algorithm_version)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct EncodeOptions {
+    pub max_match_candidates: usize,
+}
+
+impl EncodeOptions {
+    pub const fn new(max_match_candidates: usize) -> Self {
+        Self {
+            max_match_candidates,
+        }
+    }
+}
+
+impl Default for EncodeOptions {
+    fn default() -> Self {
+        Self::new(MAX_MATCH_CANDIDATES)
+    }
+}
+
 pub fn encode_lz_member_with_history(
     data: &[u8],
     history: &[u8],
     algorithm_version: u8,
 ) -> Result<Vec<u8>> {
-    encode_lz_member_inner(data, history, algorithm_version, None)
+    encode_lz_member_inner(
+        data,
+        history,
+        algorithm_version,
+        None,
+        EncodeOptions::default(),
+    )
+}
+
+pub fn encode_lz_member_with_options(
+    data: &[u8],
+    algorithm_version: u8,
+    options: EncodeOptions,
+) -> Result<Vec<u8>> {
+    encode_lz_member_with_history_and_options(data, &[], algorithm_version, options)
+}
+
+pub fn encode_lz_member_with_history_and_options(
+    data: &[u8],
+    history: &[u8],
+    algorithm_version: u8,
+    options: EncodeOptions,
+) -> Result<Vec<u8>> {
+    encode_lz_member_inner(data, history, algorithm_version, None, options)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -542,6 +585,7 @@ fn encode_lz_member_inner(
     history: &[u8],
     algorithm_version: u8,
     initial_filter: Option<EncodeFilter>,
+    options: EncodeOptions,
 ) -> Result<Vec<u8>> {
     let distance_size = match algorithm_version {
         0 => DISTANCE_TABLE_SIZE_50,
@@ -556,7 +600,7 @@ fn encode_lz_member_inner(
     if let Some(filter) = initial_filter {
         tokens.push(EncodeToken::Filter(filter));
     }
-    tokens.extend(encode_tokens(data, history));
+    tokens.extend(encode_tokens(data, history, options));
     let mut lengths = TableLengths {
         main: vec![0; MAIN_TABLE_SIZE],
         distance: vec![0; distance_size],
@@ -702,6 +746,7 @@ fn encode_lz_member_inner(
 #[derive(Debug, Clone, Default)]
 pub struct Unpack50Encoder {
     history: Vec<u8>,
+    options: EncodeOptions,
 }
 
 impl Unpack50Encoder {
@@ -709,8 +754,20 @@ impl Unpack50Encoder {
         Self::default()
     }
 
+    pub fn with_options(options: EncodeOptions) -> Self {
+        Self {
+            history: Vec::new(),
+            options,
+        }
+    }
+
     pub fn encode_member(&mut self, input: &[u8], algorithm_version: u8) -> Result<Vec<u8>> {
-        let packed = encode_lz_member_with_history(input, &self.history, algorithm_version)?;
+        let packed = encode_lz_member_with_history_and_options(
+            input,
+            &self.history,
+            algorithm_version,
+            self.options,
+        )?;
         self.remember(input);
         Ok(packed)
     }
@@ -722,8 +779,13 @@ impl Unpack50Encoder {
         filter: Rar50FilterSpec,
     ) -> Result<Vec<u8>> {
         let (filtered, record) = filtered_lz_member(input, filter)?;
-        let packed =
-            encode_lz_member_inner(&filtered, &self.history, algorithm_version, Some(record))?;
+        let packed = encode_lz_member_inner(
+            &filtered,
+            &self.history,
+            algorithm_version,
+            Some(record),
+            self.options,
+        )?;
         self.remember(input);
         Ok(packed)
     }
@@ -831,7 +893,7 @@ impl EncoderMatchState {
     }
 }
 
-fn encode_tokens(input: &[u8], history: &[u8]) -> Vec<EncodeToken> {
+fn encode_tokens(input: &[u8], history: &[u8], options: EncodeOptions) -> Vec<EncodeToken> {
     let mut tokens = Vec::new();
     let mut buckets = vec![Vec::new(); MATCH_HASH_BUCKETS];
     let history = &history[history.len().saturating_sub(DEFAULT_DICTIONARY_SIZE)..];
@@ -845,7 +907,7 @@ fn encode_tokens(input: &[u8], history: &[u8]) -> Vec<EncodeToken> {
     let mut pos = history.len();
     let end = combined.len();
     while pos < end {
-        if let Some((length, distance)) = best_match(&combined, pos, end, &buckets) {
+        if let Some((length, distance)) = best_match(&combined, pos, end, &buckets, options) {
             tokens.push(EncodeToken::Match { length, distance });
             for history_pos in pos..pos + length {
                 insert_match_position(&combined, history_pos, &mut buckets);
@@ -865,10 +927,15 @@ fn best_match(
     pos: usize,
     end: usize,
     buckets: &[Vec<usize>],
+    options: EncodeOptions,
 ) -> Option<(usize, usize)> {
     let max_distance = pos.min(MAX_ENCODER_MATCH_OFFSET);
     let max_length = (end - pos).min(MAX_ENCODER_MATCH_LENGTH);
-    if max_distance == 0 || max_length < 4 || pos + 2 >= input.len() {
+    if options.max_match_candidates == 0
+        || max_distance == 0
+        || max_length < 4
+        || pos + 2 >= input.len()
+    {
         return None;
     }
     let bucket = &buckets[match_hash(input, pos)];
@@ -898,7 +965,7 @@ fn best_match(
                 break;
             }
         }
-        if checked >= MAX_MATCH_CANDIDATES {
+        if checked >= options.max_match_candidates {
             break;
         }
     }
@@ -2298,7 +2365,7 @@ mod tests {
 
         assert_eq!(output, data);
         assert!(lz.len() < literal.len());
-        assert!(encode_tokens(data, &[])
+        assert!(encode_tokens(data, &[], EncodeOptions::default())
             .iter()
             .any(|token| matches!(token, EncodeToken::Match { .. })));
     }

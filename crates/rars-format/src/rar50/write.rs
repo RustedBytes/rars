@@ -1,6 +1,8 @@
 use super::*;
 pub use rars_codec::rar50::Rar50FilterKind as FilterKind;
-use rars_codec::rar50::{encode_lz_member, Rar50FilterSpec, Unpack50Encoder};
+use rars_codec::rar50::{
+    encode_lz_member_with_options, EncodeOptions, Rar50FilterSpec, Unpack50Encoder,
+};
 use rars_crypto::rar50::{Rar50Cipher, Rar50Keys};
 use rars_recovery::rar5::build_structural_inline_recovery_data;
 use std::ops::Range;
@@ -11,17 +13,28 @@ const AUTO_X86_RANGE_PADDING: usize = 16;
 const AUTO_X86_MAX_RANGES: usize = 4;
 const AUTO_X86_MAX_SPAN_RANGES: usize = 2;
 const AUTO_X86_MIN_SPAN_OPCODES: usize = 4;
+const MAX_MATCH_CANDIDATES_DEFAULT: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct WriterOptions {
     pub target: crate::ArchiveVersion,
     pub features: crate::FeatureSet,
+    pub compression_level: Option<u8>,
 }
 
 impl WriterOptions {
     pub const fn new(target: crate::ArchiveVersion, features: crate::FeatureSet) -> Self {
-        Self { target, features }
+        Self {
+            target,
+            features,
+            compression_level: None,
+        }
+    }
+
+    pub const fn with_compression_level(mut self, level: u8) -> Self {
+        self.compression_level = Some(level);
+        self
     }
 }
 
@@ -30,6 +43,7 @@ impl Default for WriterOptions {
         Self {
             target: crate::ArchiveVersion::Rar50,
             features: crate::FeatureSet::store_only(),
+            compression_level: None,
         }
     }
 }
@@ -369,6 +383,7 @@ impl<'a> Rar50Writer<'a> {
             });
         }
         let algorithm_version = rar50_algorithm_version(self.options.target)?;
+        let encode_options = encode_options_for_level(self.options.compression_level)?;
 
         let mut resolved_members = Vec::with_capacity(self.members.len());
         match member_kind.unwrap_or(Rar50WriteMemberKind::Stored) {
@@ -462,7 +477,11 @@ impl<'a> Rar50Writer<'a> {
                         feature: "RAR 5 filtered compressed writer service or metadata",
                     });
                 }
-                let mut solid_encoder = self.options.features.solid.then(Unpack50Encoder::new);
+                let mut solid_encoder = self
+                    .options
+                    .features
+                    .solid
+                    .then(|| Unpack50Encoder::with_options(encode_options));
                 for (index, member) in self.members.into_iter().enumerate() {
                     let Rar50WriteMember::Compressed(entry) = member else {
                         unreachable!("mixed member kinds are rejected above")
@@ -477,6 +496,7 @@ impl<'a> Rar50Writer<'a> {
                             entry.data,
                             algorithm_version,
                             self.filter_policy,
+                            encode_options,
                         )?
                     };
                     if should_store_compressed_payload(
@@ -636,7 +656,11 @@ impl<'a> Rar50Writer<'a> {
                 } else {
                     None
                 };
-                let mut solid_encoder = self.options.features.solid.then(Unpack50Encoder::new);
+                let mut solid_encoder = self
+                    .options
+                    .features
+                    .solid
+                    .then(|| Unpack50Encoder::with_options(encode_options));
                 for (index, member) in self.members.into_iter().enumerate() {
                     let Rar50WriteMember::EncryptedCompressed(entry) = member else {
                         unreachable!("mixed member kinds are rejected above")
@@ -647,7 +671,8 @@ impl<'a> Rar50Writer<'a> {
                             .encode_member(entry.data, algorithm_version)
                             .map_err(Error::from)?
                     } else {
-                        encode_lz_member(entry.data, algorithm_version).map_err(Error::from)?
+                        encode_lz_member_with_options(entry.data, algorithm_version, encode_options)
+                            .map_err(Error::from)?
                     };
                     if should_store_compressed_payload(
                         entry.data,
@@ -1079,8 +1104,12 @@ fn write_compressed_volume_set_impl(
         crate::ArchiveVersion::Rar70 => 1,
         _ => return Err(Error::UnsupportedVersion(options.target)),
     };
+    let encode_options = encode_options_for_level(options.compression_level)?;
 
-    let mut encoder = options.features.solid.then(Unpack50Encoder::new);
+    let mut encoder = options
+        .features
+        .solid
+        .then(|| Unpack50Encoder::with_options(encode_options));
     let mut members = Vec::with_capacity(entries.len());
     for (index, entry) in entries.iter().enumerate() {
         validate_compressed_entry(entry)?;
@@ -1089,7 +1118,8 @@ fn write_compressed_volume_set_impl(
                 .encode_member(entry.data, algorithm_version)
                 .map_err(Error::from)?
         } else {
-            encode_lz_member(entry.data, algorithm_version).map_err(Error::from)?
+            encode_lz_member_with_options(entry.data, algorithm_version, encode_options)
+                .map_err(Error::from)?
         };
         if should_store_compressed_payload(
             entry.data,
@@ -1266,8 +1296,12 @@ fn write_encrypted_compressed_volume_set_impl(
         crate::ArchiveVersion::Rar70 => 1,
         _ => return Err(Error::UnsupportedVersion(options.target)),
     };
+    let encode_options = encode_options_for_level(options.compression_level)?;
 
-    let mut solid_encoder = options.features.solid.then(Unpack50Encoder::new);
+    let mut solid_encoder = options
+        .features
+        .solid
+        .then(|| Unpack50Encoder::with_options(encode_options));
     let mut members = Vec::with_capacity(entries.len());
     for (index, entry) in entries.iter().enumerate() {
         validate_encrypted_compressed_entry(entry)?;
@@ -1276,7 +1310,8 @@ fn write_encrypted_compressed_volume_set_impl(
                 .encode_member(entry.data, algorithm_version)
                 .map_err(Error::from)?
         } else {
-            encode_lz_member(entry.data, algorithm_version).map_err(Error::from)?
+            encode_lz_member_with_options(entry.data, algorithm_version, encode_options)
+                .map_err(Error::from)?
         };
         if should_store_compressed_payload(
             entry.data,
@@ -1417,13 +1452,18 @@ fn encode_member_with_filter_policy(
     data: &[u8],
     algorithm_version: u8,
     policy: FilterPolicy,
+    options: EncodeOptions,
 ) -> Result<Vec<u8>> {
     match policy {
-        FilterPolicy::None => encode_lz_member(data, algorithm_version).map_err(Error::from),
-        FilterPolicy::Explicit(filter) => {
-            encode_member_with_filter(data, algorithm_version, filter).map_err(Error::from)
+        FilterPolicy::None => {
+            encode_lz_member_with_options(data, algorithm_version, options).map_err(Error::from)
         }
-        FilterPolicy::AutoSize => encode_member_with_auto_size_filter(data, algorithm_version),
+        FilterPolicy::Explicit(filter) => {
+            encode_member_with_filter(data, algorithm_version, filter, options).map_err(Error::from)
+        }
+        FilterPolicy::AutoSize => {
+            encode_member_with_auto_size_filter(data, algorithm_version, options)
+        }
     }
 }
 
@@ -1436,6 +1476,28 @@ fn should_store_compressed_payload(
     !solid && !matches!(policy, FilterPolicy::Explicit(_)) && packed.len() >= data.len()
 }
 
+fn encode_options_for_level(level: Option<u8>) -> Result<EncodeOptions> {
+    let candidates = match level {
+        None => MAX_MATCH_CANDIDATES_DEFAULT,
+        Some(0) => 0,
+        Some(1) => 8,
+        Some(2) => 32,
+        Some(3) => 96,
+        Some(4) => MAX_MATCH_CANDIDATES_DEFAULT,
+        Some(5) => 512,
+        Some(_) => {
+            return Err(Error::InvalidHeader(
+                "RAR 5 compression level must be in the range 0..5",
+            ))
+        }
+    };
+    Ok(EncodeOptions::new(candidates))
+}
+
+fn validate_compression_level(options: WriterOptions) -> Result<()> {
+    encode_options_for_level(options.compression_level).map(|_| ())
+}
+
 fn rar50_algorithm_version(target: crate::ArchiveVersion) -> Result<u8> {
     match target {
         crate::ArchiveVersion::Rar50 => Ok(0),
@@ -1444,15 +1506,20 @@ fn rar50_algorithm_version(target: crate::ArchiveVersion) -> Result<u8> {
     }
 }
 
-fn encode_member_with_auto_size_filter(data: &[u8], algorithm_version: u8) -> Result<Vec<u8>> {
-    let mut best = encode_lz_member(data, algorithm_version).map_err(Error::from)?;
+fn encode_member_with_auto_size_filter(
+    data: &[u8],
+    algorithm_version: u8,
+    options: EncodeOptions,
+) -> Result<Vec<u8>> {
+    let mut best =
+        encode_lz_member_with_options(data, algorithm_version, options).map_err(Error::from)?;
     let mut candidates = vec![FilterKind::E8, FilterKind::E8E9, FilterKind::Arm];
     for channels in 1..=4 {
         candidates.push(FilterKind::Delta { channels });
     }
     for filter in candidates {
-        let packed =
-            encode_member_with_filter(data, algorithm_version, filter).map_err(Error::from)?;
+        let packed = encode_member_with_filter(data, algorithm_version, filter, options)
+            .map_err(Error::from)?;
         if packed.len() < best.len() {
             best = packed;
         }
@@ -1462,6 +1529,7 @@ fn encode_member_with_auto_size_filter(data: &[u8], algorithm_version: u8) -> Re
             data,
             algorithm_version,
             Rar50FilterSpec::range(FilterKind::E8, range),
+            options,
         )
         .map_err(Error::from)?;
         if packed.len() < best.len() {
@@ -1473,6 +1541,7 @@ fn encode_member_with_auto_size_filter(data: &[u8], algorithm_version: u8) -> Re
             data,
             algorithm_version,
             Rar50FilterSpec::range(FilterKind::E8E9, range),
+            options,
         )
         .map_err(Error::from)?;
         if packed.len() < best.len() {
@@ -1486,8 +1555,9 @@ fn encode_member_with_filter(
     data: &[u8],
     algorithm_version: u8,
     filter: FilterKind,
+    options: EncodeOptions,
 ) -> rars_codec::Result<Vec<u8>> {
-    Unpack50Encoder::new().encode_member_with_filter(
+    Unpack50Encoder::with_options(options).encode_member_with_filter(
         data,
         algorithm_version,
         Rar50FilterSpec::new(filter),
@@ -1498,8 +1568,13 @@ fn encode_member_with_filter_spec(
     data: &[u8],
     algorithm_version: u8,
     filter: Rar50FilterSpec,
+    options: EncodeOptions,
 ) -> rars_codec::Result<Vec<u8>> {
-    Unpack50Encoder::new().encode_member_with_filter(data, algorithm_version, filter)
+    Unpack50Encoder::with_options(options).encode_member_with_filter(
+        data,
+        algorithm_version,
+        filter,
+    )
 }
 
 fn auto_x86_filter_ranges(data: &[u8], include_e9: bool) -> Vec<Range<usize>> {
@@ -1811,6 +1886,7 @@ fn validate_recovery_options(options: WriterOptions) -> Result<()> {
 }
 
 fn validate_plain_options(options: WriterOptions, allow_recovery_record: bool) -> Result<()> {
+    validate_compression_level(options)?;
     if !matches!(
         options.target,
         crate::ArchiveVersion::Rar50 | crate::ArchiveVersion::Rar70
@@ -1833,6 +1909,7 @@ fn validate_plain_options(options: WriterOptions, allow_recovery_record: bool) -
 }
 
 fn validate_file_service_options(options: WriterOptions) -> Result<()> {
+    validate_compression_level(options)?;
     if !matches!(
         options.target,
         crate::ArchiveVersion::Rar50 | crate::ArchiveVersion::Rar70
@@ -1862,6 +1939,7 @@ fn validate_compressed_feature_options(
     options: WriterOptions,
     allow_recovery_record: bool,
 ) -> Result<()> {
+    validate_compression_level(options)?;
     if !matches!(
         options.target,
         crate::ArchiveVersion::Rar50 | crate::ArchiveVersion::Rar70
@@ -1903,6 +1981,7 @@ fn validate_encrypted_compressed_feature_options(
     options: WriterOptions,
     allow_recovery_record: bool,
 ) -> Result<()> {
+    validate_compression_level(options)?;
     if !matches!(
         options.target,
         crate::ArchiveVersion::Rar50 | crate::ArchiveVersion::Rar70
@@ -1952,6 +2031,7 @@ fn validate_encrypted_feature_options(
     options: WriterOptions,
     allow_recovery_record: bool,
 ) -> Result<()> {
+    validate_compression_level(options)?;
     if !matches!(
         options.target,
         crate::ArchiveVersion::Rar50 | crate::ArchiveVersion::Rar70
@@ -1975,6 +2055,7 @@ fn validate_encrypted_feature_options(
 }
 
 fn validate_encrypted_file_service_options(options: WriterOptions) -> Result<()> {
+    validate_compression_level(options)?;
     if !matches!(
         options.target,
         crate::ArchiveVersion::Rar50 | crate::ArchiveVersion::Rar70

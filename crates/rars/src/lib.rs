@@ -3150,11 +3150,12 @@ mod tests {
     fn direct_writer_creates_rar50_encrypted_compressed_archive() {
         let mut features = FeatureSet::store_only();
         features.file_encryption = true;
+        let payload = b"facade rar5 encrypted compressed\n".repeat(16);
         let bytes =
             rar50::Rar50Writer::new(rar50_options_with_features(ArchiveVersion::Rar50, features))
                 .encrypted_compressed_entries(&[rar50::EncryptedCompressedEntry {
                     name: b"rar5-secret-compressed.txt",
-                    data: b"facade rar5 encrypted compressed\nfacade rar5 encrypted compressed\n",
+                    data: &payload,
                     mtime: None,
                     attributes: 0x20,
                     host_os: 3,
@@ -3169,10 +3170,7 @@ mod tests {
         assert!(file.encrypted);
         assert_eq!(file.decoded_compression_info().unwrap().method, 1);
         let extracted = collect_extract(&archive, Some(b"password")).unwrap();
-        assert_eq!(
-            extracted[0].data,
-            b"facade rar5 encrypted compressed\nfacade rar5 encrypted compressed\n"
-        );
+        assert_eq!(extracted[0].data, payload);
     }
 
     #[test]
@@ -4284,10 +4282,8 @@ mod tests {
     fn archive_reader_read_path_dispatches_to_default_options() {
         // Existing tests cover read_path_with_options; this ensures the
         // zero-arg convenience wrapper actually delegates to it.
-        let archive = ArchiveReader::read_path(rar15_40_fixture(
-            "rar250_protect_head_rr5.rar",
-        ))
-        .unwrap();
+        let archive =
+            ArchiveReader::read_path(rar15_40_fixture("rar250_protect_head_rr5.rar")).unwrap();
         assert_eq!(archive.family(), ArchiveFamily::Rar15To40);
         assert!(archive.as_rar15_40().unwrap().main.has_recovery_record());
     }

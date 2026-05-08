@@ -1069,6 +1069,7 @@ mod tests {
         let archive = Rar50Writer::new(WriterOptions {
             target: crate::ArchiveVersion::Rar50,
             features: crate::FeatureSet::store_only(),
+            compression_level: None,
         })
         .compressed_entries(&[CompressedEntry {
             name: b"filtered.bin",

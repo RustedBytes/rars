@@ -972,6 +972,55 @@ fn creates_rar29_archives_with_distinct_compression_levels() {
 }
 
 #[test]
+fn rar29_lz_compression_levels_change_output_size() {
+    let dir = scratch("rar29-lz-level-size");
+    let source = dir.join("source.bin");
+    let low = dir.join("level1.rar");
+    let high = dir.join("level3.rar");
+    let pattern: Vec<u8> = (0..=255).collect();
+    let mut data = Vec::new();
+    for round in 0..8u8 {
+        data.extend_from_slice(&pattern);
+        for index in 0..32u8 {
+            let mut decoy = pattern.clone();
+            for byte in decoy.iter_mut().skip(7).step_by(11) {
+                *byte = byte.wrapping_add(index).wrapping_add(round).wrapping_add(1);
+            }
+            data.extend_from_slice(&decoy);
+        }
+        data.extend_from_slice(&pattern);
+    }
+    fs::write(&source, &data).unwrap();
+
+    let create_low = rars()
+        .args(["a", "--format", "rar29", "--level", "1"])
+        .arg(&low)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        create_low.status.success(),
+        "stderr: {}",
+        stderr(&create_low)
+    );
+    let create_high = rars()
+        .args(["a", "--format", "rar29", "--level", "3"])
+        .arg(&high)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        create_high.status.success(),
+        "stderr: {}",
+        stderr(&create_high)
+    );
+
+    assert!(fs::metadata(&high).unwrap().len() < fs::metadata(&low).unwrap().len());
+    assert_archive_tests_and_extracts_file(&low, None, "source.bin", &data);
+    assert_archive_tests_and_extracts_file(&high, None, "source.bin", &data);
+}
+
+#[test]
 fn accepts_rar50_compression_level() {
     let dir = scratch("accept-rar50-level");
     let source = dir.join("source.txt");
@@ -992,6 +1041,50 @@ fn accepts_rar50_compression_level() {
         "source.txt",
         b"rar50 level accepted by cli\n",
     );
+}
+
+#[test]
+fn rar50_compression_levels_change_output_size() {
+    let dir = scratch("rar50-level-size");
+    let source = dir.join("source.bin");
+    let low = dir.join("level1.rar");
+    let high = dir.join("level5.rar");
+    let long_match = [b"abc".as_slice(), &[b'Z'; 256]].concat();
+    let mut data = long_match.clone();
+    for index in 0..32u8 {
+        data.extend_from_slice(b"abc");
+        data.push(index);
+        data.extend_from_slice(&[index.wrapping_mul(17); 24]);
+    }
+    data.extend_from_slice(&long_match);
+    fs::write(&source, &data).unwrap();
+
+    let create_low = rars()
+        .args(["a", "--format", "rar50", "--level", "1"])
+        .arg(&low)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        create_low.status.success(),
+        "stderr: {}",
+        stderr(&create_low)
+    );
+    let create_high = rars()
+        .args(["a", "--format", "rar50", "--level", "5"])
+        .arg(&high)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        create_high.status.success(),
+        "stderr: {}",
+        stderr(&create_high)
+    );
+
+    assert!(fs::metadata(&high).unwrap().len() < fs::metadata(&low).unwrap().len());
+    assert_archive_tests_and_extracts_file(&low, None, "source.bin", &data);
+    assert_archive_tests_and_extracts_file(&high, None, "source.bin", &data);
 }
 
 #[test]
@@ -2309,11 +2402,8 @@ fn creates_rar50_encrypted_compressed_archive_that_can_be_tested() {
     let dir = scratch("create-rar50-encrypted-compressed");
     let source = dir.join("secret.txt");
     let archive = dir.join("created.rar");
-    fs::write(
-        &source,
-        b"rar50 encrypted compressed cli payload\nrar50 encrypted compressed cli payload\n",
-    )
-    .unwrap();
+    let payload = b"rar50 encrypted compressed cli payload\n".repeat(16);
+    fs::write(&source, &payload).unwrap();
 
     let create = rars()
         .args(["a", "--password", "pass", "--format", "rar50"])
@@ -3522,11 +3612,8 @@ fn creates_rar50_compressed_archive_that_can_be_tested() {
     let dir = scratch("create-rar50-compressed");
     let source = dir.join("payload.txt");
     let archive = dir.join("created.rar");
-    fs::write(
-        &source,
-        b"rar50 compressed cli payload\nrar50 compressed cli payload\n",
-    )
-    .unwrap();
+    let payload = b"rar50 compressed cli payload\n".repeat(16);
+    fs::write(&source, &payload).unwrap();
 
     let output = rars()
         .args(["a", "--format", "rar50"])
@@ -3540,12 +3627,7 @@ fn creates_rar50_compressed_archive_that_can_be_tested() {
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     assert!(stdout(&info).contains("method=1"));
 
-    assert_archive_tests_and_extracts_file(
-        &archive,
-        None,
-        "payload.txt",
-        b"rar50 compressed cli payload\nrar50 compressed cli payload\n",
-    );
+    assert_archive_tests_and_extracts_file(&archive, None, "payload.txt", &payload);
 }
 
 #[test]

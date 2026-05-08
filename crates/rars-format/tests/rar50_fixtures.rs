@@ -152,6 +152,18 @@ fn deterministic_noise(len: usize) -> Vec<u8> {
         .collect()
 }
 
+fn level_sensitive_payload() -> Vec<u8> {
+    let long_match = [b"abc".as_slice(), &[b'Z'; 256]].concat();
+    let mut data = long_match.clone();
+    for index in 0..32u8 {
+        data.extend_from_slice(b"abc");
+        data.push(index);
+        data.extend_from_slice(&deterministic_noise(24));
+    }
+    data.extend_from_slice(&long_match);
+    data
+}
+
 fn repair_rev5_volumes(
     data_volumes: &[Option<&[u8]>],
     recovery_volumes: &[Rev5Volume],
@@ -788,6 +800,41 @@ fn compressed_rar50_writer_stores_member_when_lz_payload_would_grow() {
         assert_eq!(extracted[0].name, b"incompressible.bin");
         assert_eq!(extracted[0].data, data);
         assert_eq!(extracted[0].file_time, 0x5a21_00a0);
+    }
+}
+
+#[test]
+fn compressed_rar50_writer_uses_compression_level_for_match_effort() {
+    let data = level_sensitive_payload();
+    for target in [ArchiveVersion::Rar50, ArchiveVersion::Rar70] {
+        let entries = [rar50::CompressedEntry {
+            name: b"level-sensitive.bin",
+            data: &data,
+            mtime: Some(0x5a21_00a4),
+            attributes: 0x20,
+            host_os: 3,
+        }];
+        let low = write_compressed_archive(
+            &entries,
+            rar50::WriterOptions::new(target, FeatureSet::store_only()).with_compression_level(1),
+        )
+        .unwrap();
+        let high = write_compressed_archive(
+            &entries,
+            rar50::WriterOptions::new(target, FeatureSet::store_only()).with_compression_level(5),
+        )
+        .unwrap();
+
+        let low_archive = Archive::parse(&low).unwrap();
+        let high_archive = Archive::parse(&high).unwrap();
+        let low_file = low_archive.files().next().unwrap();
+        let high_file = high_archive.files().next().unwrap();
+        assert!(
+            high_file.packed_size() < low_file.packed_size(),
+            "{target:?}"
+        );
+        assert_eq!(collect_extract(&low_archive).unwrap()[0].data, data);
+        assert_eq!(collect_extract(&high_archive).unwrap()[0].data, data);
     }
 }
 

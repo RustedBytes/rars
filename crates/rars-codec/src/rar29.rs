@@ -116,6 +116,13 @@ pub fn unpack29_encode_literals(input: &[u8]) -> Result<Vec<u8>> {
     encode_member(input, &[])
 }
 
+pub fn unpack29_encode_literals_with_options(
+    input: &[u8],
+    options: EncodeOptions,
+) -> Result<Vec<u8>> {
+    encode_member_with_options(input, &[], options)
+}
+
 pub fn unpack29_encode_ppmd_literals(input: &[u8]) -> Result<Vec<u8>> {
     encode_ppmd_member(input, false, None)
 }
@@ -284,9 +291,30 @@ fn rar29_delta_messages() -> DeltaErrorMessages {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct EncodeOptions {
+    pub max_match_candidates: usize,
+}
+
+impl EncodeOptions {
+    pub const fn new(max_match_candidates: usize) -> Self {
+        Self {
+            max_match_candidates,
+        }
+    }
+}
+
+impl Default for EncodeOptions {
+    fn default() -> Self {
+        Self::new(MAX_MATCH_CANDIDATES)
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Unpack29Encoder {
     history: Vec<u8>,
+    options: EncodeOptions,
 }
 
 impl Unpack29Encoder {
@@ -294,8 +322,15 @@ impl Unpack29Encoder {
         Self::default()
     }
 
+    pub fn with_options(options: EncodeOptions) -> Self {
+        Self {
+            history: Vec::new(),
+            options,
+        }
+    }
+
     pub fn encode_member(&mut self, input: &[u8]) -> Result<Vec<u8>> {
-        let packed = encode_member(input, &self.history)?;
+        let packed = encode_member_with_options(input, &self.history, self.options)?;
         self.remember(input);
         Ok(packed)
     }
@@ -312,7 +347,8 @@ impl Unpack29Encoder {
             init_regs: &filtered.init_regs,
             code: filtered.code,
         };
-        let packed = encode_member_with_initial_filter(&filtered.data, &self.history, record)?;
+        let packed =
+            encode_member_with_initial_filter(&filtered.data, &self.history, record, self.options)?;
         self.remember(input);
         Ok(packed)
     }
@@ -327,23 +363,33 @@ impl Unpack29Encoder {
 }
 
 fn encode_member(input: &[u8], history: &[u8]) -> Result<Vec<u8>> {
-    encode_member_inner(input, history, None)
+    encode_member_with_options(input, history, EncodeOptions::default())
+}
+
+fn encode_member_with_options(
+    input: &[u8],
+    history: &[u8],
+    options: EncodeOptions,
+) -> Result<Vec<u8>> {
+    encode_member_inner(input, history, None, options)
 }
 
 fn encode_member_with_initial_filter(
     input: &[u8],
     history: &[u8],
     filter: VmFilterRecord<'_>,
+    options: EncodeOptions,
 ) -> Result<Vec<u8>> {
-    encode_member_inner(input, history, Some(filter))
+    encode_member_inner(input, history, Some(filter), options)
 }
 
 fn encode_member_inner(
     input: &[u8],
     history: &[u8],
     initial_filter: Option<VmFilterRecord<'_>>,
+    options: EncodeOptions,
 ) -> Result<Vec<u8>> {
-    let tokens = encode_tokens(input, history);
+    let tokens = encode_tokens(input, history, options);
     let mut used_main = [false; MAIN_COUNT];
     let mut used_match_slots = [false; LENGTH_COUNT];
     let mut used_low_offsets = [false; LOW_OFFSET_COUNT];
@@ -683,7 +729,7 @@ enum EncodeToken {
     Match { length: usize, offset: usize },
 }
 
-fn encode_tokens(input: &[u8], history: &[u8]) -> Vec<EncodeToken> {
+fn encode_tokens(input: &[u8], history: &[u8], options: EncodeOptions) -> Vec<EncodeToken> {
     let mut tokens = Vec::new();
     let mut buckets = vec![Vec::new(); MATCH_HASH_BUCKETS];
     let history = &history[history.len().saturating_sub(MAX_ENCODER_MATCH_OFFSET)..];
@@ -697,7 +743,7 @@ fn encode_tokens(input: &[u8], history: &[u8]) -> Vec<EncodeToken> {
     let mut pos = history.len();
     let end = combined.len();
     while pos < end {
-        if let Some((length, offset)) = best_match(&combined, pos, end, &buckets) {
+        if let Some((length, offset)) = best_match(&combined, pos, end, &buckets, options) {
             tokens.push(EncodeToken::Match { length, offset });
             for history_pos in pos..pos + length {
                 insert_match_position(&combined, history_pos, &mut buckets);
@@ -811,10 +857,15 @@ fn best_match(
     pos: usize,
     end: usize,
     buckets: &[Vec<usize>],
+    options: EncodeOptions,
 ) -> Option<(usize, usize)> {
     let max_offset = pos.min(MAX_ENCODER_MATCH_OFFSET);
     let max_length = (end - pos).min(MAX_ENCODER_MATCH_LENGTH);
-    if max_offset == 0 || max_length < 4 || pos + 2 >= input.len() {
+    if options.max_match_candidates == 0
+        || max_offset == 0
+        || max_length < 4
+        || pos + 2 >= input.len()
+    {
         return None;
     }
     let bucket = &buckets[match_hash(input, pos)];
@@ -844,7 +895,7 @@ fn best_match(
                 break;
             }
         }
-        if checked >= MAX_MATCH_CANDIDATES {
+        if checked >= options.max_match_candidates {
             break;
         }
     }
@@ -2360,9 +2411,9 @@ mod tests {
     use super::{
         apply_standard_filter, encode_ppmd_tokens, encode_tokens, itanium_decode, itanium_encode,
         unpack29_decode, unpack29_encode_literals, unpack29_encode_ppmd,
-        unpack29_encode_ppmd_literals, unpack29_encode_ppmd_with_filter, BitWriter, EncodeToken,
-        Error, Huffman, PpmdEncodeToken, Rar29FilterKind, Rar29FilterSpec, Result, StandardFilter,
-        Unpack29, Unpack29Encoder, VmFilter, VmProgram, VmProgramKind,
+        unpack29_encode_ppmd_literals, unpack29_encode_ppmd_with_filter, BitWriter, EncodeOptions,
+        EncodeToken, Error, Huffman, PpmdEncodeToken, Rar29FilterKind, Rar29FilterSpec, Result,
+        StandardFilter, Unpack29, Unpack29Encoder, VmFilter, VmProgram, VmProgramKind,
     };
 
     const COMPRESSED_TEXT: &[u8] = &[
@@ -2501,7 +2552,7 @@ mod tests {
         input.extend(std::iter::repeat_n(0, 300 * 1024));
         input.extend_from_slice(phrase);
         input.extend_from_slice(phrase);
-        let tokens = encode_tokens(&input, &[]);
+        let tokens = encode_tokens(&input, &[], EncodeOptions::default());
         let packed = unpack29_encode_literals(&input).unwrap();
 
         assert!(tokens.iter().any(|token| matches!(
