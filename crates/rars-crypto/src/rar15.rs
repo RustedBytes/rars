@@ -1,3 +1,5 @@
+use rars_crc32::{crc32_raw, table_entry as crc32_table_entry};
+
 pub struct Rar15Cipher {
     key: [u16; 4],
 }
@@ -5,7 +7,7 @@ pub struct Rar15Cipher {
 impl Rar15Cipher {
     pub fn new(password: &[u8]) -> Self {
         let password = password.split(|&byte| byte == 0).next().unwrap_or(password);
-        let password_crc = crc32_seeded(password);
+        let password_crc = crc32_raw(password);
         let mut key = [
             (password_crc & 0xffff) as u16,
             (password_crc >> 16) as u16,
@@ -39,26 +41,6 @@ impl Rar15Cipher {
         self.key[0] ^= self.key[3];
         (self.key[0] >> 8) as u8
     }
-}
-
-fn crc32_seeded(input: &[u8]) -> u32 {
-    let mut crc = 0xffff_ffff;
-    for &byte in input {
-        crc = (crc >> 8) ^ crc32_table_entry((crc as u8) ^ byte);
-    }
-    crc
-}
-
-fn crc32_table_entry(index: u8) -> u32 {
-    let mut value = u32::from(index);
-    for _ in 0..8 {
-        if value & 1 == 0 {
-            value >>= 1;
-        } else {
-            value = (value >> 1) ^ 0xedb8_8320;
-        }
-    }
-    value
 }
 
 #[cfg(test)]

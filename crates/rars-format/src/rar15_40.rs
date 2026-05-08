@@ -7,6 +7,7 @@ use crate::ArchiveVersion;
 use rars_codec::rar13::Unpack15;
 use rars_codec::rar20::Unpack20;
 use rars_codec::rar29::Unpack29;
+use rars_crc32::{crc32, Crc32};
 use rars_crypto::rar15::Rar15Cipher;
 use rars_crypto::rar20::Rar20Cipher;
 use rars_crypto::rar30::{Error as Rar30Error, Rar30Cipher};
@@ -2031,92 +2032,6 @@ impl<W: Write + ?Sized> Write for CrcWriter<'_, W> {
     }
 }
 
-pub(crate) struct Crc32 {
-    value: u32,
-}
-
-impl Crc32 {
-    pub(crate) fn new() -> Self {
-        Self { value: 0xffff_ffff }
-    }
-
-    pub(crate) fn update(&mut self, input: &[u8]) {
-        const TABLE: [u32; 256] = crc32_table();
-        for &byte in input {
-            let index = (self.value as u8 ^ byte) as usize;
-            self.value = (self.value >> 8) ^ TABLE[index];
-        }
-    }
-
-    pub(crate) fn update_zeroes(&mut self, len: u64) {
-        let mut matrix = zero_byte_matrix();
-        let mut count = len;
-        while count != 0 {
-            if count & 1 != 0 {
-                self.value = gf2_matrix_times(&matrix, self.value);
-            }
-            count >>= 1;
-            if count != 0 {
-                matrix = gf2_matrix_square(&matrix);
-            }
-        }
-    }
-
-    pub(crate) fn finish(self) -> u32 {
-        !self.value
-    }
-}
-
-fn zero_byte_matrix() -> [u32; 32] {
-    let mut matrix = [0; 32];
-    for (bit, slot) in matrix.iter_mut().enumerate() {
-        let mut value = 1u32 << bit;
-        let index = value as u8 as usize;
-        const TABLE: [u32; 256] = crc32_table();
-        value = (value >> 8) ^ TABLE[index];
-        *slot = value;
-    }
-    matrix
-}
-
-fn gf2_matrix_times(matrix: &[u32; 32], mut vector: u32) -> u32 {
-    let mut sum = 0;
-    let mut index = 0;
-    while vector != 0 {
-        if vector & 1 != 0 {
-            sum ^= matrix[index];
-        }
-        vector >>= 1;
-        index += 1;
-    }
-    sum
-}
-
-fn gf2_matrix_square(matrix: &[u32; 32]) -> [u32; 32] {
-    let mut square = [0; 32];
-    for (index, slot) in square.iter_mut().enumerate() {
-        *slot = gf2_matrix_times(matrix, matrix[index]);
-    }
-    square
-}
-
-const fn crc32_table() -> [u32; 256] {
-    let mut table = [0; 256];
-    let mut i = 0;
-    while i < 256 {
-        let mut value = i as u32;
-        let mut bit = 0;
-        while bit < 8 {
-            let mask = 0u32.wrapping_sub(value & 1);
-            value = (value >> 1) ^ (0xedb8_8320 & mask);
-            bit += 1;
-        }
-        table[i] = value;
-        i += 1;
-    }
-    table
-}
-
 fn parse_block_header(input: &[u8], offset: usize) -> Result<BlockHeader> {
     if input.len() < offset + 7 {
         return Err(Error::TooShort);
@@ -2286,12 +2201,6 @@ fn packed_range(
         .checked_sub(pack_size)
         .ok_or(Error::InvalidHeader("RAR 1.5 block size overflows usize"))?;
     Ok(block_start..block_end)
-}
-
-pub fn crc32(input: &[u8]) -> u32 {
-    let mut crc = Crc32::new();
-    crc.update(input);
-    crc.finish()
 }
 
 #[cfg(test)]

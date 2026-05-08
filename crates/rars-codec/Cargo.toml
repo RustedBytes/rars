@@ -16,3 +16,4 @@ categories.workspace = true
 all-features = true
 
 [dependencies]
+rars-crc32.workspace = true

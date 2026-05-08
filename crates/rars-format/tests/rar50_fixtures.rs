@@ -1,6 +1,7 @@
 use rars_codec::rar50::{
     decode_lz, encode_lz_member, parse_compressed_block, read_table_lengths, DecodeTables,
 };
+use rars_crc32::crc32;
 use rars_crypto::rar50::{Rar50Cipher, Rar50Keys};
 use rars_format::rar50::{
     extract_volumes_to, repair_inline_recovery_bytes, repair_rev5_volumes_to, Archive,
@@ -614,7 +615,7 @@ fn count_verified_quick_open_wrappers(data: &[u8]) -> usize {
         offset += 4;
         let body_size = read_test_vint(data, &mut offset) as usize;
         let body = &data[offset..offset + body_size];
-        assert_eq!(rars_format::rar15_40::crc32(body), expected);
+        assert_eq!(crc32(body), expected);
         let mut body_offset = 0;
         assert_eq!(read_test_vint(body, &mut body_offset), 0);
         assert_ne!(read_test_vint(body, &mut body_offset), 0);
@@ -731,14 +732,8 @@ fn writes_store_only_rar50_archive_that_reader_extracts() {
     assert_eq!(files.len(), 2);
     assert!(files.iter().all(|file| file.is_stored()));
     assert!(files.iter().all(|file| file.hash.is_some()));
-    assert_eq!(
-        files[0].data_crc32,
-        Some(rars_format::rar15_40::crc32(entries[0].data))
-    );
-    assert_eq!(
-        files[1].data_crc32,
-        Some(rars_format::rar15_40::crc32(entries[1].data))
-    );
+    assert_eq!(files[0].data_crc32, Some(crc32(entries[0].data)));
+    assert_eq!(files[1].data_crc32, Some(crc32(entries[1].data)));
     assert_eq!(files[0].hash.as_ref().unwrap().hash_type, 0);
     assert_eq!(files[0].hash.as_ref().unwrap().data.len(), 32);
     files[0].verify_hash(entries[0].data).unwrap();
@@ -815,10 +810,7 @@ fn writes_compressed_rar50_archive_that_reader_extracts() {
     let files: Vec<_> = archive.files().collect();
     assert_eq!(files.len(), 2);
     assert!(files.iter().all(|file| file.hash.is_some()));
-    assert_eq!(
-        files[0].data_crc32,
-        Some(rars_format::rar15_40::crc32(entries[0].data))
-    );
+    assert_eq!(files[0].data_crc32, Some(crc32(entries[0].data)));
 
     let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted[0].name, entries[0].name);
@@ -3873,10 +3865,7 @@ fn extracts_rar50_stored_multivolume_archive() {
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"random_4k.bin");
     assert_eq!(extracted[0].data.len(), 4096);
-    assert_eq!(
-        rars_format::rar15_40::crc32(&extracted[0].data),
-        0xb9c5_4415
-    );
+    assert_eq!(crc32(&extracted[0].data), 0xb9c5_4415);
 }
 
 #[test]
@@ -3897,10 +3886,7 @@ fn extracts_rar50_solid_multivolume_archive() {
     assert_eq!(extracted[0].data, b"AAAAAAAA\n");
     assert_eq!(extracted[1].name, b"bigtext_64k.bin");
     assert_eq!(extracted[1].data.len(), 65_536);
-    assert_eq!(
-        rars_format::rar15_40::crc32(&extracted[1].data),
-        0xddc9_5682
-    );
+    assert_eq!(crc32(&extracted[1].data), 0xddc9_5682);
 }
 
 #[test]
@@ -3933,10 +3919,7 @@ fn extracts_rar50_encrypted_compressed_multivolume_archive() {
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"random_4k.bin");
     assert_eq!(extracted[0].data.len(), 4096);
-    assert_eq!(
-        rars_format::rar15_40::crc32(&extracted[0].data),
-        0xb9c5_4415
-    );
+    assert_eq!(crc32(&extracted[0].data), 0xb9c5_4415);
 }
 
 #[test]
@@ -4104,7 +4087,7 @@ fn parses_rar50_rev5_metadata_without_validating_payload_crc() {
 fn update_rev5_header_crc(bytes: &mut [u8]) {
     let header_size = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
     let header_end = 16 + header_size;
-    let header_crc = rars_format::rar15_40::crc32(&bytes[12..header_end]);
+    let header_crc = crc32(&bytes[12..header_end]);
     bytes[8..12].copy_from_slice(&header_crc.to_le_bytes());
 }
 

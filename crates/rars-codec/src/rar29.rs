@@ -2,6 +2,7 @@ use crate::filters::{self, DeltaErrorMessages, FilterOp};
 use crate::ppmd::{PpmdByteReader, PpmdDecoder, PpmdEncoder};
 use crate::rarvm;
 use crate::{Error, Result};
+use rars_crc32::crc32;
 use std::io::{Read, Write};
 use std::ops::Range;
 
@@ -2392,18 +2393,6 @@ fn audio_decode(data: &[u8], channels: usize) -> Result<Vec<u8>> {
         }
     }
     Ok(out)
-}
-
-fn crc32(input: &[u8]) -> u32 {
-    let mut crc = 0xffff_ffffu32;
-    for &byte in input {
-        crc ^= byte as u32;
-        for _ in 0..8 {
-            let mask = 0u32.wrapping_sub(crc & 1);
-            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
-        }
-    }
-    !crc
 }
 
 #[cfg(test)]

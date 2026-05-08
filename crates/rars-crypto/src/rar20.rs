@@ -1,3 +1,5 @@
+use rars_crc32::table_entry as crc32_table_entry;
+
 const INIT_SUBST_TABLE: [u8; 256] = [
     215, 19, 149, 35, 73, 197, 192, 205, 249, 28, 16, 119, 48, 221, 2, 42, 232, 1, 177, 233, 14,
     88, 219, 25, 223, 195, 244, 90, 87, 239, 153, 137, 255, 199, 147, 70, 92, 66, 246, 13, 216, 40,
@@ -150,18 +152,6 @@ fn write_block(block: &mut [u8], a: u32, b: u32, c: u32, d: u32) {
     block[4..8].copy_from_slice(&b.to_le_bytes());
     block[8..12].copy_from_slice(&c.to_le_bytes());
     block[12..16].copy_from_slice(&d.to_le_bytes());
-}
-
-fn crc32_table_entry(index: u8) -> u32 {
-    let mut value = u32::from(index);
-    for _ in 0..8 {
-        if value & 1 == 0 {
-            value >>= 1;
-        } else {
-            value = (value >> 1) ^ 0xedb8_8320;
-        }
-    }
-    value
 }
 
 #[cfg(test)]

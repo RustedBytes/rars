@@ -1,8 +1,8 @@
 use crate::detect::{find_archive_start, RAR50_SIGNATURE};
 use crate::error::{Error, Result};
 use crate::io_util::{align16 as checked_align16, read_exact_at, read_u32};
-use crate::rar15_40::crc32;
 use crate::version::ArchiveFamily;
+use rars_crc32::crc32;
 use rars_crypto::rar50::{Rar50Cipher, Rar50Keys};
 use std::fs::File;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};

@@ -19,4 +19,5 @@ all-features = true
 getrandom.workspace = true
 rars-codec.workspace = true
 rars-crypto.workspace = true
+rars-crc32.workspace = true
 rars-recovery.workspace = true

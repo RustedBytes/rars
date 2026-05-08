@@ -11,11 +11,6 @@
 
 ## Hardening
 
-- Review #4 batch 6: shared CRC-32:
-  - Consolidate the duplicated CRC-32 table/streaming helpers currently split
-    across format, codec, and legacy crypto modules.
-  - Stop importing RAR5 CRC support from the RAR15-40 module once the shared
-    helper exists.
 - Review #4 batch 7: path/source parser consolidation:
   - Avoid the facade and family parsers both scanning path-backed archives for
     the same signature.

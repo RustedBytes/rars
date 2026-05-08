@@ -1,7 +1,7 @@
 [package]
-name = "rars-crypto"
+name = "rars-crc32"
 version = "0.1.0"
-description = "RAR legacy and modern archive encryption primitives."
+description = "Shared CRC-32 primitives for the rars workspace."
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -10,14 +10,9 @@ homepage.workspace = true
 repository.workspace = true
 documentation.workspace = true
 keywords.workspace = true
-categories = ["cryptography"]
+categories.workspace = true
 
 [package.metadata.docs.rs]
 all-features = true
 
 [dependencies]
-aes.workspace = true
-hmac.workspace = true
-rars-crc32.workspace = true
-sha1.workspace = true
-sha2.workspace = true

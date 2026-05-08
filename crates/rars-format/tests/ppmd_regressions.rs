@@ -1,4 +1,5 @@
-use rars_format::rar15_40::{crc32, Archive};
+use rars_crc32::crc32;
+use rars_format::rar15_40::Archive;
 use rars_format::{ArchiveReadOptions, Result};
 use std::cell::RefCell;
 use std::io::{Result as IoResult, Write};

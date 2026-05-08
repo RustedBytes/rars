@@ -4,6 +4,7 @@ members = [
     "crates/rars-cli",
     "crates/rars-codec",
     "crates/rars-crypto",
+    "crates/rars-crc32",
     "crates/rars-format",
     "crates/rars-recovery",
 ]
@@ -27,6 +28,7 @@ hmac = "0.12"
 rars = { version = "0.1.0", path = "crates/rars" }
 rars-codec = { version = "0.1.0", path = "crates/rars-codec" }
 rars-crypto = { version = "0.1.0", path = "crates/rars-crypto" }
+rars-crc32 = { version = "0.1.0", path = "crates/rars-crc32" }
 rars-format = { version = "0.1.0", path = "crates/rars-format" }
 rars-recovery = { version = "0.1.0", path = "crates/rars-recovery" }
 rpassword = "7"

@@ -1,8 +1,8 @@
 use super::{blake2sp, Archive, ExtractedEntryMeta, FileHeader};
 use crate::error::{Error, Result};
-use crate::rar15_40::Crc32 as StreamingCrc32;
 use crate::volume_extract::{ChainedReader, SplitVolumeState, SplitVolumeStep};
 use rars_codec::rar50::{DecodeMode, DecodedChunk, StreamDecodeError, Unpack50Decoder};
+use rars_crc32::{crc32, Crc32};
 use rars_crypto::rar50::{Rar50Cipher, Rar50Keys};
 use std::io::{Read, Write};
 
@@ -90,7 +90,7 @@ impl FileHeader {
 
     fn verify_integrity_with_keys(&self, data: &[u8], keys: Option<&Rar50Keys>) -> Result<()> {
         if let Some(expected) = self.data_crc32 {
-            let actual = crate::rar15_40::crc32(data);
+            let actual = crc32(data);
             let actual = if self.uses_hash_mac() {
                 let keys = keys.ok_or(Error::InvalidHeader(
                     "RAR 5 encrypted hash MAC needs encryption keys",
@@ -136,7 +136,7 @@ impl FileHeader {
 
     fn verify_streaming_integrity(
         &self,
-        crc: StreamingCrc32,
+        crc: Crc32,
         hash: Option<([u8; 32], blake2sp::Hasher)>,
         keys: Option<&Rar50Keys>,
     ) -> Result<()> {
@@ -278,7 +278,7 @@ impl FileHeader {
         })?;
         let output_size = usize::try_from(self.unpacked_size)
             .map_err(|_| Error::InvalidHeader("RAR 5 unpacked size overflows host address size"))?;
-        let mut crc = StreamingCrc32::new();
+        let mut crc = Crc32::new();
         let mut hash = streaming_hash_verifier(self)?;
         decoder
             .decode_member_from_reader_with_dictionary_to_sink(
@@ -320,7 +320,7 @@ impl FileHeader {
         let (mut reader, keys) = self
             .packed_reader_with_password(archive, password)
             .map_err(|error| self.entry_error("decoding", error))?;
-        let mut crc = StreamingCrc32::new();
+        let mut crc = Crc32::new();
         let mut hash =
             streaming_hash_verifier(self).map_err(|error| self.entry_error("decoding", error))?;
         let mut written = 0u64;
@@ -375,7 +375,7 @@ impl FileHeader {
 
 fn write_repeated_chunk(
     writer: &mut dyn Write,
-    crc: &mut StreamingCrc32,
+    crc: &mut Crc32,
     hash: &mut Option<([u8; 32], blake2sp::Hasher)>,
     byte: u8,
     mut len: usize,
@@ -712,7 +712,7 @@ impl PendingSplitRefs {
         writer: &mut dyn Write,
     ) -> Result<()> {
         let mut reader = self.fragment_reader(volumes, decryptor)?;
-        let mut crc = StreamingCrc32::new();
+        let mut crc = Crc32::new();
         let mut hash = streaming_hash_verifier(final_file)?;
         let mut written = 0u64;
         let mut buf = [0u8; 64 * 1024];
@@ -984,7 +984,6 @@ mod tests {
         HFL_SPLIT_BEFORE,
     };
     use super::*;
-    use crate::rar15_40::crc32;
     use std::cell::RefCell;
     use std::io::Cursor;
     use std::rc::Rc;
@@ -1106,10 +1105,10 @@ mod tests {
 
     #[test]
     fn streaming_crc32_zero_advance_matches_byte_update() {
-        let mut bytewise = StreamingCrc32::new();
+        let mut bytewise = Crc32::new();
         bytewise.update(&vec![0; 100_000]);
 
-        let mut skipped = StreamingCrc32::new();
+        let mut skipped = Crc32::new();
         skipped.update_zeroes(100_000);
 
         assert_eq!(skipped.finish(), bytewise.finish());
@@ -1130,8 +1129,8 @@ mod tests {
         }
 
         let mut writer = FailingWriter;
-        let mut crc = StreamingCrc32::new();
-        let expected = StreamingCrc32::new().finish();
+        let mut crc = Crc32::new();
+        let expected = Crc32::new().finish();
 
         assert!(write_repeated_chunk(&mut writer, &mut crc, &mut None, 0, 1024).is_err());
         assert_eq!(crc.finish(), expected);
@@ -1341,7 +1340,7 @@ mod tests {
         });
 
         let make_state = || {
-            let mut crc = StreamingCrc32::new();
+            let mut crc = Crc32::new();
             crc.update(payload);
             let mut hasher = blake2sp::Hasher::new();
             hasher.update(payload);
@@ -1373,25 +1372,25 @@ mod tests {
 
         let empty = plain_file(b"e.txt", b"", None);
         empty
-            .verify_streaming_integrity(StreamingCrc32::new(), None, None)
+            .verify_streaming_integrity(Crc32::new(), None, None)
             .unwrap();
     }
 
     #[test]
     fn write_repeated_chunk_updates_crc_hash_and_writer() {
         let mut writer = Vec::new();
-        let mut crc_zero = StreamingCrc32::new();
+        let mut crc_zero = Crc32::new();
         let mut hash = Some(([0u8; 32], blake2sp::Hasher::new()));
         write_repeated_chunk(&mut writer, &mut crc_zero, &mut hash, 0, 70_000).unwrap();
         assert_eq!(writer.len(), 70_000);
         let zero_crc = crc_zero.finish();
 
-        let mut bytewise = StreamingCrc32::new();
+        let mut bytewise = Crc32::new();
         bytewise.update(&vec![0u8; 70_000]);
         assert_eq!(zero_crc, bytewise.finish());
 
         let mut writer = Vec::new();
-        let mut crc_ff = StreamingCrc32::new();
+        let mut crc_ff = Crc32::new();
         let mut hash_none: Option<([u8; 32], blake2sp::Hasher)> = None;
         write_repeated_chunk(&mut writer, &mut crc_ff, &mut hash_none, 0xff, 1024).unwrap();
         assert_eq!(writer, vec![0xffu8; 1024]);

@@ -1,3 +1,4 @@
+use rars_crc32::crc32;
 use rars_format::rar15_40::Archive;
 use rars_format::{ArchiveReadOptions, Result};
 use std::cell::RefCell;
@@ -131,16 +132,4 @@ fn real_executable_filter_archive_decodes() {
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"bsdcat.exe");
     assert_eq!(crc32(&extracted[0].data), 0x4db1_0349);
-}
-
-fn crc32(data: &[u8]) -> u32 {
-    let mut crc = 0xffff_ffffu32;
-    for &byte in data {
-        crc ^= u32::from(byte);
-        for _ in 0..8 {
-            let mask = 0u32.wrapping_sub(crc & 1);
-            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
-        }
-    }
-    !crc
 }

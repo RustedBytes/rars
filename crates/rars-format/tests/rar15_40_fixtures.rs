@@ -1,5 +1,6 @@
+use rars_crc32::crc32;
 use rars_format::rar15_40::{
-    crc32, extract_volumes_to, repair_rev3_volumes_to, write_compressed_archive,
+    extract_volumes_to, repair_rev3_volumes_to, write_compressed_archive,
     write_compressed_archive_with_comment, write_compressed_volumes,
     write_rar29_compressed_archive_with_filter_policy, write_stored_archive,
     write_stored_archive_with_comment, write_stored_volumes, Archive, Block, FileEntry, FilterKind,
