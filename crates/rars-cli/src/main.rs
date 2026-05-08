@@ -20,7 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 type CliResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 const ADD_USAGE: &str =
-    "usage: rars a [--password <password>|--password-file <path>] --format <rar14|rar15|rar20|rar29|rar30|rar40|rar50|rar70> [--store] [--solid] [--encrypt-headers] [--quick-open] [--comment <text>] [--archive-name <name>] [--file-comment <text>] [--recovery-percent <1..100>] [--volume-size <bytes|k|m|g>] [--ppmd|--auto-filter|--delta-filter <channels>|--e8-filter|--e8e9-filter|--itanium-filter|--rgb-filter <width>|--audio-filter <channels>|--arm-filter] <archive> <files...>";
+    "usage: rars a [--password <password>|--password-file <path>] --format <rar14|rar15|rar20|rar29|rar30|rar40|rar50|rar70> [--store] [--level <0..5>] [--solid] [--encrypt-headers] [--quick-open] [--comment <text>] [--archive-name <name>] [--file-comment <text>] [--recovery-percent <1..100>] [--volume-size <bytes|k|m|g>] [--ppmd|--auto-filter|--delta-filter <channels>|--e8-filter|--e8e9-filter|--itanium-filter|--rgb-filter <width>|--audio-filter <channels>|--arm-filter] <archive> <files...>";
 const DOS_DIRECTORY_ATTR: u8 = 0x10;
 const RAR50_SIGNATURE: &[u8] = b"Rar!\x1a\x07\x01\x00";
 const RAR50_STRUCTURAL_RR_WARNING: &str =
@@ -621,6 +621,7 @@ struct AddCommand {
     password: Option<Vec<u8>>,
     target: ArchiveVersion,
     store: bool,
+    compression_level: Option<u8>,
     solid: bool,
     header_encryption: bool,
     quick_open: bool,
@@ -658,6 +659,7 @@ fn parse_add_command(args: &[String]) -> CliResult<AddCommand> {
         _ => return Err(ADD_USAGE.into()),
     };
     let mut store = false;
+    let mut compression_level = None;
     let mut solid = false;
     let mut header_encryption = false;
     let mut quick_open = false;
@@ -680,6 +682,15 @@ fn parse_add_command(args: &[String]) -> CliResult<AddCommand> {
             "--store" => {
                 store = true;
                 archive_index += 1;
+            }
+            "--level" => {
+                let value = args.get(archive_index + 1).ok_or("missing --level value")?;
+                let level = value.parse::<u8>()?;
+                if level > 5 {
+                    return Err("compression level must be in the range 0..5".into());
+                }
+                compression_level = Some(level);
+                archive_index += 2;
             }
             "--solid" => {
                 solid = true;
@@ -782,6 +793,14 @@ fn parse_add_command(args: &[String]) -> CliResult<AddCommand> {
     if args.len() <= archive_index {
         return Err(ADD_USAGE.into());
     }
+    if let Some(level) = compression_level {
+        if store && level != 0 {
+            return Err("--store cannot be combined with --level > 0".into());
+        }
+        if level == 0 {
+            store = true;
+        }
+    }
     if solid && store {
         return Err("solid output requires compression".into());
     }
@@ -794,6 +813,7 @@ fn parse_add_command(args: &[String]) -> CliResult<AddCommand> {
         password,
         target,
         store,
+        compression_level,
         solid,
         header_encryption,
         quick_open,
@@ -820,6 +840,7 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
         password,
         target,
         store,
+        compression_level,
         solid,
         header_encryption,
         quick_open,
@@ -879,6 +900,14 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
         && input_paths.len() != 1
     {
         return Err("multivolume writer currently supports one input file".into());
+    }
+    if matches!(compression_level, Some(1..=5))
+        && !matches!(
+            target,
+            ArchiveVersion::Rar29 | ArchiveVersion::Rar30 | ArchiveVersion::Rar40
+        )
+    {
+        return Err("compression levels are currently implemented for RAR 2.9/3.x/4.x writers; use --store or --level 0 for stored output".into());
     }
 
     let owned = read_inputs(input_paths, password.as_deref())?;
@@ -1305,7 +1334,10 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
             features.header_encryption = header_encryption;
             features.archive_comment = archive_comment.is_some();
             features.file_comment = file_comment.is_some();
-            let options = Rar15WriterOptions::new(target, features);
+            let mut options = Rar15WriterOptions::new(target, features);
+            if let Some(level) = compression_level {
+                options = options.with_compression_level(level);
+            }
             if let Some(volume_size) = volume_size {
                 // Invariant: parse_add_command rejects add commands without inputs.
                 let entry = owned.first().expect("one input checked above");

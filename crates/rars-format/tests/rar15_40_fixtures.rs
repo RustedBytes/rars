@@ -2462,6 +2462,43 @@ fn default_rar29_writer_uses_auto_policy_for_x86() {
 }
 
 #[test]
+fn rar29_family_writer_level_three_uses_lz_and_level_five_uses_auto_policy() {
+    let payload = b"fn alpha() { beta(gamma); }\nlet words = alpha beta gamma delta;\n".repeat(512);
+    let entries = [FileEntry {
+        name: b"rar29-level-policy.txt",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+    for target in [
+        ArchiveVersion::Rar29,
+        ArchiveVersion::Rar30,
+        ArchiveVersion::Rar40,
+    ] {
+        let level_three =
+            WriterOptions::new(target, FeatureSet::store_only()).with_compression_level(3);
+        let level_five =
+            WriterOptions::new(target, FeatureSet::store_only()).with_compression_level(5);
+
+        let lz = write_compressed_archive(&entries, level_three).unwrap();
+        let auto = write_compressed_archive(&entries, level_five).unwrap();
+        let lz_archive = Archive::parse(&lz).unwrap();
+        let auto_archive = Archive::parse(&auto).unwrap();
+        let lz_file = lz_archive.files().next().unwrap();
+        let auto_file = auto_archive.files().next().unwrap();
+
+        assert_eq!(lz_file.method, 0x33, "{target:?} level 3");
+        assert_eq!(auto_file.method, 0x35, "{target:?} level 5");
+        assert!(auto_file.pack_size < lz_file.pack_size, "{target:?}");
+        assert_eq!(collect_extract(&lz_archive).unwrap()[0].data, payload);
+        assert_eq!(collect_extract(&auto_archive).unwrap()[0].data, payload);
+    }
+}
+
+#[test]
 fn default_rar29_writer_uses_auto_policy_for_audio_shaped_data() {
     let mut payload = Vec::new();
     for sample in 0..16_384i16 {

@@ -916,6 +916,82 @@ fn creates_rar29_compressed_archive_that_can_be_tested() {
 }
 
 #[test]
+fn creates_rar29_archives_with_distinct_compression_levels() {
+    let dir = scratch("create-rar29-levels");
+    let source = dir.join("source.txt");
+    let level_three = dir.join("level3.rar");
+    let level_five = dir.join("level5.rar");
+    fs::write(
+        &source,
+        b"fn alpha() { beta(gamma); }\nlet words = alpha beta gamma delta;\n".repeat(512),
+    )
+    .unwrap();
+
+    let create_lz = rars()
+        .args(["a", "--format", "rar29", "--level", "3"])
+        .arg(&level_three)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(create_lz.status.success(), "stderr: {}", stderr(&create_lz));
+
+    let create_auto = rars()
+        .args(["a", "--format", "rar29", "--level", "5"])
+        .arg(&level_five)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        create_auto.status.success(),
+        "stderr: {}",
+        stderr(&create_auto)
+    );
+
+    let lz_info = rars().arg("info").arg(&level_three).output().unwrap();
+    assert!(lz_info.status.success(), "stderr: {}", stderr(&lz_info));
+    assert!(stdout(&lz_info).contains("method=0x33"));
+
+    let auto_info = rars().arg("info").arg(&level_five).output().unwrap();
+    assert!(auto_info.status.success(), "stderr: {}", stderr(&auto_info));
+    assert!(stdout(&auto_info).contains("method=0x35"));
+
+    assert_archive_tests_and_extracts_file(
+        &level_three,
+        None,
+        "source.txt",
+        b"fn alpha() { beta(gamma); }\nlet words = alpha beta gamma delta;\n"
+            .repeat(512)
+            .as_slice(),
+    );
+    assert_archive_tests_and_extracts_file(
+        &level_five,
+        None,
+        "source.txt",
+        b"fn alpha() { beta(gamma); }\nlet words = alpha beta gamma delta;\n"
+            .repeat(512)
+            .as_slice(),
+    );
+}
+
+#[test]
+fn rejects_unwired_compression_level_for_rar50() {
+    let dir = scratch("reject-rar50-level");
+    let source = dir.join("source.txt");
+    let archive = dir.join("level.rar");
+    fs::write(&source, b"rar50 level not wired yet\n").unwrap();
+
+    let output = rars()
+        .args(["a", "--format", "rar50", "--level", "5"])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr(&output).contains("compression levels are currently implemented"));
+}
+
+#[test]
 fn creates_rar29_solid_archive_that_can_be_tested() {
     let dir = scratch("create-rar29-solid");
     let first = dir.join("one.txt");

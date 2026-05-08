@@ -193,11 +193,21 @@ pub enum NewSubKind {
 pub struct WriterOptions {
     pub target: ArchiveVersion,
     pub features: FeatureSet,
+    pub compression_level: Option<u8>,
 }
 
 impl WriterOptions {
     pub const fn new(target: ArchiveVersion, features: FeatureSet) -> Self {
-        Self { target, features }
+        Self {
+            target,
+            features,
+            compression_level: None,
+        }
+    }
+
+    pub const fn with_compression_level(mut self, level: u8) -> Self {
+        self.compression_level = Some(level);
+        self
     }
 }
 
@@ -206,6 +216,7 @@ impl Default for WriterOptions {
         Self {
             target: ArchiveVersion::Rar15,
             features: FeatureSet::store_only(),
+            compression_level: None,
         }
     }
 }

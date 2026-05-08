@@ -81,7 +81,7 @@ pub fn write_compressed_archive_with_comment(
     let mut solid_encoder = SolidEncoder::for_target(options.target, options.features.solid);
     let mut solid_run_has_member = false;
     for entry in entries {
-        let payload = encode_or_store_payload(entry.data, options.target, &mut solid_encoder)?;
+        let payload = encode_or_store_payload(entry.data, options, &mut solid_encoder)?;
         let solid_continuation =
             options.features.solid && payload.method != 0x30 && solid_run_has_member;
         write_compressed_entry(
@@ -102,6 +102,7 @@ pub fn write_compressed_archive_with_comment(
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum FilterPolicy {
+    Lz,
     Auto,
     Explicit(FilterSpec),
     Ppmd,
@@ -124,6 +125,7 @@ fn encode_rar29_policy_filtered_payload(
     policy: &FilterPolicy,
 ) -> Result<EncodedPayload> {
     match policy {
+        FilterPolicy::Lz => encode_rar29_lz_member(data),
         FilterPolicy::Auto => encode_rar29_auto_filtered_member(data),
         FilterPolicy::Explicit(filter) => Ok(EncodedPayload {
             data: encode_rar29_filtered_member(data, filter.clone())?,
@@ -143,7 +145,7 @@ fn encode_rar29_policy_filtered_payload(
 fn validate_rar29_filter_policy(policy: &FilterPolicy) -> Result<()> {
     let filter = match policy {
         FilterPolicy::Explicit(filter) | FilterPolicy::PpmdFiltered(filter) => filter,
-        FilterPolicy::Auto | FilterPolicy::Ppmd => return Ok(()),
+        FilterPolicy::Lz | FilterPolicy::Auto | FilterPolicy::Ppmd => return Ok(()),
     };
     match filter.kind {
         FilterKind::Delta { channels } => {
@@ -170,6 +172,20 @@ fn validate_rar29_filter_policy(policy: &FilterPolicy) -> Result<()> {
         FilterKind::E8 | FilterKind::E8E9 | FilterKind::Itanium => {}
     }
     Ok(())
+}
+
+fn encode_rar29_lz_member(data: &[u8]) -> Result<EncodedPayload> {
+    let compressed = unpack29_encode_literals(data).map_err(Error::from)?;
+    if data.len() >= MIN_STORE_FALLBACK_SIZE && compressed.len() >= data.len() {
+        return Ok(EncodedPayload {
+            data: data.to_vec(),
+            method: 0x30,
+        });
+    }
+    Ok(EncodedPayload {
+        data: compressed,
+        method: 0x33,
+    })
 }
 
 fn encode_rar29_filtered_member(data: &[u8], filter: FilterSpec) -> Result<Vec<u8>> {
@@ -427,7 +443,7 @@ fn write_header_encrypted_compressed_archive(
     let mut solid_encoder = SolidEncoder::for_target(options.target, options.features.solid);
     let mut solid_run_has_member = false;
     for entry in entries {
-        let payload = encode_or_store_payload(entry.data, options.target, &mut solid_encoder)?;
+        let payload = encode_or_store_payload(entry.data, options, &mut solid_encoder)?;
         let solid_continuation =
             options.features.solid && payload.method != 0x30 && solid_run_has_member;
         write_header_encrypted_compressed_entry(
@@ -507,7 +523,7 @@ pub fn write_compressed_volumes(
     )?;
 
     let mut solid_encoder = None;
-    let payload = encode_or_store_payload(entry.data, options.target, &mut solid_encoder)?;
+    let payload = encode_or_store_payload(entry.data, options, &mut solid_encoder)?;
     if options.features.header_encryption {
         return write_header_encrypted_split_volumes(SplitVolumeRecord {
             name: entry.name,
@@ -546,6 +562,7 @@ fn validate_stored_writer_options(
     has_archive_comment: bool,
     has_file_comment: bool,
 ) -> Result<()> {
+    validate_compression_level(options)?;
     if !matches!(
         options.target,
         ArchiveVersion::Rar15
@@ -587,6 +604,7 @@ fn validate_compressed_writer_options(
     has_archive_comment: bool,
     has_file_comment: bool,
 ) -> Result<()> {
+    validate_compression_level(options)?;
     if !matches!(
         options.target,
         ArchiveVersion::Rar15
@@ -632,6 +650,7 @@ fn validate_compressed_writer_options(
 }
 
 fn validate_rar29_filtered_writer_options(options: WriterOptions) -> Result<()> {
+    validate_compression_level(options)?;
     if !matches!(
         options.target,
         ArchiveVersion::Rar29 | ArchiveVersion::Rar30 | ArchiveVersion::Rar40
@@ -673,6 +692,15 @@ fn validate_header_encrypted_archive_options(
     Ok(())
 }
 
+fn validate_compression_level(options: WriterOptions) -> Result<()> {
+    if matches!(options.compression_level, Some(level) if level > 5) {
+        return Err(Error::InvalidHeader(
+            "RAR compression level must be in the range 0..5",
+        ));
+    }
+    Ok(())
+}
+
 enum SolidEncoder {
     Rar15(Box<Unpack15Encoder>),
     Rar20(Unpack20Encoder),
@@ -702,9 +730,16 @@ struct EncodedPayload {
 
 fn encode_or_store_payload(
     data: &[u8],
-    target: ArchiveVersion,
+    options: WriterOptions,
     solid_encoder: &mut Option<SolidEncoder>,
 ) -> Result<EncodedPayload> {
+    let target = options.target;
+    if options.compression_level == Some(0) {
+        return Ok(EncodedPayload {
+            data: data.to_vec(),
+            method: 0x30,
+        });
+    }
     let solid = solid_encoder.is_some();
     if !solid
         && matches!(
@@ -712,6 +747,9 @@ fn encode_or_store_payload(
             ArchiveVersion::Rar29 | ArchiveVersion::Rar30 | ArchiveVersion::Rar40
         )
     {
+        if matches!(options.compression_level, Some(1..=3)) {
+            return encode_rar29_lz_member(data);
+        }
         return encode_rar29_auto_filtered_member(data);
     }
     let compressed = encode_compressed_payload(data, target, solid_encoder.as_mut())?;
@@ -1392,6 +1430,7 @@ fn write_header_encrypted_split_volumes(entry: SplitVolumeRecord<'_>) -> Result<
                 features.solid = entry.main_flags & MHD_SOLID != 0;
                 features
             },
+            compression_level: None,
         },
         false,
         entry.main_flags & MHD_SOLID != 0,

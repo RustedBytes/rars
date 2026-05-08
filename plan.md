@@ -51,14 +51,12 @@
 - Add WinRAR 2.90 oracle coverage before enabling RAR20 repeat-distance,
   old-distance, short-distance, or audio writer tokens. The current writer
   deliberately emits only literals and fresh LZ matches.
-- Decide and implement the RAR15-40 compression-level API. `--format rar29`
-  currently has no `--level`/`--method` knob, so default and max-level bench
-  runs are intentionally identical.
-- Improve RAR29/RAR30/RAR40 writer policy beyond the current default auto
-  selector: filter-block boundary tuning, match-finder quality, lazy parsing,
-  and PPMd tuning.
-- Improve RAR5/RAR7 compressed-writer policy beyond the deterministic method-1
-  bounded hash-chain baseline: audio/filter placement and match selection.
+- Improve RAR29/RAR30/RAR40 max-level policy after `--level` is wired:
+  filter-block boundary tuning, match-finder quality, lazy parsing, and PPMd
+  tuning against WinRAR 2.90/3.x/4.x oracles.
+- Improve RAR5/RAR7 compressed-writer policy after the RAR70 bench lands:
+  audio/filter placement and match selection beyond the deterministic method-1
+  bounded hash-chain baseline.
 - Add real RAR-created RAR5 filter fixtures for E8, E8E9, Delta, and ARM
   reader coverage.
 
