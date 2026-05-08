@@ -26,6 +26,9 @@
 - Improve RAR 1.4 compressed-writer quality after the DOS compatibility path
   is stable: match selection, safe old-distance reuse, and text-heavy corpus
   tuning.
+- Add WinRAR 2.90 oracle coverage before enabling RAR20 repeat-distance,
+  old-distance, short-distance, or audio writer tokens. The current writer
+  deliberately emits only literals and fresh LZ matches.
 - Improve RAR29/RAR30/RAR40 writer policy beyond the current default auto
   selector: filter-block boundary tuning, match-finder quality, lazy parsing,
   and PPMd tuning.

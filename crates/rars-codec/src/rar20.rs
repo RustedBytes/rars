@@ -273,7 +273,7 @@ fn best_match(
 ) -> Option<(usize, usize)> {
     let max_offset = pos.min(MAX_ENCODER_MATCH_OFFSET);
     let max_length = (end - pos).min(MAX_ENCODER_MATCH_LENGTH);
-    if max_offset == 0 || max_length < 4 || pos + 2 >= input.len() {
+    if max_offset == 0 || max_length < 3 || pos + 2 >= input.len() {
         return None;
     }
     let bucket = &buckets[match_hash(input, pos)];
@@ -292,7 +292,7 @@ fn best_match(
         while length < max_length && input[pos + length] == input[pos + length - offset] {
             length += 1;
         }
-        let encodable = length >= 4 + match_length_adjustment(offset);
+        let encodable = length >= 3 + match_length_adjustment(offset);
         if encodable
             && best.is_none_or(|(best_length, best_offset)| {
                 length > best_length || (length == best_length && offset < best_offset)
@@ -1292,6 +1292,27 @@ mod tests {
         let packed = unpack20_encode_literals(&input).unwrap();
 
         assert!(packed.len() < input.len() / 2);
+        assert_eq!(unpack20_decode(&packed, input.len()).unwrap(), input);
+    }
+
+    #[test]
+    fn encoder_emits_rar20_minimum_length_fresh_matches() {
+        let input = b"abcabc";
+        let tokens = encode_tokens(input, &[]);
+        let packed = unpack20_encode_literals(input).unwrap();
+
+        assert!(matches!(
+            tokens.as_slice(),
+            [
+                EncodeToken::Literal(b'a'),
+                EncodeToken::Literal(b'b'),
+                EncodeToken::Literal(b'c'),
+                EncodeToken::Match {
+                    length: 3,
+                    offset: 3
+                }
+            ]
+        ));
         assert_eq!(unpack20_decode(&packed, input.len()).unwrap(), input);
     }
 
