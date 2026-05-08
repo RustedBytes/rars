@@ -8,6 +8,11 @@ const MAX_WINRAR602_DATA_SHARDS: u64 = 200;
 const KIB: u64 = 1024;
 const RAR5_RECOVERY_CHUNK_FIXED_HEADER_SIZE: u64 = 0x48;
 
+fn shared_gf16() -> &'static Gf16 {
+    static GF16: std::sync::OnceLock<Gf16> = std::sync::OnceLock::new();
+    GF16.get_or_init(Gf16::new)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Error {
@@ -511,12 +516,21 @@ fn recover_damaged_shards(
     recovery_shards: &[(usize, &[u8])],
 ) -> Result<()> {
     let data_count = data_shards.len();
+    let mut damaged_lookup = vec![false; data_count];
+    for &data_index in damaged {
+        if data_index >= data_count {
+            return Err(Error::TooManyDamagedShards);
+        }
+        damaged_lookup[data_index] = true;
+    }
+
     let recovery_count = recovery_shards
         .iter()
         .map(|(row, _)| row + 1)
         .max()
         .ok_or(Error::TooManyDamagedShards)?;
     let matrix = make_encoder_matrix(data_count, recovery_count)?;
+    let gf = shared_gf16();
     let equations: Vec<Vec<u16>> = recovery_shards
         .iter()
         .map(|&(row_index, _)| {
@@ -526,16 +540,9 @@ fn recover_damaged_shards(
                 .collect()
         })
         .collect();
-    let mut damaged_lookup = vec![false; data_count];
-    for &data_index in damaged {
-        if data_index >= data_count {
-            return Err(Error::TooManyDamagedShards);
-        }
-        damaged_lookup[data_index] = true;
-    }
+    let inverse = invert_linear_system_matrix(gf, &equations)?;
 
     let shard_len = data_shards.first().ok_or(Error::TooManyShards)?.len();
-    let gf = Gf16::new();
     for word_offset in (0..shard_len).step_by(2) {
         let mut rhs = Vec::with_capacity(recovery_shards.len());
         for &(row_index, parity) in recovery_shards {
@@ -549,7 +556,7 @@ fn recover_damaged_shards(
             }
             rhs.push(value);
         }
-        let solved = solve_linear_system(&gf, equations.clone(), rhs)?;
+        let solved = apply_inverse_matrix(gf, &inverse, &rhs)?;
         for (&data_index, &symbol) in damaged.iter().zip(&solved) {
             data_shards[data_index][word_offset..word_offset + 2]
                 .copy_from_slice(&symbol.to_le_bytes());
@@ -558,26 +565,30 @@ fn recover_damaged_shards(
     Ok(())
 }
 
-fn solve_linear_system(
-    gf: &Gf16,
-    mut matrix: Vec<Vec<u16>>,
-    mut rhs: Vec<u16>,
-) -> Result<Vec<u16>> {
-    let n = rhs.len();
+fn invert_linear_system_matrix(gf: &Gf16, matrix: &[Vec<u16>]) -> Result<Vec<Vec<u16>>> {
+    let n = matrix.len();
     if matrix.len() != n || matrix.iter().any(|row| row.len() != n) {
         return Err(Error::BadRecoveryChunk);
     }
+    let mut matrix = matrix.to_vec();
+    let mut inverse = vec![vec![0u16; n]; n];
+    for (row, inverse_row) in inverse.iter_mut().enumerate() {
+        inverse_row[row] = 1;
+    }
+
     for col in 0..n {
         let pivot = (col..n)
             .find(|&row| matrix[row][col] != 0)
             .ok_or(Error::SingularElement)?;
         matrix.swap(col, pivot);
-        rhs.swap(col, pivot);
+        inverse.swap(col, pivot);
         let inv = gf.inv(matrix[col][col])?;
-        for value in &mut matrix[col][col..] {
+        for value in &mut matrix[col] {
             *value = gf.mul(*value, inv);
         }
-        rhs[col] = gf.mul(rhs[col], inv);
+        for value in &mut inverse[col] {
+            *value = gf.mul(*value, inv);
+        }
 
         for row in 0..n {
             if row == col {
@@ -590,10 +601,28 @@ fn solve_linear_system(
             for c in col..n {
                 matrix[row][c] ^= gf.mul(factor, matrix[col][c]);
             }
-            rhs[row] ^= gf.mul(factor, rhs[col]);
+            for c in 0..n {
+                inverse[row][c] ^= gf.mul(factor, inverse[col][c]);
+            }
         }
     }
-    Ok(rhs)
+    Ok(inverse)
+}
+
+fn apply_inverse_matrix(gf: &Gf16, inverse: &[Vec<u16>], rhs: &[u16]) -> Result<Vec<u16>> {
+    if inverse.len() != rhs.len() || inverse.iter().any(|row| row.len() != rhs.len()) {
+        return Err(Error::BadRecoveryChunk);
+    }
+    Ok(inverse
+        .iter()
+        .map(|row| {
+            row.iter()
+                .zip(rhs)
+                .fold(0u16, |sum, (&coefficient, &value)| {
+                    sum ^ gf.mul(coefficient, value)
+                })
+        })
+        .collect())
 }
 
 fn read_u32(input: &[u8], offset: usize) -> Result<u32> {
@@ -675,7 +704,7 @@ pub fn make_encoder_matrix(data_shards: usize, recovery_shards: usize) -> Result
     if data_shards == 0 || recovery_shards == 0 || data_shards + recovery_shards > FIELD_SIZE {
         return Err(Error::TooManyShards);
     }
-    let gf = Gf16::new();
+    let gf = shared_gf16();
     let mut matrix = vec![vec![0u16; data_shards]; recovery_shards];
     for (i, row) in matrix.iter_mut().enumerate() {
         for (j, cell) in row.iter_mut().enumerate() {
@@ -698,7 +727,7 @@ pub fn encode_parity_shards(data: &[&[u8]], recovery_shards: usize) -> Result<Ve
     }
 
     let matrix = make_encoder_matrix(data.len(), recovery_shards)?;
-    let gf = Gf16::new();
+    let gf = shared_gf16();
     let mut parity = vec![vec![0u8; first.len()]; recovery_shards];
     for (recovery_index, row) in matrix.iter().enumerate() {
         for word_offset in (0..first.len()).step_by(2) {
@@ -717,11 +746,11 @@ pub fn encode_parity_shards(data: &[&[u8]], recovery_shards: usize) -> Result<Ve
 #[cfg(test)]
 mod tests {
     use super::{
-        build_structural_inline_recovery_data, crc64_rar_state, crc64_xz,
-        encode_inline_recovery_parity, encode_parity_shards, make_encoder_matrix,
-        plan_inline_recovery, reconstruct_data_shards, repair_inline_recovery_archive,
-        repair_inline_recovery_prefix, split_prefix_shard_ranges, split_prefix_shards, Error, Gf16,
-        InlineRecoveryPlan,
+        apply_inverse_matrix, build_structural_inline_recovery_data, crc64_rar_state, crc64_xz,
+        encode_inline_recovery_parity, encode_parity_shards, invert_linear_system_matrix,
+        make_encoder_matrix, plan_inline_recovery, reconstruct_data_shards,
+        repair_inline_recovery_archive, repair_inline_recovery_prefix, shared_gf16,
+        split_prefix_shard_ranges, split_prefix_shards, Error, Gf16, InlineRecoveryPlan,
     };
 
     #[test]
@@ -781,6 +810,15 @@ mod tests {
         assert_eq!(gf.mul(0x1234, 0), 0);
         assert_eq!(gf.mul(0, 0), 0);
         assert_eq!(gf.mul(1, 0x1234), 0x1234);
+    }
+
+    #[test]
+    fn shared_gf16_reuses_field_tables() {
+        let first = shared_gf16() as *const Gf16;
+        let second = shared_gf16() as *const Gf16;
+
+        assert_eq!(first, second);
+        assert_eq!(shared_gf16().mul(0x8000, 2), 0x100b);
     }
 
     #[test]
@@ -860,6 +898,22 @@ mod tests {
         assert_eq!(make_encoder_matrix(0, 1), Err(Error::TooManyShards));
         assert_eq!(make_encoder_matrix(1, 0), Err(Error::TooManyShards));
         assert_eq!(make_encoder_matrix(65535, 1), Err(Error::TooManyShards));
+    }
+
+    #[test]
+    fn rar5_recovery_inverse_matrix_solves_reused_equations() {
+        let gf = shared_gf16();
+        let equations = vec![vec![3, 5], vec![7, 11]];
+        let expected = [0x1234, 0xabcd];
+        let rhs = equations
+            .iter()
+            .map(|row| gf.mul(row[0], expected[0]) ^ gf.mul(row[1], expected[1]))
+            .collect::<Vec<_>>();
+
+        let inverse = invert_linear_system_matrix(gf, &equations).unwrap();
+        let solved = apply_inverse_matrix(gf, &inverse, &rhs).unwrap();
+
+        assert_eq!(solved, expected);
     }
 
     #[test]

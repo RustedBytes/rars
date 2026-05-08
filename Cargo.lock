@@ -124,6 +124,7 @@ dependencies = [
 name = "rars-cli"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "rars",
  "rars-crc32",
  "rpassword",

@@ -25,6 +25,7 @@ categories = ["compression"]
 aes = "0.8"
 getrandom = "0.2"
 hmac = "0.12"
+libc = "0.2"
 rars = { version = "0.1.0", path = "crates/rars" }
 rars-codec = { version = "0.1.0", path = "crates/rars-codec" }
 rars-crypto = { version = "0.1.0", path = "crates/rars-crypto" }

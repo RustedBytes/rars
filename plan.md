@@ -11,14 +11,6 @@
 
 ## Hardening
 
-- Review #4 batch 8: recovery performance:
-  - Amortise RAR5 GF(2^16) table construction across recovery operations.
-  - Avoid cloning the same recovery linear-system equations for every shard
-    word; use a scratch matrix or precomputed inverse.
-- Review #4 batch 9: extraction platform hardening:
-  - Replace the Linux-only numeric `O_NOFOLLOW` extraction guard with a
-    portable Unix approach where available, or document the non-Linux TOCTOU
-    limitation clearly.
 - Add adversarial PPMd fixtures as corpus bugs appear.
 - Harden PPMd hostile-state arithmetic paths (`make_esc_freq`,
   `update_model`) with focused malformed-stream regression tests.

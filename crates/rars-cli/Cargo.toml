@@ -20,6 +20,7 @@ name = "rars"
 path = "src/main.rs"
 
 [dependencies]
+libc.workspace = true
 rars.workspace = true
 rars-crc32.workspace = true
 rpassword.workspace = true

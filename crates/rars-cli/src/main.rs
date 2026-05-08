@@ -2072,17 +2072,17 @@ fn create_output_file(path: &Path) -> std::io::Result<File> {
     options.open(path)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn set_no_follow(options: &mut OpenOptions) {
     use std::os::unix::fs::OpenOptionsExt;
-    const O_NOFOLLOW: i32 = 0o400000;
-    options.custom_flags(O_NOFOLLOW);
+    options.custom_flags(libc::O_NOFOLLOW);
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 fn set_no_follow(_options: &mut OpenOptions) {
-    // Non-Linux targets still get checked_output_path validation before open,
-    // but this build does not add a platform-specific no-follow open flag.
+    // checked_output_path validates archive path components before open. The
+    // standard library does not expose a cross-platform final-component
+    // no-follow flag for this target family.
 }
 
 struct OwnedInput {
