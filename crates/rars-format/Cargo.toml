@@ -3,9 +3,12 @@ name = "rars-format"
 version = "0.1.0"
 description = "RAR archive format parser and writer implementation used by rars."
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 readme.workspace = true
+homepage.workspace = true
 repository.workspace = true
+documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
 

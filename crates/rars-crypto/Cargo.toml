@@ -3,9 +3,12 @@ name = "rars-crypto"
 version = "0.1.0"
 description = "RAR legacy and modern archive encryption primitives."
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 readme.workspace = true
+homepage.workspace = true
 repository.workspace = true
+documentation.workspace = true
 keywords.workspace = true
 categories = ["cryptography"]
 

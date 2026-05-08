@@ -4,14 +4,17 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
-if ! command -v rar >/dev/null 2>&1; then
-  cat >&2 <<'EOF'
-missing rar command
+require_command() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "missing required command: $1" >&2
+    exit 1
+  fi
+}
 
-Install RAR/WinRAR command-line tools to run RAR5 recovery repair checks.
-EOF
-  exit 1
-fi
+require_command cargo
+require_command cp
+require_command python3
+require_command rar
 
 tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/rars-rar5-repair.XXXXXX")"
 trap 'rm -rf "$tmpdir"' EXIT

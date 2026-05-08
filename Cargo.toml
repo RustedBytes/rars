@@ -11,8 +11,11 @@ resolver = "2"
 
 [workspace.package]
 edition = "2021"
+rust-version = "1.87"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
+homepage = "https://github.com/bitplane/rars"
 repository = "https://github.com/bitplane/rars"
+documentation = "https://docs.rs/rars"
 keywords = ["rar", "archive", "compression"]
 categories = ["compression"]

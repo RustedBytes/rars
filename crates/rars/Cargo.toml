@@ -3,9 +3,12 @@ name = "rars"
 version = "0.1.0"
 description = "High-level Rust API for reading, extracting, writing, and repairing RAR archives."
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 readme.workspace = true
+homepage.workspace = true
 repository.workspace = true
+documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
 

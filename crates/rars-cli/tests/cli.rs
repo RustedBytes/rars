@@ -745,8 +745,7 @@ fn creates_rar50_header_encrypted_recovery_volumes() {
     assert!(parts.len() >= 2);
 
     let missing = rars().arg("test").args(&parts).output().unwrap();
-    assert!(!missing.status.success());
-    assert!(stderr(&missing).contains("password is required"));
+    assert_password_required(&missing);
 
     let test = rars()
         .args(["test", "--password", "pass"])
@@ -876,8 +875,7 @@ fn creates_rar20_encrypted_compressed_archive_that_can_be_tested() {
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
     let missing_password = rars().arg("test").arg(&archive).output().unwrap();
-    assert!(!missing_password.status.success());
-    assert!(stderr(&missing_password).contains("password is required"));
+    assert_password_required(&missing_password);
 
     let test = rars()
         .args(["test", "--password", "pass"])
@@ -1280,7 +1278,7 @@ fn creates_rar15_encrypted_compressed_archive_that_can_be_tested() {
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
     let without_password = rars().arg("test").arg(&archive).output().unwrap();
-    assert!(!without_password.status.success());
+    assert_password_required(&without_password);
 
     let test = rars()
         .args(["test", "--password", "pass"])
@@ -1307,7 +1305,7 @@ fn creates_encrypted_compressed_archive_that_can_be_tested() {
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
     let without_password = rars().arg("test").arg(&archive).output().unwrap();
-    assert!(!without_password.status.success());
+    assert_password_required(&without_password);
 
     let test = rars()
         .args(["test", "--password", "pass"])
@@ -1570,8 +1568,7 @@ fn creates_rar15_encrypted_multivolume_archive_that_can_be_tested() {
     }
 
     let missing_password = rars().arg("test").args(&volume_args).output().unwrap();
-    assert!(!missing_password.status.success());
-    assert!(stderr(&missing_password).contains("password is required"));
+    assert_password_required(&missing_password);
 
     let test = rars()
         .args(["test", "--password", "pass"])
@@ -1620,8 +1617,7 @@ fn creates_rar30_encrypted_multivolume_archive_that_can_be_tested() {
     }
 
     let missing_password = rars().arg("test").args(&volume_args).output().unwrap();
-    assert!(!missing_password.status.success());
-    assert!(stderr(&missing_password).contains("password is required"));
+    assert_password_required(&missing_password);
 
     let test = rars()
         .args(["test", "--password", "pass"])
@@ -1670,8 +1666,7 @@ fn creates_rar29_encrypted_multivolume_archive_that_can_be_tested() {
     }
 
     let missing_password = rars().arg("test").args(&volume_args).output().unwrap();
-    assert!(!missing_password.status.success());
-    assert!(stderr(&missing_password).contains("password is required"));
+    assert_password_required(&missing_password);
 
     let test = rars()
         .args(["test", "--password", "pass"])
@@ -1721,8 +1716,7 @@ fn creates_rar30_header_encrypted_multivolume_archive_that_can_be_tested() {
     }
 
     let missing_password = rars().arg("test").args(&volume_args).output().unwrap();
-    assert!(!missing_password.status.success());
-    assert!(stderr(&missing_password).contains("password is required"));
+    assert_password_required(&missing_password);
 
     let test = rars()
         .args(["test", "--password", "pass"])
@@ -1749,8 +1743,7 @@ fn creates_rar30_aes_encrypted_archive_that_can_be_tested() {
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
     let missing_password = rars().arg("test").arg(&archive).output().unwrap();
-    assert!(!missing_password.status.success());
-    assert!(stderr(&missing_password).contains("password is required"));
+    assert_password_required(&missing_password);
 
     let test = rars()
         .args(["test", "--password", "pass"])
@@ -1777,8 +1770,7 @@ fn creates_rar29_aes_encrypted_archive_that_can_be_tested() {
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
     let missing_password = rars().arg("test").arg(&archive).output().unwrap();
-    assert!(!missing_password.status.success());
-    assert!(stderr(&missing_password).contains("password is required"));
+    assert_password_required(&missing_password);
 
     let test = rars()
         .args(["test", "--password", "pass"])
@@ -1812,8 +1804,7 @@ fn creates_rar30_header_encrypted_archive_that_can_be_tested() {
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
     let missing_password = rars().arg("info").arg(&archive).output().unwrap();
-    assert!(!missing_password.status.success());
-    assert!(stderr(&missing_password).contains("password is required"));
+    assert_password_required(&missing_password);
 
     let test = rars()
         .args(["test", "--password", "pass"])
@@ -1851,8 +1842,7 @@ fn creates_rar30_solid_header_encrypted_archive_that_can_be_tested() {
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
     let missing_password = rars().arg("info").arg(&archive).output().unwrap();
-    assert!(!missing_password.status.success());
-    assert!(stderr(&missing_password).contains("password is required"));
+    assert_password_required(&missing_password);
 
     let test = rars()
         .args(["test", "--password", "pass"])
@@ -2004,8 +1994,7 @@ fn creates_rar50_encrypted_recovery_archive_that_can_be_tested_and_listed() {
     assert!(stdout(&info_without_password).contains("service: RR"));
 
     let missing_password = rars().arg("test").arg(&archive).output().unwrap();
-    assert!(!missing_password.status.success());
-    assert!(stderr(&missing_password).contains("password is required"));
+    assert_password_required(&missing_password);
 
     let test = rars()
         .args(["test", "--password", "pass"])
@@ -2084,8 +2073,7 @@ fn creates_rar50_header_encrypted_recovery_archive_that_can_be_tested_and_listed
     assert!(stderr(&create).contains("validation-ready RR metadata"));
 
     let info_without_password = rars().arg("info").arg(&archive).output().unwrap();
-    assert!(!info_without_password.status.success());
-    assert!(stderr(&info_without_password).contains("password is required"));
+    assert_password_required(&info_without_password);
 
     let info = rars()
         .args(["info", "--password", "pass"])
@@ -2136,8 +2124,7 @@ fn creates_rar50_header_encrypted_compressed_recovery_archive_that_can_be_tested
     assert!(stderr(&create).contains("validation-ready RR metadata"));
 
     let info_without_password = rars().arg("info").arg(&archive).output().unwrap();
-    assert!(!info_without_password.status.success());
-    assert!(stderr(&info_without_password).contains("password is required"));
+    assert_password_required(&info_without_password);
 
     let test = rars()
         .args(["test", "--password", "pass"])
@@ -2168,8 +2155,7 @@ fn creates_rar50_encrypted_stored_archive_that_can_be_tested() {
         .arg(&archive)
         .output()
         .unwrap();
-    assert!(!wrong.status.success());
-    assert!(stderr(&wrong).contains("wrong password or corrupt encrypted data"));
+    assert_wrong_password(&wrong);
 
     let test = rars()
         .args(["test", "--password", "pass"])
@@ -2208,7 +2194,7 @@ fn creates_rar50_encrypted_compressed_archive_that_can_be_tested() {
         .arg(&archive)
         .output()
         .unwrap();
-    assert!(!wrong.status.success());
+    assert_wrong_password(&wrong);
 
     let test = rars()
         .args(["test", "--password", "pass"])
@@ -2250,7 +2236,7 @@ fn creates_rar50_encrypted_solid_compressed_archive_that_can_be_tested() {
         .arg(&archive)
         .output()
         .unwrap();
-    assert!(!wrong.status.success());
+    assert_wrong_password(&wrong);
 
     let test = rars()
         .args(["test", "--password", "pass"])
@@ -2289,8 +2275,7 @@ fn creates_rar50_header_encrypted_compressed_archive_that_can_be_tested() {
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
     let missing = rars().arg("test").arg(&archive).output().unwrap();
-    assert!(!missing.status.success());
-    assert!(stderr(&missing).contains("password is required"));
+    assert_password_required(&missing);
 
     let info = rars()
         .args(["info", "--password", "pass"])
@@ -2345,7 +2330,7 @@ fn creates_rar50_header_encrypted_solid_compressed_archive_that_can_be_tested() 
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
     let missing = rars().arg("test").arg(&archive).output().unwrap();
-    assert!(!missing.status.success());
+    assert_password_required(&missing);
 
     let test = rars()
         .args(["test", "--password", "pass"])
@@ -2382,8 +2367,7 @@ fn creates_rar50_encrypted_stored_archive_comment_service() {
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
     let missing_password = rars().arg("test").arg(&archive).output().unwrap();
-    assert!(!missing_password.status.success());
-    assert!(stderr(&missing_password).contains("password is required"));
+    assert_password_required(&missing_password);
 
     let info = rars()
         .args(["info", "--password", "pass"])
@@ -2466,16 +2450,14 @@ fn creates_rar50_header_encrypted_stored_archive_that_can_be_tested() {
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
     let missing_password = rars().arg("test").arg(&archive).output().unwrap();
-    assert!(!missing_password.status.success());
-    assert!(stderr(&missing_password).contains("password is required"));
+    assert_password_required(&missing_password);
 
     let wrong = rars()
         .args(["test", "--password", "wrong"])
         .arg(&archive)
         .output()
         .unwrap();
-    assert!(!wrong.status.success());
-    assert!(stderr(&wrong).contains("wrong password or corrupt encrypted data"));
+    assert_wrong_password(&wrong);
 
     let test = rars()
         .args(["test", "--password", "pass"])
@@ -2512,8 +2494,7 @@ fn creates_rar50_header_encrypted_stored_archive_comment_service() {
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
     let missing_password = rars().arg("info").arg(&archive).output().unwrap();
-    assert!(!missing_password.status.success());
-    assert!(stderr(&missing_password).contains("password is required"));
+    assert_password_required(&missing_password);
 
     let info = rars()
         .args(["info", "--password", "pass"])
@@ -2561,8 +2542,7 @@ fn creates_rar50_header_encrypted_compressed_archive_comment_service() {
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
     let missing_password = rars().arg("info").arg(&archive).output().unwrap();
-    assert!(!missing_password.status.success());
-    assert!(stderr(&missing_password).contains("password is required"));
+    assert_password_required(&missing_password);
 
     let info = rars()
         .args(["info", "--password", "pass"])
@@ -2669,8 +2649,7 @@ fn creates_rar50_header_encrypted_stored_multivolume_archive_that_can_be_tested(
     assert!(parts.len() > 1);
 
     let missing_password = rars().arg("test").arg(&parts[0]).output().unwrap();
-    assert!(!missing_password.status.success());
-    assert!(stderr(&missing_password).contains("password is required"));
+    assert_password_required(&missing_password);
 
     let mut command = rars();
     command.args(["test", "--password", "pass"]);
@@ -2799,8 +2778,7 @@ fn creates_rar50_encrypted_stored_file_comment_service() {
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
     let missing_password = rars().arg("test").arg(&archive).output().unwrap();
-    assert!(!missing_password.status.success());
-    assert!(stderr(&missing_password).contains("password is required"));
+    assert_password_required(&missing_password);
 
     let info = rars()
         .args(["info", "--password", "pass"])
@@ -2849,8 +2827,7 @@ fn creates_rar50_header_encrypted_stored_file_comment_service() {
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
     let missing_password = rars().arg("info").arg(&archive).output().unwrap();
-    assert!(!missing_password.status.success());
-    assert!(stderr(&missing_password).contains("password is required"));
+    assert_password_required(&missing_password);
 
     let info = rars()
         .args(["info", "--password", "pass"])
@@ -3037,8 +3014,7 @@ fn creates_rar70_header_encrypted_stored_archive_metadata() {
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
     let missing_password = rars().arg("info").arg(&archive).output().unwrap();
-    assert!(!missing_password.status.success());
-    assert!(stderr(&missing_password).contains("password"));
+    assert_password_required(&missing_password);
 
     let info = rars()
         .args(["info", "--password", "pass"])
@@ -3440,16 +3416,11 @@ fn creates_rar50_solid_compressed_archive_that_can_be_tested() {
     let first = dir.join("one.txt");
     let second = dir.join("two.txt");
     let archive = dir.join("solid.rar");
-    fs::write(
-        &first,
-        b"rar50 solid compressed cli shared phrase alpha beta gamma\n".repeat(16),
-    )
-    .unwrap();
-    fs::write(
-        &second,
-        b"rar50 solid compressed cli shared phrase alpha beta gamma\nsecond\n".repeat(8),
-    )
-    .unwrap();
+    let first_payload = b"rar50 solid compressed cli shared phrase alpha beta gamma\n".repeat(16);
+    let second_payload =
+        b"rar50 solid compressed cli shared phrase alpha beta gamma\nsecond\n".repeat(8);
+    fs::write(&first, &first_payload).unwrap();
+    fs::write(&second, &second_payload).unwrap();
 
     let output = rars()
         .args(["a", "--format", "rar50", "--solid"])
@@ -3466,10 +3437,14 @@ fn creates_rar50_solid_compressed_archive_that_can_be_tested() {
     assert!(stdout(&info).contains("solid=false"));
     assert!(stdout(&info).contains("solid=true"));
 
-    let test = rars().arg("test").arg(&archive).output().unwrap();
-    assert!(test.status.success(), "stderr: {}", stderr(&test));
-    assert!(stdout(&test).contains("OK one.txt"));
-    assert!(stdout(&test).contains("OK two.txt"));
+    assert_archive_tests_and_extracts_files(
+        &archive,
+        None,
+        &[
+            ("one.txt", first_payload.as_slice()),
+            ("two.txt", second_payload.as_slice()),
+        ],
+    );
 }
 
 #[test]
@@ -3477,11 +3452,9 @@ fn creates_rar50_compressed_multivolume_archive_that_can_be_tested() {
     let dir = scratch("create-rar50-compressed-multivolume");
     let source = dir.join("payload.txt");
     let archive = dir.join("split.rar");
-    fs::write(
-        &source,
-        b"rar50 compressed split cli payload\nrar50 compressed split cli payload\n".repeat(16),
-    )
-    .unwrap();
+    let payload =
+        b"rar50 compressed split cli payload\nrar50 compressed split cli payload\n".repeat(16);
+    fs::write(&source, &payload).unwrap();
 
     let create = rars()
         .args(["a", "--format", "rar50", "--volume-size", "32"])
@@ -3502,9 +3475,7 @@ fn creates_rar50_compressed_multivolume_archive_that_can_be_tested() {
         parts.push(path);
     }
 
-    let test = rars().arg("test").args(&parts).output().unwrap();
-    assert!(test.status.success(), "stderr: {}", stderr(&test));
-    assert!(stdout(&test).contains("OK payload.txt"));
+    assert_archive_set_tests_and_extracts_file(&parts, None, "payload.txt", &payload);
 }
 
 #[test]
@@ -3515,7 +3486,7 @@ fn creates_rar50_delta_filtered_compressed_archive_that_can_be_tested() {
     let payload: Vec<u8> = (0..180)
         .map(|index| (index * 5 + index / 2) as u8)
         .collect();
-    fs::write(&source, payload).unwrap();
+    fs::write(&source, &payload).unwrap();
 
     let output = rars()
         .args(["a", "--format", "rar50", "--delta-filter", "3"])
@@ -3529,9 +3500,7 @@ fn creates_rar50_delta_filtered_compressed_archive_that_can_be_tested() {
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     assert!(stdout(&info).contains("method=1"));
 
-    let test = rars().arg("test").arg(&archive).output().unwrap();
-    assert!(test.status.success(), "stderr: {}", stderr(&test));
-    assert!(stdout(&test).contains("OK payload.bin"));
+    assert_archive_tests_and_extracts_file(&archive, None, "payload.bin", &payload);
 }
 
 #[test]
@@ -3539,7 +3508,8 @@ fn creates_rar50_e8_filtered_compressed_archive_that_can_be_tested() {
     let dir = scratch("create-rar50-e8-filtered-compressed");
     let source = dir.join("payload.bin");
     let archive = dir.join("created.rar");
-    fs::write(&source, b"\xe8\0\0\0\0rar50 e8 filtered cli payload").unwrap();
+    let payload = b"\xe8\0\0\0\0rar50 e8 filtered cli payload";
+    fs::write(&source, payload).unwrap();
 
     let output = rars()
         .args(["a", "--format", "rar50", "--e8-filter"])
@@ -3549,9 +3519,7 @@ fn creates_rar50_e8_filtered_compressed_archive_that_can_be_tested() {
         .unwrap();
     assert!(output.status.success(), "stderr: {}", stderr(&output));
 
-    let test = rars().arg("test").arg(&archive).output().unwrap();
-    assert!(test.status.success(), "stderr: {}", stderr(&test));
-    assert!(stdout(&test).contains("OK payload.bin"));
+    assert_archive_tests_and_extracts_file(&archive, None, "payload.bin", payload);
 }
 
 #[test]
@@ -3559,11 +3527,8 @@ fn creates_rar29_e8_filtered_compressed_archive_that_can_be_tested() {
     let dir = scratch("create-rar29-e8-filtered-compressed");
     let source = dir.join("payload.bin");
     let archive = dir.join("created.rar");
-    fs::write(
-        &source,
-        b"\xe8\0\0\0\0rar29 e8 filtered cli payload\n".repeat(12),
-    )
-    .unwrap();
+    let payload = b"\xe8\0\0\0\0rar29 e8 filtered cli payload\n".repeat(12);
+    fs::write(&source, &payload).unwrap();
 
     let output = rars()
         .args(["a", "--format", "rar29", "--e8-filter"])
@@ -3573,9 +3538,7 @@ fn creates_rar29_e8_filtered_compressed_archive_that_can_be_tested() {
         .unwrap();
     assert!(output.status.success(), "stderr: {}", stderr(&output));
 
-    let test = rars().arg("test").arg(&archive).output().unwrap();
-    assert!(test.status.success(), "stderr: {}", stderr(&test));
-    assert!(stdout(&test).contains("OK payload.bin"));
+    assert_archive_tests_and_extracts_file(&archive, None, "payload.bin", &payload);
 }
 
 #[test]
@@ -3584,16 +3547,10 @@ fn creates_rar29_solid_e8_filtered_compressed_archive_that_can_be_tested() {
     let first = dir.join("first.bin");
     let second = dir.join("second.bin");
     let archive = dir.join("created.rar");
-    fs::write(
-        &first,
-        b"\xe8\0\0\0\0rar29 solid e8 filtered first cli payload\n".repeat(12),
-    )
-    .unwrap();
-    fs::write(
-        &second,
-        b"\xe8\0\0\0\0rar29 solid e8 filtered second cli payload\n".repeat(12),
-    )
-    .unwrap();
+    let first_payload = b"\xe8\0\0\0\0rar29 solid e8 filtered first cli payload\n".repeat(12);
+    let second_payload = b"\xe8\0\0\0\0rar29 solid e8 filtered second cli payload\n".repeat(12);
+    fs::write(&first, &first_payload).unwrap();
+    fs::write(&second, &second_payload).unwrap();
 
     let output = rars()
         .args(["a", "--format", "rar29", "--solid", "--e8-filter"])
@@ -3604,10 +3561,14 @@ fn creates_rar29_solid_e8_filtered_compressed_archive_that_can_be_tested() {
         .unwrap();
     assert!(output.status.success(), "stderr: {}", stderr(&output));
 
-    let test = rars().arg("test").arg(&archive).output().unwrap();
-    assert!(test.status.success(), "stderr: {}", stderr(&test));
-    assert!(stdout(&test).contains("OK first.bin"));
-    assert!(stdout(&test).contains("OK second.bin"));
+    assert_archive_tests_and_extracts_files(
+        &archive,
+        None,
+        &[
+            ("first.bin", first_payload.as_slice()),
+            ("second.bin", second_payload.as_slice()),
+        ],
+    );
 }
 
 #[test]
@@ -3615,11 +3576,8 @@ fn creates_rar29_encrypted_e8_filtered_compressed_archive_that_can_be_tested() {
     let dir = scratch("create-rar29-encrypted-e8-filtered-compressed");
     let source = dir.join("secret.bin");
     let archive = dir.join("created.rar");
-    fs::write(
-        &source,
-        b"\xe8\0\0\0\0rar29 encrypted e8 filtered cli payload\n".repeat(12),
-    )
-    .unwrap();
+    let payload = b"\xe8\0\0\0\0rar29 encrypted e8 filtered cli payload\n".repeat(12);
+    fs::write(&source, &payload).unwrap();
 
     let create = rars()
         .args([
@@ -3637,24 +3595,16 @@ fn creates_rar29_encrypted_e8_filtered_compressed_archive_that_can_be_tested() {
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
     let missing_password = rars().arg("test").arg(&archive).output().unwrap();
-    assert!(!missing_password.status.success());
-    assert!(stderr(&missing_password).contains("password is required"));
+    assert_password_required(&missing_password);
 
     let wrong = rars()
         .args(["test", "--password", "wrong"])
         .arg(&archive)
         .output()
         .unwrap();
-    assert!(!wrong.status.success());
-    assert!(stderr(&wrong).contains("wrong password or corrupt encrypted data"));
+    assert_wrong_password(&wrong);
 
-    let test = rars()
-        .args(["test", "--password", "pass"])
-        .arg(&archive)
-        .output()
-        .unwrap();
-    assert!(test.status.success(), "stderr: {}", stderr(&test));
-    assert!(stdout(&test).contains("OK secret.bin"));
+    assert_archive_tests_and_extracts_file(&archive, Some("pass"), "secret.bin", &payload);
 }
 
 #[test]
@@ -3662,11 +3612,8 @@ fn creates_rar30_header_encrypted_e8_filtered_compressed_archive_that_can_be_tes
     let dir = scratch("create-rar30-header-encrypted-e8-filtered-compressed");
     let source = dir.join("secret.bin");
     let archive = dir.join("created.rar");
-    fs::write(
-        &source,
-        b"\xe8\0\0\0\0rar30 header encrypted e8 filtered cli payload\n".repeat(12),
-    )
-    .unwrap();
+    let payload = b"\xe8\0\0\0\0rar30 header encrypted e8 filtered cli payload\n".repeat(12);
+    fs::write(&source, &payload).unwrap();
 
     let create = rars()
         .args([
@@ -3685,16 +3632,9 @@ fn creates_rar30_header_encrypted_e8_filtered_compressed_archive_that_can_be_tes
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
     let missing_password = rars().arg("info").arg(&archive).output().unwrap();
-    assert!(!missing_password.status.success());
-    assert!(stderr(&missing_password).contains("password is required"));
+    assert_password_required(&missing_password);
 
-    let test = rars()
-        .args(["test", "--password", "pass"])
-        .arg(&archive)
-        .output()
-        .unwrap();
-    assert!(test.status.success(), "stderr: {}", stderr(&test));
-    assert!(stdout(&test).contains("OK secret.bin"));
+    assert_archive_tests_and_extracts_file(&archive, Some("pass"), "secret.bin", &payload);
 }
 
 #[test]
@@ -3702,11 +3642,8 @@ fn creates_rar29_e8e9_filtered_compressed_archive_that_can_be_tested() {
     let dir = scratch("create-rar29-e8e9-filtered-compressed");
     let source = dir.join("payload.bin");
     let archive = dir.join("created.rar");
-    fs::write(
-        &source,
-        b"\xe9\0\0\0\0rar29 e8e9 filtered cli payload\n".repeat(12),
-    )
-    .unwrap();
+    let payload = b"\xe9\0\0\0\0rar29 e8e9 filtered cli payload\n".repeat(12);
+    fs::write(&source, &payload).unwrap();
 
     let output = rars()
         .args(["a", "--format", "rar29", "--e8e9-filter"])
@@ -3716,9 +3653,7 @@ fn creates_rar29_e8e9_filtered_compressed_archive_that_can_be_tested() {
         .unwrap();
     assert!(output.status.success(), "stderr: {}", stderr(&output));
 
-    let test = rars().arg("test").arg(&archive).output().unwrap();
-    assert!(test.status.success(), "stderr: {}", stderr(&test));
-    assert!(stdout(&test).contains("OK payload.bin"));
+    assert_archive_tests_and_extracts_file(&archive, None, "payload.bin", &payload);
 }
 
 #[test]
@@ -3727,7 +3662,7 @@ fn creates_rar29_delta_filtered_compressed_archive_that_can_be_tested() {
     let source = dir.join("payload.bin");
     let archive = dir.join("created.rar");
     let payload: Vec<u8> = (0..384).map(|index| (index * 23 + 9) as u8).collect();
-    fs::write(&source, payload).unwrap();
+    fs::write(&source, &payload).unwrap();
 
     let output = rars()
         .args(["a", "--format", "rar29", "--delta-filter", "3"])
@@ -3737,9 +3672,7 @@ fn creates_rar29_delta_filtered_compressed_archive_that_can_be_tested() {
         .unwrap();
     assert!(output.status.success(), "stderr: {}", stderr(&output));
 
-    let test = rars().arg("test").arg(&archive).output().unwrap();
-    assert!(test.status.success(), "stderr: {}", stderr(&test));
-    assert!(stdout(&test).contains("OK payload.bin"));
+    assert_archive_tests_and_extracts_file(&archive, None, "payload.bin", &payload);
 }
 
 #[test]
@@ -3751,7 +3684,7 @@ fn creates_rar29_itanium_filtered_compressed_archive_that_can_be_tested() {
     payload[16] = 22;
     payload[21] = 20;
     payload.extend_from_slice(b"rar29 itanium filtered cli payload\n");
-    fs::write(&source, payload).unwrap();
+    fs::write(&source, &payload).unwrap();
 
     let output = rars()
         .args(["a", "--format", "rar29", "--itanium-filter"])
@@ -3761,9 +3694,7 @@ fn creates_rar29_itanium_filtered_compressed_archive_that_can_be_tested() {
         .unwrap();
     assert!(output.status.success(), "stderr: {}", stderr(&output));
 
-    let test = rars().arg("test").arg(&archive).output().unwrap();
-    assert!(test.status.success(), "stderr: {}", stderr(&test));
-    assert!(stdout(&test).contains("OK payload.bin"));
+    assert_archive_tests_and_extracts_file(&archive, None, "payload.bin", &payload);
 }
 
 #[test]
@@ -4129,11 +4060,10 @@ fn creates_rar50_encrypted_compressed_multivolume_archive_that_can_be_tested() {
     let dir = scratch("create-rar50-encrypted-compressed-multivolume");
     let source = dir.join("secret.txt");
     let archive = dir.join("split.rar");
-    fs::write(
-        &source,
-        b"rar50 encrypted compressed split cli payload\nrar50 encrypted compressed split cli payload\n".repeat(16),
-    )
-    .unwrap();
+    let payload =
+        b"rar50 encrypted compressed split cli payload\nrar50 encrypted compressed split cli payload\n"
+            .repeat(16);
+    fs::write(&source, &payload).unwrap();
 
     let create = rars()
         .args([
@@ -4161,13 +4091,7 @@ fn creates_rar50_encrypted_compressed_multivolume_archive_that_can_be_tested() {
     }
     assert!(parts.len() >= 2);
 
-    let test = rars()
-        .args(["test", "--password", "pass"])
-        .args(&parts)
-        .output()
-        .unwrap();
-    assert!(test.status.success(), "stderr: {}", stderr(&test));
-    assert!(stdout(&test).contains("OK secret.txt"));
+    assert_archive_set_tests_and_extracts_file(&parts, Some("pass"), "secret.txt", &payload);
 }
 
 #[test]
@@ -4175,11 +4099,10 @@ fn creates_rar50_encrypted_solid_compressed_multivolume_archive_that_can_be_test
     let dir = scratch("create-rar50-encrypted-solid-compressed-multivolume");
     let source = dir.join("secret.txt");
     let archive = dir.join("split.rar");
-    fs::write(
-        &source,
-        b"rar50 encrypted solid compressed split cli payload\nrar50 encrypted solid compressed split cli payload\n".repeat(16),
-    )
-    .unwrap();
+    let payload =
+        b"rar50 encrypted solid compressed split cli payload\nrar50 encrypted solid compressed split cli payload\n"
+            .repeat(16);
+    fs::write(&source, &payload).unwrap();
 
     let create = rars()
         .args([
@@ -4208,13 +4131,7 @@ fn creates_rar50_encrypted_solid_compressed_multivolume_archive_that_can_be_test
     }
     assert!(parts.len() >= 2);
 
-    let test = rars()
-        .args(["test", "--password", "pass"])
-        .args(&parts)
-        .output()
-        .unwrap();
-    assert!(test.status.success(), "stderr: {}", stderr(&test));
-    assert!(stdout(&test).contains("OK secret.txt"));
+    assert_archive_set_tests_and_extracts_file(&parts, Some("pass"), "secret.txt", &payload);
 }
 
 #[test]
@@ -4222,11 +4139,10 @@ fn creates_rar50_header_encrypted_compressed_multivolume_archive_that_can_be_tes
     let dir = scratch("create-rar50-header-encrypted-compressed-multivolume");
     let source = dir.join("secret.txt");
     let archive = dir.join("split.rar");
-    fs::write(
-        &source,
-        b"rar50 header encrypted compressed split cli payload\nrar50 header encrypted compressed split cli payload\n".repeat(16),
-    )
-    .unwrap();
+    let payload =
+        b"rar50 header encrypted compressed split cli payload\nrar50 header encrypted compressed split cli payload\n"
+            .repeat(16);
+    fs::write(&source, &payload).unwrap();
 
     let create = rars()
         .args([
@@ -4256,16 +4172,9 @@ fn creates_rar50_header_encrypted_compressed_multivolume_archive_that_can_be_tes
     assert!(parts.len() >= 2);
 
     let missing = rars().arg("test").args(&parts).output().unwrap();
-    assert!(!missing.status.success());
-    assert!(stderr(&missing).contains("password is required"));
+    assert_password_required(&missing);
 
-    let test = rars()
-        .args(["test", "--password", "pass"])
-        .args(&parts)
-        .output()
-        .unwrap();
-    assert!(test.status.success(), "stderr: {}", stderr(&test));
-    assert!(stdout(&test).contains("OK secret.txt"));
+    assert_archive_set_tests_and_extracts_file(&parts, Some("pass"), "secret.txt", &payload);
 }
 
 #[test]
@@ -4273,11 +4182,10 @@ fn creates_rar50_header_encrypted_solid_compressed_multivolume_archive_that_can_
     let dir = scratch("create-rar50-header-encrypted-solid-compressed-multivolume");
     let source = dir.join("secret.txt");
     let archive = dir.join("split.rar");
-    fs::write(
-        &source,
-        b"rar50 header encrypted solid compressed split cli payload\nrar50 header encrypted solid compressed split cli payload\n".repeat(16),
-    )
-    .unwrap();
+    let payload =
+        b"rar50 header encrypted solid compressed split cli payload\nrar50 header encrypted solid compressed split cli payload\n"
+            .repeat(16);
+    fs::write(&source, &payload).unwrap();
 
     let create = rars()
         .args([
@@ -4308,15 +4216,9 @@ fn creates_rar50_header_encrypted_solid_compressed_multivolume_archive_that_can_
     assert!(parts.len() >= 2);
 
     let missing = rars().arg("test").args(&parts).output().unwrap();
-    assert!(!missing.status.success());
+    assert_password_required(&missing);
 
-    let test = rars()
-        .args(["test", "--password", "pass"])
-        .args(&parts)
-        .output()
-        .unwrap();
-    assert!(test.status.success(), "stderr: {}", stderr(&test));
-    assert!(stdout(&test).contains("OK secret.txt"));
+    assert_archive_set_tests_and_extracts_file(&parts, Some("pass"), "secret.txt", &payload);
 }
 
 #[test]
@@ -4375,8 +4277,65 @@ fn stderr(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+fn assert_password_required(output: &std::process::Output) {
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains("password is required"),
+        "stderr did not report a missing password: {stderr}"
+    );
+}
+
+fn assert_wrong_password(output: &std::process::Output) {
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains("wrong password or corrupt encrypted data"),
+        "stderr did not report a bad password: {stderr}"
+    );
+}
+
 fn assert_archive_tests_and_extracts_file(
     archive: &Path,
+    password: Option<&str>,
+    name: &str,
+    expected: &[u8],
+) {
+    assert_archive_tests_and_extracts_files(archive, password, &[(name, expected)]);
+}
+
+fn assert_archive_tests_and_extracts_files(
+    archive: &Path,
+    password: Option<&str>,
+    expected_files: &[(&str, &[u8])],
+) {
+    let mut test_command = rars();
+    test_command.arg("test");
+    if let Some(password) = password {
+        test_command.args(["--password", password]);
+    }
+    let test = test_command.arg(archive).output().unwrap();
+    assert!(test.status.success(), "stderr: {}", stderr(&test));
+    let test_stdout = stdout(&test);
+    for (name, _) in expected_files {
+        assert!(test_stdout.contains(&format!("OK {name}")));
+    }
+
+    let out_dir = scratch("assert-extract");
+    let mut extract_command = rars();
+    extract_command.arg("x");
+    if let Some(password) = password {
+        extract_command.args(["--password", password]);
+    }
+    let extract = extract_command.arg(archive).arg(&out_dir).output().unwrap();
+    assert!(extract.status.success(), "stderr: {}", stderr(&extract));
+    for (name, expected) in expected_files {
+        assert_eq!(fs::read(out_dir.join(name)).unwrap(), *expected);
+    }
+}
+
+fn assert_archive_set_tests_and_extracts_file(
+    archives: &[PathBuf],
     password: Option<&str>,
     name: &str,
     expected: &[u8],
@@ -4386,17 +4345,21 @@ fn assert_archive_tests_and_extracts_file(
     if let Some(password) = password {
         test_command.args(["--password", password]);
     }
-    let test = test_command.arg(archive).output().unwrap();
+    let test = test_command.args(archives).output().unwrap();
     assert!(test.status.success(), "stderr: {}", stderr(&test));
     assert!(stdout(&test).contains(&format!("OK {name}")));
 
-    let out_dir = scratch("assert-extract");
+    let out_dir = scratch("assert-extract-volumes");
     let mut extract_command = rars();
     extract_command.arg("x");
     if let Some(password) = password {
         extract_command.args(["--password", password]);
     }
-    let extract = extract_command.arg(archive).arg(&out_dir).output().unwrap();
+    let extract = extract_command
+        .args(archives)
+        .arg(&out_dir)
+        .output()
+        .unwrap();
     assert!(extract.status.success(), "stderr: {}", stderr(&extract));
     assert_eq!(fs::read(out_dir.join(name)).unwrap(), expected);
 }

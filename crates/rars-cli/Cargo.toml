@@ -3,9 +3,12 @@ name = "rars-cli"
 version = "0.1.0"
 description = "Command-line interface for the rars RAR archive toolkit."
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 readme.workspace = true
+homepage.workspace = true
 repository.workspace = true
+documentation.workspace = true
 keywords.workspace = true
 categories = ["command-line-utilities", "compression"]
 

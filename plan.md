@@ -2,14 +2,6 @@
 
 ## Active Tasks
 
-- Review pass 3, batch 8: workspace, scripts, and remaining test polish.
-  - Add workspace MSRV/dependency/docs metadata suitable for publishing.
-  - Add uniform tool prechecks to oracle scripts and make coverage keep
-    running after individual test failures.
-  - Continue consolidating CLI writer round-trip helpers and add exact byte
-    assertions to the remaining representative writer families.
-  - Tighten password-error CLI probes so they assert the diagnostic, not only
-    non-zero exit status.
 - Add adversarial PPMd fixtures as corpus bugs appear.
 - Add real RAR-created RAR5 filter fixtures for E8, E8E9, Delta, and ARM
   reader coverage.

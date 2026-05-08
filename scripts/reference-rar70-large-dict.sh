@@ -4,15 +4,17 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
-if ! command -v rar >/dev/null 2>&1; then
-  cat >&2 <<'EOF'
-missing rar command
+require_command() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "missing required command: $1" >&2
+    exit 1
+  fi
+}
 
-Install RAR 7.x command-line tools to recreate the external Unpack70 large
-dictionary fixture.
-EOF
-  exit 1
-fi
+require_command cargo
+require_command mkdir
+require_command rar
+require_command truncate
 
 tmpdir="${TMPDIR:-/tmp}/rars-unpack70-fixture"
 mkdir -p "$tmpdir"

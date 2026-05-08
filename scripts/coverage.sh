@@ -4,6 +4,19 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
+require_command() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "missing required command: $1" >&2
+    exit 1
+  fi
+}
+
+require_command cargo
+require_command find
+require_command rustc
+require_command rustup
+require_command tee
+
 host="$(rustc -vV | sed -n 's/^host: //p')"
 sysroot="$(rustc --print sysroot)"
 llvm_tools="$sysroot/lib/rustlib/$host/bin"
@@ -31,9 +44,19 @@ export CARGO_TARGET_DIR="$coverage_dir"
 export RUSTFLAGS="${RUSTFLAGS:-} -Cinstrument-coverage"
 export LLVM_PROFILE_FILE="$profraw_dir/%p-%m.profraw"
 
-cargo test --workspace --all-targets
+test_status=0
+cargo test --workspace --all-targets || test_status=$?
 
-"$llvm_profdata" merge -sparse "$profraw_dir"/*.profraw -o "$profdata"
+shopt -s nullglob
+profraw_files=("$profraw_dir"/*.profraw)
+shopt -u nullglob
+
+if [[ "${#profraw_files[@]}" -eq 0 ]]; then
+  echo "no coverage profiles were produced" >&2
+  exit "$test_status"
+fi
+
+"$llvm_profdata" merge -sparse "${profraw_files[@]}" -o "$profdata"
 
 mapfile -t object_files < <(
   find "$coverage_dir/debug/deps" -maxdepth 1 -type f -executable \
@@ -116,3 +139,5 @@ detail="$("$llvm_cov" report \
 echo
 echo "Text summary: $coverage_dir/summary.txt"
 echo "HTML report:  $coverage_dir/html/index.html"
+
+exit "$test_status"
