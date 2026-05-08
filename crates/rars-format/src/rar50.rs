@@ -927,6 +927,9 @@ fn parse_main_extra_area(input: &[u8], range: Range<usize>) -> Result<Vec<MainEx
             } else {
                 None
             };
+            // LOCATOR records are intentionally forward-compatible: known
+            // offsets are parsed and any trailing bytes remain reserved for
+            // future flags.
             records.push(MainExtraRecord::Locator(LocatorRecord {
                 flags,
                 quick_open_offset,

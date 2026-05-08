@@ -25,6 +25,8 @@ impl<P> SplitVolumeState<P> {
             (true, true, false) => {
                 SplitVolumeStep::Finish(self.pending.take().expect("pending split"))
             }
+            // Error states leave pending untouched; callers currently return
+            // the error immediately rather than attempting recovery.
             (false, true, _) => SplitVolumeStep::MissingFirst,
             (true, false, _) => SplitVolumeStep::Interrupted,
         }

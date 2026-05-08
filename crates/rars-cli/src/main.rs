@@ -2073,7 +2073,10 @@ fn set_no_follow(options: &mut OpenOptions) {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn set_no_follow(_options: &mut OpenOptions) {}
+fn set_no_follow(_options: &mut OpenOptions) {
+    // Non-Linux targets still get checked_output_path validation before open,
+    // but this build does not add a platform-specific no-follow open flag.
+}
 
 struct OwnedInput {
     name: Vec<u8>,

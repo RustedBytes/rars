@@ -162,6 +162,9 @@ impl std::error::Error for Error {
         match self {
             Self::AtArchiveOffset { source, .. } | Self::AtEntry { source, .. } => Some(source),
             Self::Codec(source) => Some(source),
+            Self::Rar3Recovery(source) => Some(source),
+            Self::Rar5Recovery(source) => Some(source),
+            Self::Rar50Crypto(source) => Some(source),
             Self::Io(source) => Some(source.source()),
             _ => None,
         }
@@ -383,6 +386,32 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "RAR 5 recovery data cannot repair this many damaged shards"
+        );
+        assert_eq!(
+            std::error::Error::source(&error).map(ToString::to_string),
+            Some("RAR 5 recovery data cannot repair this many damaged shards".to_string())
+        );
+    }
+
+    #[test]
+    fn rar3_recovery_errors_remain_in_source_chain() {
+        let error = Error::from(rars_recovery::rar3::Error::DecodeFailed);
+
+        assert_eq!(error.to_string(), "RAR 3 recovery decode failed");
+        assert_eq!(
+            std::error::Error::source(&error).map(ToString::to_string),
+            Some("RAR 3 recovery decode failed".to_string())
+        );
+    }
+
+    #[test]
+    fn rar50_crypto_errors_remain_in_source_chain() {
+        let error = Error::from(rars_crypto::rar50::Error::UnalignedInput);
+
+        assert_eq!(error.to_string(), "RAR 5 AES input is not block aligned");
+        assert_eq!(
+            std::error::Error::source(&error).map(ToString::to_string),
+            Some("RAR 5 AES input is not block aligned".to_string())
         );
     }
 

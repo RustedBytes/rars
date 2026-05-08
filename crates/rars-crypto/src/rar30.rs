@@ -77,6 +77,9 @@ fn derive_key_iv(password: &[u8], salt: Option<[u8; 8]>) -> Result<([u8; 16], [u
         raw.extend_from_slice(&salt);
     }
 
+    // RAR 3.x hashes byte-reversed full SHA-1 blocks. The stock SHA-1 fast
+    // path is equivalent only while the password+salt material never fills a
+    // 64-byte block, so keep this threshold strict.
     if raw.len() < 64 {
         return Ok(derive_key_iv_fast(&raw));
     }

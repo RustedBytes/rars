@@ -21,6 +21,27 @@ pub enum Error {
     SingularElement,
 }
 
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BadRecoveryChunk => f.write_str("RAR 5 recovery chunk is invalid"),
+            Self::OddShardSize => f.write_str("RAR 5 recovery shard size is odd"),
+            Self::PlanOverflow => f.write_str("RAR 5 recovery plan overflows"),
+            Self::PrefixExceedsPlan => {
+                f.write_str("RAR 5 recovery prefix exceeds planned shard capacity")
+            }
+            Self::TooManyDamagedShards => {
+                f.write_str("RAR 5 recovery data cannot repair this many damaged shards")
+            }
+            Self::ShardSizeMismatch => f.write_str("RAR 5 recovery shard sizes do not match"),
+            Self::TooManyShards => f.write_str("RAR 5 recovery has too many shards"),
+            Self::SingularElement => f.write_str("RAR 5 recovery matrix is singular"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

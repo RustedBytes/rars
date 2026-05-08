@@ -11,11 +11,6 @@
 
 ## Hardening
 
-- Review #4 batch 2: polish:
-  - Preserve `source()` chains for recovery and crypto errors.
-  - Decide and document or improve non-Linux `O_NOFOLLOW` extraction hardening.
-  - Add comments for intentional SHA1 fast-path limits, RAR5 LOCATOR trailing
-    bytes, and split-volume state invariants.
 - Review #4 batch 3: shared utilities:
   - Extract the shared x86 filter-range scanner used by RAR29 and RAR5 writers.
   - Consolidate duplicated `read_exact_at`, endian-read, and `align16` helpers
