@@ -771,9 +771,7 @@ fn creates_stored_archive_that_can_be_tested() {
         .unwrap();
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
-    let test = rars().arg("test").arg(&archive).output().unwrap();
-    assert!(test.status.success(), "stderr: {}", stderr(&test));
-    assert!(stdout(&test).contains("OK hello.txt"));
+    assert_archive_tests_and_extracts_file(&archive, None, "hello.txt", b"hello from cli\n");
 }
 
 #[test]
@@ -797,9 +795,7 @@ fn creates_rar15_stored_archive_that_can_be_tested() {
     assert!(info_stdout.contains("Rar15To40"));
     assert!(info_stdout.contains("method=0x30"));
 
-    let test = rars().arg("test").arg(&archive).output().unwrap();
-    assert!(test.status.success(), "stderr: {}", stderr(&test));
-    assert!(stdout(&test).contains("OK hello.txt"));
+    assert_archive_tests_and_extracts_file(&archive, None, "hello.txt", b"hello from rar15 cli\n");
 }
 
 #[test]
@@ -850,9 +846,12 @@ fn creates_rar20_compressed_archive_that_can_be_tested() {
     assert!(info_stdout.contains("method=0x33"));
     assert!(info_stdout.contains("ver=20"));
 
-    let test = rars().arg("test").arg(&archive).output().unwrap();
-    assert!(test.status.success(), "stderr: {}", stderr(&test));
-    assert!(stdout(&test).contains("OK hello.txt"));
+    assert_archive_tests_and_extracts_file(
+        &archive,
+        None,
+        "hello.txt",
+        b"hello from rar20 cli hello from rar20 cli\n",
+    );
 }
 
 #[test]
@@ -877,13 +876,12 @@ fn creates_rar20_encrypted_compressed_archive_that_can_be_tested() {
     let missing_password = rars().arg("test").arg(&archive).output().unwrap();
     assert_password_required(&missing_password);
 
-    let test = rars()
-        .args(["test", "--password", "pass"])
-        .arg(&archive)
-        .output()
-        .unwrap();
-    assert!(test.status.success(), "stderr: {}", stderr(&test));
-    assert!(stdout(&test).contains("OK secret.txt"));
+    assert_archive_tests_and_extracts_file(
+        &archive,
+        Some("pass"),
+        "secret.txt",
+        b"hello from encrypted rar20 cli hello from encrypted rar20 cli\n",
+    );
 }
 
 #[test]
@@ -1045,11 +1043,14 @@ fn creates_rar29_solid_archive_that_can_be_tested() {
     let info_stdout = stdout(&info);
     assert!(info_stdout.contains("rar15-40 main: flags=0x0008"));
 
-    let test = rars().arg("test").arg(&archive).output().unwrap();
-    assert!(test.status.success(), "stderr: {}", stderr(&test));
-    let test_stdout = stdout(&test);
-    assert!(test_stdout.contains("OK one.txt"));
-    assert!(test_stdout.contains("OK two.txt"));
+    assert_archive_tests_and_extracts_files(
+        &archive,
+        None,
+        &[
+            ("one.txt", b"solid cli baseline one alpha beta gamma\n"),
+            ("two.txt", b"solid cli baseline two alpha beta gamma\n"),
+        ],
+    );
 }
 
 #[test]
@@ -1078,11 +1079,24 @@ fn creates_rar20_solid_archive_that_tests() {
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     assert!(stdout(&info).contains("rar15-40 main: flags=0x0008"));
 
-    let test = rars().arg("test").arg(&archive).output().unwrap();
-    assert!(test.status.success(), "stderr: {}", stderr(&test));
-    let test_stdout = stdout(&test);
-    assert!(test_stdout.contains("OK one.txt"));
-    assert!(test_stdout.contains("OK two.txt"));
+    assert_archive_tests_and_extracts_files(
+        &archive,
+        None,
+        &[
+            (
+                "one.txt",
+                b"rar20 shared phrase alpha beta gamma\n"
+                    .repeat(64)
+                    .as_slice(),
+            ),
+            (
+                "two.txt",
+                b"rar20 shared phrase alpha beta gamma\nsecond member\n"
+                    .repeat(32)
+                    .as_slice(),
+            ),
+        ],
+    );
 }
 
 #[test]
@@ -1104,9 +1118,12 @@ fn creates_rar15_archive_comment() {
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     assert!(stdout(&info).contains("comment: rar15 note"));
 
-    let test = rars().arg("test").arg(&archive).output().unwrap();
-    assert!(test.status.success(), "stderr: {}", stderr(&test));
-    assert!(stdout(&test).contains("OK commented.txt"));
+    assert_archive_tests_and_extracts_file(
+        &archive,
+        None,
+        "commented.txt",
+        b"rar15 commented payload\n",
+    );
 }
 
 #[test]
@@ -1187,13 +1204,12 @@ fn creates_rar20_archive_and_file_comments() {
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     assert!(stdout(&info).contains("comment: rar20 file note"));
 
-    let test = rars()
-        .arg("test")
-        .arg(&file_comment_archive)
-        .output()
-        .unwrap();
-    assert!(test.status.success(), "stderr: {}", stderr(&test));
-    assert!(stdout(&test).contains("OK commented.txt"));
+    assert_archive_tests_and_extracts_file(
+        &file_comment_archive,
+        None,
+        "commented.txt",
+        b"rar20 commented payload\n",
+    );
 }
 
 #[test]
@@ -1244,13 +1260,12 @@ fn creates_rar29_archive_and_file_comments() {
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     assert!(stdout(&info).contains("comment: rar29 file note"));
 
-    let test = rars()
-        .arg("test")
-        .arg(&file_comment_archive)
-        .output()
-        .unwrap();
-    assert!(test.status.success(), "stderr: {}", stderr(&test));
-    assert!(stdout(&test).contains("OK commented.txt"));
+    assert_archive_tests_and_extracts_file(
+        &file_comment_archive,
+        None,
+        "commented.txt",
+        b"rar29 commented payload\n",
+    );
 }
 
 #[test]
@@ -1274,9 +1289,12 @@ fn creates_rar30_newsub_archive_comment() {
     assert!(info_stdout.contains("comment: rar30 NEWSUB note"));
     assert!(info_stdout.contains("subblock: ArchiveComment CMT"));
 
-    let test = rars().arg("test").arg(&archive).output().unwrap();
-    assert!(test.status.success(), "stderr: {}", stderr(&test));
-    assert!(stdout(&test).contains("OK commented.txt"));
+    assert_archive_tests_and_extracts_file(
+        &archive,
+        None,
+        "commented.txt",
+        b"rar30 NEWSUB commented payload\n",
+    );
 }
 
 #[test]
@@ -1298,9 +1316,12 @@ fn creates_literal_compressed_archive_that_can_be_tested() {
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     assert!(stdout(&info).contains("method=5"));
 
-    let test = rars().arg("test").arg(&archive).output().unwrap();
-    assert!(test.status.success(), "stderr: {}", stderr(&test));
-    assert!(stdout(&test).contains("OK tiny.txt"));
+    assert_archive_tests_and_extracts_file(
+        &archive,
+        None,
+        "tiny.txt",
+        b"tiny payload over sixteen",
+    );
 }
 
 #[test]
@@ -1331,11 +1352,20 @@ fn creates_solid_compressed_archive_that_can_be_tested() {
     assert!(info_stdout.contains("rar13 main: flags=0x88"));
     assert!(info_stdout.contains("flags=0x10"));
 
-    let test = rars().arg("test").arg(&archive).output().unwrap();
-    assert!(test.status.success(), "stderr: {}", stderr(&test));
-    let stdout = stdout(&test);
-    assert!(stdout.contains("OK first.txt"));
-    assert!(stdout.contains("OK second.txt"));
+    assert_archive_tests_and_extracts_files(
+        &archive,
+        None,
+        &[
+            (
+                "first.txt",
+                b"first member primes the adaptive unpack15 state",
+            ),
+            (
+                "second.txt",
+                b"second member is encoded without resetting that state",
+            ),
+        ],
+    );
 }
 
 #[test]
@@ -1362,11 +1392,14 @@ fn creates_rar15_solid_compressed_archive_that_can_be_tested() {
     assert!(info_stdout.contains("rar15-40 main: flags=0x0008"));
     assert!(info_stdout.contains("flags=0x8010"));
 
-    let test = rars().arg("test").arg(&archive).output().unwrap();
-    assert!(test.status.success(), "stderr: {}", stderr(&test));
-    let stdout = stdout(&test);
-    assert!(stdout.contains("OK first.txt"));
-    assert!(stdout.contains("OK second.txt"));
+    assert_archive_tests_and_extracts_files(
+        &archive,
+        None,
+        &[
+            ("first.txt", b"shared prefix shared prefix alpha"),
+            ("second.txt", b"shared prefix shared prefix beta"),
+        ],
+    );
 }
 
 #[test]
@@ -1387,13 +1420,12 @@ fn creates_rar15_encrypted_compressed_archive_that_can_be_tested() {
     let without_password = rars().arg("test").arg(&archive).output().unwrap();
     assert_password_required(&without_password);
 
-    let test = rars()
-        .args(["test", "--password", "pass"])
-        .arg(&archive)
-        .output()
-        .unwrap();
-    assert!(test.status.success(), "stderr: {}", stderr(&test));
-    assert!(stdout(&test).contains("OK secret.txt"));
+    assert_archive_tests_and_extracts_file(
+        &archive,
+        Some("pass"),
+        "secret.txt",
+        b"secret rar15 compressed payload\n",
+    );
 }
 
 #[test]
@@ -1414,13 +1446,12 @@ fn creates_encrypted_compressed_archive_that_can_be_tested() {
     let without_password = rars().arg("test").arg(&archive).output().unwrap();
     assert_password_required(&without_password);
 
-    let test = rars()
-        .args(["test", "--password", "pass"])
-        .arg(&archive)
-        .output()
-        .unwrap();
-    assert!(test.status.success(), "stderr: {}", stderr(&test));
-    assert!(stdout(&test).contains("OK secret.txt"));
+    assert_archive_tests_and_extracts_file(
+        &archive,
+        Some("pass"),
+        "secret.txt",
+        b"secret compressed payload over sixteen",
+    );
 }
 
 #[test]

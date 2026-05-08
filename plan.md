@@ -1,15 +1,5 @@
 # rars plan
 
-## Batch 12: Codec Correctness
-
-- Fix RARVM arithmetic corner cases: `Sbb` borrow flag handling and width-sized
-  `Shl`/`Shr` shifts.
-
-## Batch 13: Writer Oracle Coverage
-
-- Add byte-for-byte CLI round-trip assertions for writer tests, not only
-  `rars test` CRC checks against self-written archives.
-
 ## Batch 14: CLI Safety And Semantics
 
 - Map CLI failures to useful unrar-style exit classes instead of flattening
