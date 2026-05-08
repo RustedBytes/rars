@@ -270,12 +270,19 @@ mod tests {
 
     #[test]
     fn rar30_aes_encrypt_decrypt_round_trips_blocks() {
-        let salt = Some(*b"rarsalt!");
+        let salt = Some([1, 2, 3, 4, 5, 6, 7, 8]);
         let mut data = *b"0123456789abcdefRAR AES CBC data";
         let plain = data;
 
         Rar30Cipher::new(b"password", salt).encrypt_in_place(&mut data);
-        assert_ne!(data, plain);
+        assert_eq!(
+            data,
+            [
+                0x5e, 0x59, 0xce, 0xa1, 0x16, 0xca, 0xa2, 0x1d, 0x4d, 0xc5, 0x05, 0xeb, 0xa9, 0x3f,
+                0x7b, 0xcd, 0x0d, 0x04, 0xff, 0xea, 0x60, 0x67, 0x3d, 0xaf, 0x6a, 0x8f, 0x02, 0xb2,
+                0x03, 0xc8, 0x7d, 0xde,
+            ]
+        );
 
         Rar30Cipher::new(b"password", salt).decrypt_in_place(&mut data);
         assert_eq!(data, plain);

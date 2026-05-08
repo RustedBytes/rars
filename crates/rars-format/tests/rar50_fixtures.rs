@@ -3339,6 +3339,19 @@ fn parses_and_extracts_rar50_header_encrypted_archive_with_password() {
 }
 
 #[test]
+fn parses_rar50_header_encrypted_archive_from_path_with_password() {
+    let archive =
+        Archive::parse_path_with_password(fixture("header_encrypted.rar"), Some(b"password"))
+            .unwrap();
+    let files: Vec<_> = archive.files().collect();
+
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].name, b"hello.txt");
+    let extracted = collect_extract(&archive).unwrap();
+    assert_eq!(extracted[0].data, b"Hello, RAR 5.0 fixture world.\n");
+}
+
+#[test]
 fn extracts_rar50_header_encrypted_comment_service_with_password() {
     let bytes = std::fs::read(fixture("header_encrypted_comment.rar")).unwrap();
 

@@ -2,14 +2,6 @@
 
 ## Active Tasks
 
-- Review pass 2, batch 3:
-  - Replace fuzz-bait slice-to-array `unwrap()` sites in recovery/header parsing
-    with checked errors where the input is archive-controlled.
-  - Add pinned known-answer tests for RAR 1.3, RAR 1.5, RAR 2.0, and RAR 3.x
-    ciphers.
-  - Add a RAR5 encrypted integrity API regression covering the public
-    `verify_crc32`/`verify_integrity` path.
-  - Add tests for file-backed encrypted-header parsing.
 - Review pass 2, release polish:
   - Add rustdoc for the public `rars`, `rars-format`, and CLI-facing APIs before
     publishing.

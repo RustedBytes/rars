@@ -3685,6 +3685,21 @@ fn extracts_rar300_header_encrypted_archive_with_password() {
 }
 
 #[test]
+fn parses_rar300_header_encrypted_archive_from_path_with_password() {
+    let archive = Archive::parse_path_with_password(
+        fixture("encrypted/header_rar300_password.rar"),
+        Some(b"password"),
+    )
+    .unwrap();
+    let file = archive.files().next().unwrap();
+
+    assert!(archive.main.has_encrypted_headers());
+    assert_eq!(file.name, b"hello.txt");
+    let extracted = collect_extract_with_password(&archive, Some(b"password")).unwrap();
+    assert_eq!(extracted[0].data, b"Hello, RAR 3.x fixture world.\n");
+}
+
+#[test]
 fn extracts_rar420_header_encrypted_archive_with_password() {
     let bytes = std::fs::read(fixture("encrypted/header_rar420_password.rar")).unwrap();
     let archive = Archive::parse_with_password(&bytes, Some(b"password")).unwrap();
@@ -3699,6 +3714,21 @@ fn extracts_rar420_header_encrypted_archive_with_password() {
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].data, b"Hello, RAR 3.x fixture world.\n");
     assert_eq!(crc32(&extracted[0].data), 0xa538535e);
+}
+
+#[test]
+fn parses_rar420_header_encrypted_archive_from_path_with_password() {
+    let archive = Archive::parse_path_with_password(
+        fixture("encrypted/header_rar420_password.rar"),
+        Some(b"password"),
+    )
+    .unwrap();
+    let file = archive.files().next().unwrap();
+
+    assert!(archive.main.has_encrypted_headers());
+    assert_eq!(file.name, b"hello.txt");
+    let extracted = collect_extract_with_password(&archive, Some(b"password")).unwrap();
+    assert_eq!(extracted[0].data, b"Hello, RAR 3.x fixture world.\n");
 }
 
 #[test]

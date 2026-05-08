@@ -65,3 +65,21 @@ impl<R: std::io::Read> std::io::Read for Rar13DecryptReader<R> {
         Ok(read)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Rar13Cipher;
+
+    #[test]
+    fn rar13_cipher_matches_pinned_stream_vector() {
+        let mut data = *b"hello world";
+        Rar13Cipher::new(b"password").encrypt_in_place(&mut data);
+        assert_eq!(
+            data,
+            [0x37, 0xcd, 0xaa, 0xbd, 0x10, 0x4e, 0x6f, 0x6e, 0xb5, 0x30, 0xe6]
+        );
+
+        Rar13Cipher::new(b"password").decrypt_in_place(&mut data);
+        assert_eq!(&data, b"hello world");
+    }
+}

@@ -1304,7 +1304,7 @@ fn repair_protect_head_bytes(
         let sector_start = protected_start + index * 512;
         let sector = &source[sector_start..sector_start + 512];
         let actual = (!crc32(sector) & 0xffff) as u16;
-        let expected = u16::from_le_bytes(tags[index * 2..index * 2 + 2].try_into().unwrap());
+        let expected = read_u16(tags, index * 2)?;
         if actual != expected {
             damaged.push(index);
         }
@@ -1414,7 +1414,7 @@ fn repair_newsub_recovery_bytes(
     for index in 0..protected_sectors {
         let sector = protected_sector(source, protected_start, protected_len, index)?;
         let actual = (!crc32(&sector) & 0xffff) as u16;
-        let expected = u16::from_le_bytes(tags[index * 2..index * 2 + 2].try_into().unwrap());
+        let expected = read_u16(tags, index * 2)?;
         if actual != expected {
             damaged.push(index);
         }
@@ -1600,9 +1600,8 @@ fn decrypt_encrypted_header_at(
         .get(offset + 8..offset + 24)
         .ok_or(Error::TooShort)?;
     let mut cipher = cipher_cache.cipher(password, salt);
-    let mut first_block: [u8; 16] = first_ciphertext
-        .try_into()
-        .expect("RAR encrypted header first block size");
+    let mut first_block = [0u8; 16];
+    first_block.copy_from_slice(first_ciphertext);
     cipher.decrypt_in_place(&mut first_block);
     let head_size = read_u16(&first_block, 5)? as usize;
     if head_size < 7 {
@@ -1656,9 +1655,8 @@ fn read_encrypted_header_at(
     let first = read_exact_at(file, absolute, 24)?;
     let salt = read_header_salt(&first, 0)?;
     let mut cipher = cipher_cache.cipher(password, salt);
-    let mut first_block: [u8; 16] = first[8..24]
-        .try_into()
-        .expect("RAR encrypted header first block size");
+    let mut first_block = [0u8; 16];
+    first_block.copy_from_slice(&first[8..24]);
     cipher.decrypt_in_place(&mut first_block);
     let head_size = read_u16(&first_block, 5)? as usize;
     if head_size < 7 {
