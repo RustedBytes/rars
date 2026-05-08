@@ -2,16 +2,38 @@
 
 ## Active Tasks
 
-- Review pass 3, batch 4: streaming/buffering and structural cleanup.
-  - Reconcile RAR5 streaming thresholds and remove or document the large-member
-    double-decode preflight.
-  - Add real >512 MiB streaming coverage using the external sparse fixture
-    harness, not an in-repo fixture.
-  - Replace string-matched RAR5 streaming filter errors with a typed codec
-    sentinel.
-  - Deduplicate RAR50 crypto-error mapping and CRC32 helpers.
-  - Add byte-content assertions to representative CLI writer round trips and
-    consolidate the repeated `creates_rar*_can_be_tested` helpers.
+- Review pass 3, batch 5: RAR5 extraction/parser correctness.
+  - Add a corrupt encrypted-padding regression and validate discarded RAR5
+    decrypted padding bytes.
+  - Move RAR5 streaming repeated-byte CRC/hash accounting so it only advances
+    after bytes are successfully written to the caller sink.
+  - Make REV5 metadata parsing use slice reads and tolerate trailing
+    forward-compatible metadata bytes.
+  - Validate minimum sizes for legacy AV/SIGN blocks even when their header
+    CRCs are intentionally not trusted.
+- Review pass 3, batch 6: codec hardening and state hygiene.
+  - Reduce the RAR29 filtered-range O(N^2) filter clone pattern.
+  - Add an explicit non-solid reset API or guard for reusable `Unpack29`
+    decoder instances.
+  - Align filter validation edges: cap DELTA decode channel counts, document
+    the Itanium tail requirement, and reject malformed RGB register values
+    before applying the filter.
+- Review pass 3, batch 7: API and resource cleanup.
+  - Preserve `std::io::Error` sources instead of flattening them to strings.
+  - Remove the unnecessary `Result` wrapper from total facade metadata
+    conversions.
+  - Add owned-buffer parse entry points or equivalent plumbing to avoid
+    cloning caller-owned archive bytes.
+  - Decide whether RAR5 recovery repair needs a streaming sector path before
+    large-archive repair is considered production-ready.
+- Review pass 3, batch 8: workspace, scripts, and remaining test polish.
+  - Add workspace MSRV/dependency/docs metadata suitable for publishing.
+  - Add uniform tool prechecks to oracle scripts and make coverage keep
+    running after individual test failures.
+  - Continue consolidating CLI writer round-trip helpers and add exact byte
+    assertions to the remaining representative writer families.
+  - Tighten password-error CLI probes so they assert the diagnostic, not only
+    non-zero exit status.
 - Add adversarial PPMd fixtures as corpus bugs appear.
 - Add real RAR-created RAR5 filter fixtures for E8, E8E9, Delta, and ARM
   reader coverage.

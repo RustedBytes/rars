@@ -44,6 +44,7 @@ struct OwnedCompressedBlock {
 #[doc(hidden)]
 pub enum StreamDecodeError<E> {
     Decode(Error),
+    FilteredMember,
     Sink(E),
 }
 
@@ -1232,10 +1233,7 @@ impl Unpack50Decoder {
                 match symbol {
                     0..=255 => output.push(symbol as u8, &mut sink)?,
                     256 => {
-                        return Err(Error::InvalidData(
-                            "RAR 5 streaming decoder cannot apply filters to large output",
-                        )
-                        .into());
+                        return Err(StreamDecodeError::FilteredMember);
                     }
                     257 => {
                         if self.last_length != 0 {
@@ -2351,6 +2349,27 @@ mod tests {
 
         assert_eq!(output, data);
         assert_ne!(lengths.main[256], 0);
+    }
+
+    #[test]
+    fn streaming_decode_reports_filtered_member_with_typed_sentinel() {
+        let data = b"\xe8\0\0\0\0plain text after call".to_vec();
+        let input = encode_lz_member_with_filter(&data, Rar50FilterKind::E8).unwrap();
+        let mut reader = input.as_slice();
+        let mut decoder = Unpack50Decoder::new();
+
+        let error = decoder
+            .decode_member_from_reader_with_dictionary_to_sink(
+                &mut reader,
+                0,
+                data.len(),
+                128 * 1024,
+                false,
+                |_chunk| Ok::<_, std::convert::Infallible>(()),
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, StreamDecodeError::FilteredMember));
     }
 
     #[test]

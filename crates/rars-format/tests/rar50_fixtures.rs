@@ -1487,6 +1487,27 @@ fn reference_rar_accepts_rar50_acl_and_stream_file_service_records() {
 }
 
 #[test]
+#[ignore = "requires RARS_RAR50_LARGE_STREAM_FIXTURE pointing at an external >512 MiB sparse RAR5 fixture"]
+fn external_sparse_rar50_large_member_streams_to_sink() {
+    let path = std::env::var_os("RARS_RAR50_LARGE_STREAM_FIXTURE")
+        .expect("set RARS_RAR50_LARGE_STREAM_FIXTURE to an external sparse RAR5 fixture");
+    let archive = Archive::parse_path(path).unwrap();
+    let largest = archive
+        .files()
+        .map(|file| file.unpacked_size)
+        .max()
+        .unwrap_or(0);
+    assert!(
+        largest > 512 * 1024 * 1024,
+        "fixture must contain a member larger than the filtered-buffer fallback"
+    );
+
+    archive
+        .extract_to(read_options(None), |_meta| Ok(Box::new(std::io::sink())))
+        .unwrap();
+}
+
+#[test]
 fn writes_rar50_recovery_service_record() {
     let entries = [rar50::StoredEntry {
         name: b"recoverable.txt",

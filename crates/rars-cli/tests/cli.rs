@@ -822,9 +822,12 @@ fn creates_rar15_compressed_archive_that_can_be_tested() {
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     assert!(stdout(&info).contains("method=0x33"));
 
-    let test = rars().arg("test").arg(&archive).output().unwrap();
-    assert!(test.status.success(), "stderr: {}", stderr(&test));
-    assert!(stdout(&test).contains("OK hello.txt"));
+    assert_archive_tests_and_extracts_file(
+        &archive,
+        None,
+        "hello.txt",
+        b"hello from rar15 cli hello from rar15 cli\n",
+    );
 }
 
 #[test]
@@ -906,9 +909,12 @@ fn creates_rar29_compressed_archive_that_can_be_tested() {
     assert!(info_stdout.contains("method=0x33") || info_stdout.contains("method=0x35"));
     assert!(info_stdout.contains("ver=29"));
 
-    let test = rars().arg("test").arg(&archive).output().unwrap();
-    assert!(test.status.success(), "stderr: {}", stderr(&test));
-    assert!(stdout(&test).contains("OK hello.txt"));
+    assert_archive_tests_and_extracts_file(
+        &archive,
+        None,
+        "hello.txt",
+        b"hello from rar29 cli hello from rar29 cli\n",
+    );
 }
 
 #[test]
@@ -3420,9 +3426,12 @@ fn creates_rar50_compressed_archive_that_can_be_tested() {
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     assert!(stdout(&info).contains("method=1"));
 
-    let test = rars().arg("test").arg(&archive).output().unwrap();
-    assert!(test.status.success(), "stderr: {}", stderr(&test));
-    assert!(stdout(&test).contains("OK payload.txt"));
+    assert_archive_tests_and_extracts_file(
+        &archive,
+        None,
+        "payload.txt",
+        b"rar50 compressed cli payload\nrar50 compressed cli payload\n",
+    );
 }
 
 #[test]
@@ -4364,6 +4373,32 @@ fn stdout(output: &std::process::Output) -> String {
 
 fn stderr(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+fn assert_archive_tests_and_extracts_file(
+    archive: &Path,
+    password: Option<&str>,
+    name: &str,
+    expected: &[u8],
+) {
+    let mut test_command = rars();
+    test_command.arg("test");
+    if let Some(password) = password {
+        test_command.args(["--password", password]);
+    }
+    let test = test_command.arg(archive).output().unwrap();
+    assert!(test.status.success(), "stderr: {}", stderr(&test));
+    assert!(stdout(&test).contains(&format!("OK {name}")));
+
+    let out_dir = scratch("assert-extract");
+    let mut extract_command = rars();
+    extract_command.arg("x");
+    if let Some(password) = password {
+        extract_command.args(["--password", password]);
+    }
+    let extract = extract_command.arg(archive).arg(&out_dir).output().unwrap();
+    assert!(extract.status.success(), "stderr: {}", stderr(&extract));
+    assert_eq!(fs::read(out_dir.join(name)).unwrap(), expected);
 }
 
 fn expected_rar15_40_stored_volume_payload() -> Vec<u8> {

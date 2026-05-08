@@ -1868,7 +1868,7 @@ fn header_encryption_keys(password: &[u8]) -> Result<HeaderEncryptionKeys> {
     let mut salt = [0u8; 16];
     getrandom::getrandom(&mut salt)
         .map_err(|_| Error::InvalidHeader("RAR 5 writer could not generate encryption salt"))?;
-    let keys = Rar50Keys::derive(password, salt, 0).map_err(map_rar50_crypto_error)?;
+    let keys = Rar50Keys::derive(password, salt, 0).map_err(super::map_rar50_crypto_error)?;
     Ok(HeaderEncryptionKeys { keys, salt })
 }
 
@@ -2101,7 +2101,7 @@ fn encrypted_payload(
         .map_err(|_| Error::InvalidHeader("RAR 5 writer could not generate encryption salt"))?;
     getrandom::getrandom(&mut iv)
         .map_err(|_| Error::InvalidHeader("RAR 5 writer could not generate encryption IV"))?;
-    let keys = Rar50Keys::derive(password, salt, 0).map_err(map_rar50_crypto_error)?;
+    let keys = Rar50Keys::derive(password, salt, 0).map_err(super::map_rar50_crypto_error)?;
 
     let mut encrypted_data = packed_data.to_vec();
     let padded_len = encrypted_data
@@ -2112,7 +2112,7 @@ fn encrypted_payload(
     encrypted_data.resize(padded_len, 0);
     Rar50Cipher::new(keys.key, iv)
         .encrypt_in_place(&mut encrypted_data)
-        .map_err(map_rar50_crypto_error)?;
+        .map_err(super::map_rar50_crypto_error)?;
 
     Ok(EncryptedStoredPayload {
         data: encrypted_data,
@@ -2670,7 +2670,7 @@ fn encrypted_header_block(
     encrypted_header.resize(padded_len, 0);
     Rar50Cipher::new(keys.key, iv)
         .encrypt_in_place(&mut encrypted_header)
-        .map_err(map_rar50_crypto_error)?;
+        .map_err(super::map_rar50_crypto_error)?;
     let mut out = Vec::with_capacity(16 + encrypted_header.len() + data.len());
     out.extend_from_slice(&iv);
     out.extend_from_slice(&encrypted_header);
@@ -2742,20 +2742,6 @@ fn write_file_encryption_record(
     record.extend_from_slice(&iv);
     record.extend_from_slice(&check_value);
     write_extra_record(out, FHEXTRA_CRYPT, &record);
-}
-
-fn map_rar50_crypto_error(error: rars_crypto::rar50::Error) -> Error {
-    match error {
-        rars_crypto::rar50::Error::KdfCountTooLarge => Error::UnsupportedFeature {
-            version: crate::version::ArchiveVersion::Rar50,
-            feature: "RAR 5 KDF count",
-        },
-        rars_crypto::rar50::Error::BadPassword => Error::WrongPasswordOrCorruptData,
-        rars_crypto::rar50::Error::UnalignedInput => {
-            Error::InvalidHeader("RAR 5 AES input is not block aligned")
-        }
-        _ => Error::InvalidHeader("RAR 5 crypto error"),
-    }
 }
 
 fn write_vint(out: &mut Vec<u8>, mut value: u64) {

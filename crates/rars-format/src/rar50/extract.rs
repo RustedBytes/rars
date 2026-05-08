@@ -1,5 +1,6 @@
 use super::{blake2sp, Archive, ExtractedEntryMeta, FileHeader};
 use crate::error::{Error, Result};
+use crate::rar15_40::Crc32 as StreamingCrc32;
 use crate::volume_extract::{ChainedReader, SplitVolumeState, SplitVolumeStep};
 use rars_codec::rar50::{DecodeMode, DecodedChunk, StreamDecodeError, Unpack50Decoder};
 use rars_crypto::rar50::{Rar50Cipher, Rar50Keys};
@@ -9,6 +10,9 @@ use std::io::{Read, Write};
 const STREAM_DECODE_THRESHOLD: u64 = 128 * 1024 * 1024;
 #[cfg(test)]
 const STREAM_DECODE_THRESHOLD: u64 = 1024;
+// Filtered RAR5 members still need whole-member byte transforms. Keep a
+// bounded buffered fallback for practical files and reject larger filtered
+// members before caller-visible output is written.
 const FILTERED_BUFFER_FALLBACK_LIMIT: u64 = 512 * 1024 * 1024;
 
 impl FileHeader {
@@ -30,10 +34,10 @@ impl FileHeader {
             });
         }
         let keys = Rar50Keys::derive(password, encryption.salt, encryption.kdf_count)
-            .map_err(map_rar50_crypto_error)?;
+            .map_err(super::map_rar50_crypto_error)?;
         if let Some(check_value) = encryption.check_value {
             keys.check_password(&check_value)
-                .map_err(map_rar50_crypto_error)?;
+                .map_err(super::map_rar50_crypto_error)?;
         }
         Ok(Some(keys))
     }
@@ -293,6 +297,10 @@ impl FileHeader {
             )
             .map_err(|error| match error {
                 StreamDecodeError::Decode(error) => Error::from(error),
+                StreamDecodeError::FilteredMember => Error::UnsupportedFeature {
+                    version: crate::version::ArchiveVersion::Rar50,
+                    feature: "RAR 5 filtered compressed member above buffered fallback limit",
+                },
                 StreamDecodeError::Sink(error) => Error::from(error),
             })?;
         self.verify_streaming_integrity(crc, hash, keys)
@@ -365,20 +373,6 @@ fn write_repeated_chunk(
         len -= take;
     }
     Ok(())
-}
-
-fn map_rar50_crypto_error(error: rars_crypto::rar50::Error) -> Error {
-    match error {
-        rars_crypto::rar50::Error::KdfCountTooLarge => Error::UnsupportedFeature {
-            version: crate::version::ArchiveVersion::Rar50,
-            feature: "RAR 5 KDF count",
-        },
-        rars_crypto::rar50::Error::BadPassword => Error::WrongPasswordOrCorruptData,
-        rars_crypto::rar50::Error::UnalignedInput => {
-            Error::InvalidHeader("RAR 5 AES input is not block aligned")
-        }
-        _ => Error::InvalidHeader("RAR 5 crypto error"),
-    }
 }
 
 impl Archive {
@@ -456,6 +450,10 @@ impl<'a> DecoderSession<'a> {
             return self.write_buffered_large_member(archive, file, writer);
         }
 
+        // Filters are not streaming-safe yet because their byte transform can be
+        // discovered after earlier decoded bytes have already reached the sink.
+        // The preflight pass preserves all-or-nothing extraction for huge files;
+        // smaller filtered files use the bounded buffered fallback above.
         let mut preflight_decoder = self.decoder.clone();
         let (mut packed, keys) = file
             .packed_reader_with_password(archive, self.password)
@@ -467,16 +465,6 @@ impl<'a> DecoderSession<'a> {
             &mut preflight_decoder,
             &mut sink,
         )
-        .map_err(|error| {
-            if is_stream_filter_error(&error) {
-                Error::UnsupportedFeature {
-                    version: crate::version::ArchiveVersion::Rar50,
-                    feature: "RAR 5 filtered compressed member above buffered fallback limit",
-                }
-            } else {
-                error
-            }
-        })
         .map_err(|error| file.entry_error("decoding", error))?;
 
         let mut streaming_decoder = self.decoder.clone();
@@ -527,15 +515,6 @@ impl<'a> DecoderSession<'a> {
     ) -> Result<Vec<u8>> {
         final_file.decode_split_with_decoder(volumes, split, &mut self.decoder, decryptor)
     }
-}
-
-fn is_stream_filter_error(error: &Error) -> bool {
-    matches!(
-        error,
-        Error::Codec(rars_codec::Error::InvalidData(
-            "RAR 5 streaming decoder cannot apply filters to large output"
-        ))
-    )
 }
 
 impl FileHeader {
@@ -947,7 +926,7 @@ impl<R: Read> Rar50DecryptingReader<R> {
         self.buffer = encrypted;
         self.cipher
             .decrypt_in_place(&mut self.buffer)
-            .map_err(map_rar50_crypto_error)
+            .map_err(super::map_rar50_crypto_error)
             .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
         self.pos = 0;
         self.len = self.buffer.len();
@@ -968,92 +947,6 @@ impl<R: Read> Read for Rar50DecryptingReader<R> {
         self.pos += count;
         Ok(count)
     }
-}
-
-struct StreamingCrc32 {
-    value: u32,
-}
-
-impl StreamingCrc32 {
-    fn new() -> Self {
-        Self { value: 0xffff_ffff }
-    }
-
-    fn update(&mut self, input: &[u8]) {
-        const TABLE: [u32; 256] = crc32_table();
-        for &byte in input {
-            let index = (self.value as u8 ^ byte) as usize;
-            self.value = (self.value >> 8) ^ TABLE[index];
-        }
-    }
-
-    fn update_zeroes(&mut self, len: u64) {
-        let mut matrix = zero_byte_matrix();
-        let mut count = len;
-        while count != 0 {
-            if count & 1 != 0 {
-                self.value = gf2_matrix_times(&matrix, self.value);
-            }
-            count >>= 1;
-            if count != 0 {
-                matrix = gf2_matrix_square(&matrix);
-            }
-        }
-    }
-
-    fn finish(self) -> u32 {
-        !self.value
-    }
-}
-
-fn zero_byte_matrix() -> [u32; 32] {
-    let mut matrix = [0; 32];
-    for (bit, slot) in matrix.iter_mut().enumerate() {
-        let mut value = 1u32 << bit;
-        let index = value as u8 as usize;
-        const TABLE: [u32; 256] = crc32_table();
-        value = (value >> 8) ^ TABLE[index];
-        *slot = value;
-    }
-    matrix
-}
-
-fn gf2_matrix_times(matrix: &[u32; 32], mut vector: u32) -> u32 {
-    let mut sum = 0;
-    let mut index = 0;
-    while vector != 0 {
-        if vector & 1 != 0 {
-            sum ^= matrix[index];
-        }
-        vector >>= 1;
-        index += 1;
-    }
-    sum
-}
-
-fn gf2_matrix_square(matrix: &[u32; 32]) -> [u32; 32] {
-    let mut square = [0; 32];
-    for (index, slot) in square.iter_mut().enumerate() {
-        *slot = gf2_matrix_times(matrix, matrix[index]);
-    }
-    square
-}
-
-const fn crc32_table() -> [u32; 256] {
-    let mut table = [0; 256];
-    let mut i = 0;
-    while i < 256 {
-        let mut value = i as u32;
-        let mut bit = 0;
-        while bit < 8 {
-            let mask = 0u32.wrapping_sub(value & 1);
-            value = (value >> 1) ^ (0xedb8_8320 & mask);
-            bit += 1;
-        }
-        table[i] = value;
-        i += 1;
-    }
-    table
 }
 
 #[cfg(test)]
@@ -1437,11 +1330,11 @@ mod tests {
     #[test]
     fn map_rar50_crypto_error_translates_kdf_count() {
         assert!(matches!(
-            map_rar50_crypto_error(rars_crypto::rar50::Error::KdfCountTooLarge),
+            super::super::map_rar50_crypto_error(rars_crypto::rar50::Error::KdfCountTooLarge),
             Error::UnsupportedFeature { .. }
         ));
         assert!(matches!(
-            map_rar50_crypto_error(rars_crypto::rar50::Error::BadPassword),
+            super::super::map_rar50_crypto_error(rars_crypto::rar50::Error::BadPassword),
             Error::WrongPasswordOrCorruptData
         ));
     }

@@ -2013,28 +2013,90 @@ impl<W: Write + ?Sized> Write for CrcWriter<'_, W> {
     }
 }
 
-struct Crc32 {
+pub(crate) struct Crc32 {
     value: u32,
 }
 
 impl Crc32 {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { value: 0xffff_ffff }
     }
 
-    fn update(&mut self, input: &[u8]) {
+    pub(crate) fn update(&mut self, input: &[u8]) {
+        const TABLE: [u32; 256] = crc32_table();
         for &byte in input {
-            self.value ^= byte as u32;
-            for _ in 0..8 {
-                let mask = 0u32.wrapping_sub(self.value & 1);
-                self.value = (self.value >> 1) ^ (0xedb8_8320 & mask);
+            let index = (self.value as u8 ^ byte) as usize;
+            self.value = (self.value >> 8) ^ TABLE[index];
+        }
+    }
+
+    pub(crate) fn update_zeroes(&mut self, len: u64) {
+        let mut matrix = zero_byte_matrix();
+        let mut count = len;
+        while count != 0 {
+            if count & 1 != 0 {
+                self.value = gf2_matrix_times(&matrix, self.value);
+            }
+            count >>= 1;
+            if count != 0 {
+                matrix = gf2_matrix_square(&matrix);
             }
         }
     }
 
-    fn finish(self) -> u32 {
+    pub(crate) fn finish(self) -> u32 {
         !self.value
     }
+}
+
+fn zero_byte_matrix() -> [u32; 32] {
+    let mut matrix = [0; 32];
+    for (bit, slot) in matrix.iter_mut().enumerate() {
+        let mut value = 1u32 << bit;
+        let index = value as u8 as usize;
+        const TABLE: [u32; 256] = crc32_table();
+        value = (value >> 8) ^ TABLE[index];
+        *slot = value;
+    }
+    matrix
+}
+
+fn gf2_matrix_times(matrix: &[u32; 32], mut vector: u32) -> u32 {
+    let mut sum = 0;
+    let mut index = 0;
+    while vector != 0 {
+        if vector & 1 != 0 {
+            sum ^= matrix[index];
+        }
+        vector >>= 1;
+        index += 1;
+    }
+    sum
+}
+
+fn gf2_matrix_square(matrix: &[u32; 32]) -> [u32; 32] {
+    let mut square = [0; 32];
+    for (index, slot) in square.iter_mut().enumerate() {
+        *slot = gf2_matrix_times(matrix, matrix[index]);
+    }
+    square
+}
+
+const fn crc32_table() -> [u32; 256] {
+    let mut table = [0; 256];
+    let mut i = 0;
+    while i < 256 {
+        let mut value = i as u32;
+        let mut bit = 0;
+        while bit < 8 {
+            let mask = 0u32.wrapping_sub(value & 1);
+            value = (value >> 1) ^ (0xedb8_8320 & mask);
+            bit += 1;
+        }
+        table[i] = value;
+        i += 1;
+    }
+    table
 }
 
 fn parse_block_header(input: &[u8], offset: usize) -> Result<BlockHeader> {
