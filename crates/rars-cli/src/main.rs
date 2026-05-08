@@ -12,7 +12,7 @@ use rars::{
     ArchiveVersion, Error, ExtractedEntryMeta, FeatureSet,
 };
 use std::env;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io::IsTerminal;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -36,7 +36,24 @@ fn read_options(password: Option<&[u8]>) -> ArchiveReadOptions<'_> {
 fn main() {
     if let Err(err) = run() {
         eprintln!("error: {err}");
-        std::process::exit(1);
+        std::process::exit(exit_code_for_error(&err.to_string()));
+    }
+}
+
+fn exit_code_for_error(message: &str) -> i32 {
+    if message.contains("password is required")
+        || message.contains("wrong password or corrupt encrypted data")
+    {
+        3
+    } else if message.contains("usage:")
+        || message.starts_with("unknown command:")
+        || message.starts_with("unknown add option:")
+        || message.starts_with("missing ")
+        || message.contains("ambiguous extract arguments")
+    {
+        2
+    } else {
+        1
     }
 }
 
@@ -274,6 +291,7 @@ fn cmd_extract(args: &[String]) -> CliResult<()> {
     if paths.len() < 2 {
         return Err("usage: rars x [--password <password>] <archive> [parts...] <outdir>".into());
     }
+    reject_ambiguous_extract_target(&paths)?;
     // Invariant: the length check above guarantees an output directory argument.
     let out_dir = PathBuf::from(paths.pop().expect("outdir"));
 
@@ -358,6 +376,34 @@ fn path_starts_with(path: &str, prefix: &[u8]) -> CliResult<bool> {
     let mut buf = vec![0; prefix.len()];
     let read = std::io::Read::read(&mut file, &mut buf)?;
     Ok(read == prefix.len() && buf == prefix)
+}
+
+fn reject_ambiguous_extract_target(paths: &[String]) -> CliResult<()> {
+    let Some(out_path) = paths.last() else {
+        return Ok(());
+    };
+    if looks_like_archive_path(out_path)? {
+        return Err("ambiguous extract arguments: final argument looks like an archive; pass an explicit output directory".into());
+    }
+    Ok(())
+}
+
+fn looks_like_archive_path(path: &str) -> CliResult<bool> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::IsADirectory
+            ) =>
+        {
+            return Ok(false);
+        }
+        Err(error) => {
+            return Err(format!("failed to inspect extract output path '{path}': {error}").into())
+        }
+    };
+    Ok(ArchiveReader::detect(&bytes).is_ok())
 }
 
 fn cmd_repair_volumes(paths: &[String]) -> CliResult<()> {
@@ -1763,7 +1809,7 @@ fn open_output_writer(
 ) -> rars::Result<Box<dyn std::io::Write>> {
     let rel = output_relative_path(&entry.name)
         .map_err(|_| Error::InvalidHeader("unsafe archive path"))?;
-    let out_path = checked_output_path(out_dir, &rel)?;
+    let mut out_path = checked_output_path(out_dir, &rel)?;
     if entry.is_directory {
         fs::create_dir_all(&out_path)?;
         return Ok(Box::new(std::io::sink()));
@@ -1771,7 +1817,8 @@ fn open_output_writer(
     if let Some(parent) = out_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    Ok(Box::new(fs::File::create(out_path)?))
+    out_path = checked_output_path(out_dir, &rel)?;
+    Ok(Box::new(create_output_file(&out_path)?))
 }
 
 fn checked_output_path(out_dir: &Path, rel: &Path) -> rars::Result<PathBuf> {
@@ -1819,7 +1866,7 @@ fn output_relative_path(name: &[u8]) -> CliResult<PathBuf> {
     if name.contains(&0) {
         return Err("unsafe archive path contains NUL byte".into());
     }
-    let text = String::from_utf8_lossy(name).replace('\\', "/");
+    let text = String::from_utf8(name.to_vec())?.replace('\\', "/");
     let bytes = text.as_bytes();
     if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
         return Err(format!("unsafe archive path: {text}").into());
@@ -1838,6 +1885,23 @@ fn output_relative_path(name: &[u8]) -> CliResult<PathBuf> {
     }
     Ok(out)
 }
+
+fn create_output_file(path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    set_no_follow(&mut options);
+    options.open(path)
+}
+
+#[cfg(target_os = "linux")]
+fn set_no_follow(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+    const O_NOFOLLOW: i32 = 0o400000;
+    options.custom_flags(O_NOFOLLOW);
+}
+
+#[cfg(not(target_os = "linux"))]
+fn set_no_follow(_options: &mut OpenOptions) {}
 
 struct OwnedInput {
     name: Vec<u8>,

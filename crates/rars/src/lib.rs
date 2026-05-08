@@ -539,6 +539,7 @@ fn rar50_volumes(archives: &[Archive]) -> Result<Vec<rar50::Archive>> {
 mod tests {
     use super::*;
     use std::cell::RefCell;
+    use std::path::{Path, PathBuf};
     use std::rc::Rc;
 
     struct CollectWriter {
@@ -552,6 +553,12 @@ mod tests {
         file_time: u32,
         file_attr: u64,
         is_directory: bool,
+    }
+
+    fn rar15_40_fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../rars-format/tests/fixtures/rar15_40")
+            .join(name)
     }
 
     impl Write for CollectWriter {
@@ -2695,6 +2702,25 @@ mod tests {
         assert_eq!(
             collect_extract(&repaired_archive, None).unwrap()[0].data,
             payload
+        );
+    }
+
+    #[test]
+    fn archive_facade_repairs_rar15_40_recovery_as_full_archive_bytes() {
+        let bytes = std::fs::read(rar15_40_fixture("rar250_protect_head_rr5.rar")).unwrap();
+        let mut damaged = bytes.clone();
+        damaged[512 + 16..512 + 80].fill(0xa5);
+        let damaged_archive = ArchiveReader::read(&damaged).unwrap();
+        assert!(collect_extract(&damaged_archive, None).is_err());
+
+        let mut repaired = Vec::new();
+        damaged_archive.repair_recovery_to(&mut repaired).unwrap();
+
+        assert_eq!(repaired, bytes);
+        let repaired_archive = ArchiveReader::read(&repaired).unwrap();
+        assert_eq!(
+            collect_extract(&repaired_archive, None).unwrap()[0].name,
+            b"BIG.BIN"
         );
     }
 

@@ -137,7 +137,7 @@ fn rejects_wrong_password_for_rar15_40_encrypted_fixture() {
         .arg(fixture_rar15_40("encrypted/per_file_rar300_password.rar"))
         .output()
         .unwrap();
-    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(3));
     let stderr = stderr(&output);
     assert!(stderr.contains("failed to test archive"));
     assert!(stderr.contains("wrong password or corrupt encrypted data"));
@@ -440,6 +440,91 @@ fn rejects_unsafe_output_path() {
 }
 
 #[test]
+fn rejects_non_utf8_output_path() {
+    let dir = scratch("non-utf8-extract");
+    let archive = dir.join("non-utf8.rar");
+    let out_dir = dir.join("out");
+    let bytes = write_stored_archive(
+        &[StoredEntry {
+            name: b"\xff.txt",
+            data: b"non utf8 path fixture\n",
+            file_time: 0,
+            file_attr: 0x20,
+            password: None,
+            file_comment: None,
+        }],
+        WriterOptions::default(),
+    )
+    .unwrap();
+    fs::write(&archive, bytes).unwrap();
+
+    let extract = rars()
+        .arg("x")
+        .arg(&archive)
+        .arg(&out_dir)
+        .output()
+        .unwrap();
+
+    assert!(!extract.status.success());
+    assert!(stderr(&extract).contains("unsafe archive path"));
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_output_path_that_is_existing_symlink() {
+    let dir = scratch("symlink-extract");
+    let archive = dir.join("symlink.rar");
+    let out_dir = dir.join("out");
+    let target = dir.join("target.txt");
+    fs::create_dir_all(&out_dir).unwrap();
+    fs::write(&target, b"do not overwrite\n").unwrap();
+    std::os::unix::fs::symlink(&target, out_dir.join("link.txt")).unwrap();
+    std::os::unix::fs::symlink(&target, out_dir.join("LINK.TXT")).unwrap();
+    let bytes = write_stored_archive(
+        &[StoredEntry {
+            name: b"link.txt",
+            data: b"symlink path fixture\n",
+            file_time: 0,
+            file_attr: 0x20,
+            password: None,
+            file_comment: None,
+        }],
+        WriterOptions::default(),
+    )
+    .unwrap();
+    fs::write(&archive, bytes).unwrap();
+
+    let extract = rars()
+        .arg("x")
+        .arg(&archive)
+        .arg(&out_dir)
+        .output()
+        .unwrap();
+
+    assert!(!extract.status.success());
+    let stderr = stderr(&extract);
+    assert!(
+        stderr.contains("unsafe archive path crosses symlink")
+            || stderr.contains("Too many levels of symbolic links"),
+        "{stderr}"
+    );
+    assert_eq!(fs::read(&target).unwrap(), b"do not overwrite\n");
+}
+
+#[test]
+fn rejects_extract_when_final_argument_looks_like_archive() {
+    let output = rars()
+        .arg("x")
+        .arg(fixture("README_store.rar"))
+        .arg(fixture("COMMENT.RAR"))
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("ambiguous extract arguments"));
+}
+
+#[test]
 fn reports_missing_archive_path_with_context() {
     let dir = scratch("missing-archive");
     let missing = dir.join("missing.rar");
@@ -533,7 +618,7 @@ fn prints_usage_for_help_command() {
 #[test]
 fn rejects_unknown_command() {
     let output = rars().arg("wat").output().unwrap();
-    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(2));
     assert!(stderr(&output).contains("unknown command: wat"));
 }
 
@@ -541,7 +626,7 @@ fn rejects_unknown_command() {
 fn rejects_missing_subcommand_arguments() {
     for args in [&["info"][..], &["test"][..], &["x"][..]] {
         let output = rars().args(args).output().unwrap();
-        assert!(!output.status.success(), "args: {args:?}");
+        assert_eq!(output.status.code(), Some(2), "args: {args:?}");
         assert!(stderr(&output).contains("usage:"), "args: {args:?}");
     }
 }

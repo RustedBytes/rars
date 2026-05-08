@@ -2,17 +2,6 @@
 
 ## Active Tasks
 
-- Review pass 3, batch 3: API semantics and CLI contracts.
-  - Resolve `Archive::repair_recovery_to` semantics so RAR2/RAR3 and RAR5
-    return the same kind of repaired data, with tests.
-  - Map CLI failures to useful exit codes instead of flattening everything to
-    1.
-  - Reject non-UTF-8 extraction names before filesystem path conversion, or
-    redesign extraction path handling around `OsStr`.
-  - Tighten output creation against symlink races where the platform supports
-    it.
-  - Detect ambiguous `rars x archive1 archive2` usage instead of treating the
-    final archive path as an output directory.
 - Review pass 3, batch 4: streaming/buffering and structural cleanup.
   - Reconcile RAR5 streaming thresholds and remove or document the large-member
     double-decode preflight.
