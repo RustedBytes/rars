@@ -3770,6 +3770,46 @@ fn parses_rar50_rev5_metadata_without_validating_payload_crc() {
     assert_eq!(meta.data_volumes.len(), 5);
 }
 
+fn update_rev5_header_crc(bytes: &mut [u8]) {
+    let header_size = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+    let header_end = 16 + header_size;
+    let header_crc = rars_format::rar15_40::crc32(&bytes[12..header_end]);
+    bytes[8..12].copy_from_slice(&header_crc.to_le_bytes());
+}
+
+#[test]
+fn parses_rar50_rev5_metadata_with_forward_compatible_trailing_bytes() {
+    let mut bytes = std::fs::read(fixture("multivol_rev.part1.rev")).unwrap();
+    let header_size = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+    let header_end = 16 + header_size;
+    bytes[12..16].copy_from_slice(&(header_size as u32 + 3).to_le_bytes());
+    bytes.splice(header_end..header_end, [0xa5, 0x5a, 0x7e]);
+    update_rev5_header_crc(&mut bytes);
+
+    let meta = Rev5VolumeMeta::parse(&bytes).unwrap();
+
+    assert_eq!(meta.data_count, 5);
+    assert_eq!(meta.data_volumes.len(), 5);
+    assert_eq!(meta.payload_size, 4096);
+}
+
+#[test]
+fn rejects_rar50_rev5_metadata_with_truncated_table() {
+    let mut bytes = std::fs::read(fixture("multivol_rev.part1.rev")).unwrap();
+    let header_size = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+    let header_end = 16 + header_size;
+    bytes[12..16].copy_from_slice(&(header_size as u32 - 1).to_le_bytes());
+    bytes.remove(header_end - 1);
+    update_rev5_header_crc(&mut bytes);
+
+    assert!(matches!(
+        Rev5VolumeMeta::parse(&bytes),
+        Err(Error::InvalidHeader(
+            "RAR 5 REV metadata table size is invalid"
+        ))
+    ));
+}
+
 #[test]
 fn repairs_missing_rar50_data_volume_from_rev5_recovery_volume() {
     let data: Vec<_> = (1..=5)
@@ -3874,10 +3914,7 @@ fn rejects_rar50_rev5_volume_number_outside_recovery_range() {
     let mut bytes = std::fs::read(fixture("multivol_rev.part1.rev")).unwrap();
     bytes[21] = 0;
     bytes[22] = 0;
-    let header_size = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
-    let header_end = 16 + header_size;
-    let header_crc = rars_format::rar15_40::crc32(&bytes[12..header_end]);
-    bytes[8..12].copy_from_slice(&header_crc.to_le_bytes());
+    update_rev5_header_crc(&mut bytes);
 
     assert!(matches!(
         Rev5Volume::parse(&bytes),

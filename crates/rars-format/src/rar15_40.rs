@@ -1608,6 +1608,9 @@ impl EncryptedHeaderCipherCache {
 fn map_rar30_crypto_error(error: Rar30Error) -> Error {
     match error {
         Rar30Error::NonUtf8Password => Error::InvalidHeader("RAR 3.x password is not UTF-8"),
+        Rar30Error::UnalignedInput => {
+            Error::InvalidHeader("RAR 3.x AES input is not block aligned")
+        }
         _ => Error::InvalidHeader("RAR 3.x crypto error"),
     }
 }
@@ -1625,7 +1628,9 @@ fn decrypt_encrypted_header_at(
     let mut cipher = cipher_cache.cipher(password, salt)?;
     let mut first_block = [0u8; 16];
     first_block.copy_from_slice(first_ciphertext);
-    cipher.decrypt_in_place(&mut first_block);
+    cipher
+        .decrypt_in_place(&mut first_block)
+        .map_err(map_rar30_crypto_error)?;
     let head_size = read_u16(&first_block, 5)? as usize;
     if head_size < 7 {
         return Err(Error::InvalidHeader("RAR 1.5 block header is too short"));
@@ -1643,7 +1648,9 @@ fn decrypt_encrypted_header_at(
     let mut header = Vec::with_capacity(encrypted_header_size);
     header.extend_from_slice(&first_block);
     header.extend_from_slice(encrypted_rest);
-    cipher.decrypt_in_place(&mut header[16..]);
+    cipher
+        .decrypt_in_place(&mut header[16..])
+        .map_err(map_rar30_crypto_error)?;
     header.truncate(head_size);
 
     let mut block = parse_block_header(&header, 0)?;
@@ -1680,7 +1687,9 @@ fn read_encrypted_header_at(
     let mut cipher = cipher_cache.cipher(password, salt)?;
     let mut first_block = [0u8; 16];
     first_block.copy_from_slice(&first[8..24]);
-    cipher.decrypt_in_place(&mut first_block);
+    cipher
+        .decrypt_in_place(&mut first_block)
+        .map_err(map_rar30_crypto_error)?;
     let head_size = read_u16(&first_block, 5)? as usize;
     if head_size < 7 {
         return Err(Error::InvalidHeader("RAR 1.5 block header is too short"));
@@ -1696,7 +1705,9 @@ fn read_encrypted_header_at(
     let mut header = Vec::with_capacity(encrypted_header_size);
     header.extend_from_slice(&first_block);
     header.extend_from_slice(&encrypted_rest);
-    cipher.decrypt_in_place(&mut header[16..]);
+    cipher
+        .decrypt_in_place(&mut header[16..])
+        .map_err(map_rar30_crypto_error)?;
     header.truncate(head_size);
 
     let mut block = parse_block_header(&header, 0)?;
@@ -2055,6 +2066,7 @@ fn parse_block_header(input: &[u8], offset: usize) -> Result<BlockHeader> {
             });
         }
     }
+    validate_legacy_auth_block_size(head_type, head_size)?;
 
     Ok(BlockHeader {
         head_crc,
@@ -2110,6 +2122,20 @@ fn should_validate_header_crc(head_type: u8) -> bool {
     // Historical AV/SIGN blocks are documented with inconsistent CRC fields in
     // real archives, so readers must not reject them solely on HEAD_CRC.
     !matches!(head_type, 0x76 | 0x79)
+}
+
+fn validate_legacy_auth_block_size(head_type: u8, head_size: u16) -> Result<()> {
+    let minimum = match head_type {
+        0x76 => 21,
+        0x79 => 182,
+        _ => return Ok(()),
+    };
+    if head_size < minimum {
+        return Err(Error::InvalidHeader(
+            "RAR legacy authenticity block is too short",
+        ));
+    }
+    Ok(())
 }
 
 fn block_total_size(block: &BlockHeader) -> Result<usize> {
@@ -2216,6 +2242,45 @@ mod tests {
     fn test_write_header_crc(out: &mut [u8], start: usize) {
         let crc = (crc32(&out[start + 2..]) & 0xffff) as u16;
         out[start..start + 2].copy_from_slice(&crc.to_le_bytes());
+    }
+
+    fn legacy_auth_block(head_type: u8, head_size: u16) -> Vec<u8> {
+        let mut block = vec![0; head_size as usize];
+        block[2] = head_type;
+        block[5..7].copy_from_slice(&head_size.to_le_bytes());
+        block
+    }
+
+    #[test]
+    fn rejects_too_short_legacy_auth_blocks_even_without_crc_check() {
+        assert!(matches!(
+            parse_block_header(&legacy_auth_block(0x76, 20), 0),
+            Err(Error::InvalidHeader(
+                "RAR legacy authenticity block is too short"
+            ))
+        ));
+        assert!(matches!(
+            parse_block_header(&legacy_auth_block(0x79, 181), 0),
+            Err(Error::InvalidHeader(
+                "RAR legacy authenticity block is too short"
+            ))
+        ));
+    }
+
+    #[test]
+    fn accepts_minimum_legacy_auth_block_sizes_with_bad_crc() {
+        assert_eq!(
+            parse_block_header(&legacy_auth_block(0x76, 21), 0)
+                .unwrap()
+                .head_size,
+            21
+        );
+        assert_eq!(
+            parse_block_header(&legacy_auth_block(0x79, 182), 0)
+                .unwrap()
+                .head_size,
+            182
+        );
     }
 
     #[test]

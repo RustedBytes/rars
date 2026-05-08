@@ -207,10 +207,10 @@ impl PpmdDecoder {
                     index,
                 };
                 if index == 0 {
-                    self.update1_0();
+                    self.update1_0()?;
                 } else {
                     self.prev_success = 0;
-                    self.update1();
+                    self.update1()?;
                 }
                 self.range.normalize(input)?;
                 return Ok(Some(symbol));
@@ -237,7 +237,7 @@ impl PpmdDecoder {
                     context: min,
                     index: 0,
                 };
-                self.update_bin();
+                self.update_bin()?;
                 self.range.normalize(input)?;
                 return Ok(Some(state.symbol));
             }
@@ -270,7 +270,7 @@ impl PpmdDecoder {
                 .filter(|state| mask[state.symbol as usize])
                 .map(|state| state.freq as u32)
                 .sum::<u32>();
-            let (see_ref, esc_freq) = self.make_esc_freq(num_masked);
+            let (see_ref, esc_freq) = self.make_esc_freq(num_masked)?;
             let freq_sum = hi_cnt + esc_freq;
             if freq_sum > self.range.range {
                 return Err(Error::InvalidData("RAR PPMd escape range is invalid"));
@@ -288,7 +288,7 @@ impl PpmdDecoder {
                         self.range.decode(start, freq);
                         self.update_see(see_ref);
                         self.found_state = StateRef { context: mc, index };
-                        self.update2();
+                        self.update2()?;
                         self.range.normalize(input)?;
                         return Ok(Some(symbol));
                     }
@@ -329,10 +329,10 @@ impl PpmdDecoder {
                     index,
                 };
                 if index == 0 {
-                    self.update1_0();
+                    self.update1_0()?;
                 } else {
                     self.prev_success = 0;
-                    self.update1();
+                    self.update1()?;
                 }
                 output.normalize();
                 return Ok(());
@@ -359,7 +359,7 @@ impl PpmdDecoder {
                     context: min,
                     index: 0,
                 };
-                self.update_bin();
+                self.update_bin()?;
                 output.normalize();
                 return Ok(());
             }
@@ -392,7 +392,7 @@ impl PpmdDecoder {
                 .filter(|state| mask[state.symbol as usize])
                 .map(|state| state.freq as u32)
                 .sum::<u32>();
-            let (see_ref, esc_freq) = self.make_esc_freq(num_masked);
+            let (see_ref, esc_freq) = self.make_esc_freq(num_masked)?;
             let freq_sum = hi_cnt + esc_freq;
             let mut start = 0u32;
             let mut found = None;
@@ -411,7 +411,7 @@ impl PpmdDecoder {
                 output.encode(start, freq, freq_sum);
                 self.update_see(see_ref);
                 self.found_state = StateRef { context: mc, index };
-                self.update2();
+                self.update2()?;
                 output.normalize();
                 return Ok(());
             }
@@ -491,16 +491,24 @@ impl PpmdDecoder {
         Ok((row, col))
     }
 
-    fn make_esc_freq(&mut self, num_masked: usize) -> (SeeRef, u32) {
+    fn make_esc_freq(&mut self, num_masked: usize) -> Result<(SeeRef, u32)> {
         let mc = self.min_context;
         let num_stats = self.contexts[mc].states.len();
         if num_stats == 256 {
-            return (SeeRef::Dummy, 1);
+            return Ok((SeeRef::Dummy, 1));
         }
-        let non_masked = num_stats - num_masked;
+        if num_masked >= num_stats {
+            return Err(Error::InvalidData("RAR PPMd masked-state count is invalid"));
+        }
+        let non_masked = num_stats
+            .checked_sub(num_masked)
+            .ok_or(Error::InvalidData("RAR PPMd masked-state count is invalid"))?;
         let suffix = self.contexts[mc].suffix.unwrap_or(mc);
         let suffix_stats = self.contexts[suffix].states.len();
-        let col = (non_masked < suffix_stats - num_stats) as usize
+        let suffix_delta = suffix_stats
+            .checked_sub(num_stats)
+            .ok_or(Error::InvalidData("RAR PPMd suffix-state count is invalid"))?;
+        let col = (non_masked < suffix_delta) as usize
             + 2 * ((self.contexts[mc].summ_freq as usize) < 11 * num_stats) as usize
             + 4 * (num_masked > non_masked) as usize
             + self.hi_bits_flag as usize;
@@ -509,7 +517,7 @@ impl PpmdDecoder {
         let summ = see.summ;
         let r = (summ >> see.shift) as u32;
         see.summ = summ.wrapping_sub(r as u16);
-        (SeeRef::Table(row, col), r + u32::from(r == 0))
+        Ok((SeeRef::Table(row, col), r + u32::from(r == 0)))
     }
 
     fn update_see(&mut self, see_ref: SeeRef) {
@@ -535,7 +543,7 @@ impl PpmdDecoder {
         see.summ = see.summ.wrapping_add(value as u16);
     }
 
-    fn update1_0(&mut self) {
+    fn update1_0(&mut self) -> Result<()> {
         let fs = self.found_state;
         let freq = self.state(fs).freq as u32;
         let summ_freq = self.contexts[fs.context].summ_freq as u32;
@@ -546,10 +554,10 @@ impl PpmdDecoder {
         if freq + 4 > MAX_FREQ {
             self.rescale();
         }
-        self.next_context();
+        self.next_context()
     }
 
-    fn update1(&mut self) {
+    fn update1(&mut self) -> Result<()> {
         let fs = self.found_state;
         let freq = self.state(fs).freq as u32 + 4;
         self.contexts[fs.context].summ_freq = self.contexts[fs.context].summ_freq.wrapping_add(4);
@@ -566,10 +574,10 @@ impl PpmdDecoder {
                 self.rescale();
             }
         }
-        self.next_context();
+        self.next_context()
     }
 
-    fn update2(&mut self) {
+    fn update2(&mut self) -> Result<()> {
         let fs = self.found_state;
         let freq = self.state(fs).freq as u32 + 4;
         self.run_length = self.init_rl;
@@ -578,31 +586,31 @@ impl PpmdDecoder {
         if freq > MAX_FREQ {
             self.rescale();
         }
-        self.update_model();
+        self.update_model()
     }
 
-    fn update_bin(&mut self) {
+    fn update_bin(&mut self) -> Result<()> {
         let fs = self.found_state;
         let freq = self.state(fs).freq;
         self.state_mut(fs).freq = freq.wrapping_add(u8::from(freq < 128));
         self.prev_success = 1;
         self.run_length += 1;
-        self.next_context();
+        self.next_context()
     }
 
-    fn next_context(&mut self) {
+    fn next_context(&mut self) -> Result<()> {
         let successor = self.state(self.found_state).successor;
         if let Successor::Context(context) = successor {
             if self.order_fall == 0 {
                 self.max_context = context;
                 self.min_context = context;
-                return;
+                return Ok(());
             }
         }
-        self.update_model();
+        self.update_model()
     }
 
-    fn update_model(&mut self) {
+    fn update_model(&mut self) -> Result<()> {
         let fs = self.state(self.found_state);
         let found_symbol = fs.symbol;
         if fs.freq < (MAX_FREQ / 4) as u8 && self.contexts[self.min_context].suffix.is_some() {
@@ -635,12 +643,12 @@ impl PpmdDecoder {
         if self.order_fall == 0 {
             let Some(context) = self.create_successors() else {
                 self.init_model(self.max_order);
-                return;
+                return Ok(());
             };
             self.max_context = context;
             self.min_context = context;
             self.state_mut(self.found_state).successor = Successor::Context(context);
-            return;
+            return Ok(());
         }
 
         self.text.push(found_symbol);
@@ -650,7 +658,7 @@ impl PpmdDecoder {
             if matches!(min_successor, Successor::Raw(_)) {
                 let Some(context) = self.create_successors() else {
                     self.init_model(self.max_order);
-                    return;
+                    return Ok(());
                 };
                 min_successor = Successor::Context(context);
             }
@@ -671,11 +679,16 @@ impl PpmdDecoder {
         };
         self.max_context = self.min_context;
         if c == mc {
-            return;
+            return Ok(());
         }
 
         let ns = self.contexts[mc].states.len() as u32;
-        let s0 = self.contexts[mc].summ_freq as u32 - ns - (fs.freq as u32 - 1);
+        let s0 = self.contexts[mc]
+            .summ_freq
+            .checked_sub(ns as u16)
+            .map(u32::from)
+            .and_then(|value| value.checked_sub(fs.freq as u32 - 1))
+            .ok_or(Error::InvalidData("RAR PPMd model frequency is invalid"))?;
         while c != mc {
             let ns1 = self.contexts[c].states.len() as u32;
             let mut sum;
@@ -693,8 +706,16 @@ impl PpmdDecoder {
                 sum = freq as u32 + self.init_esc + u32::from(ns > 3);
             }
 
-            let mut cf = 2 * (sum + 6) * fs.freq as u32;
-            let sf = s0 + sum;
+            let mut cf = (sum + 6)
+                .checked_mul(2)
+                .and_then(|value| value.checked_mul(fs.freq as u32))
+                .ok_or(Error::InvalidData("RAR PPMd model frequency overflows"))?;
+            let sf = s0
+                .checked_add(sum)
+                .ok_or(Error::InvalidData("RAR PPMd model frequency overflows"))?;
+            if sf == 0 {
+                return Err(Error::InvalidData("RAR PPMd model frequency is invalid"));
+            }
             if cf < 6 * sf {
                 cf = 1 + u32::from(cf > sf) + u32::from(cf >= 4 * sf);
                 sum += 3;
@@ -714,9 +735,11 @@ impl PpmdDecoder {
                     max_successor
                 },
             });
-            self.contexts[c].summ_freq = sum as u16;
+            self.contexts[c].summ_freq = u16::try_from(sum)
+                .map_err(|_| Error::InvalidData("RAR PPMd model frequency overflows"))?;
             c = self.contexts[c].suffix.unwrap_or(mc);
         }
+        Ok(())
     }
 
     fn create_successors(&mut self) -> Option<usize> {
@@ -1162,5 +1185,60 @@ mod tests {
             }),
             None
         );
+    }
+
+    #[test]
+    fn make_esc_freq_rejects_invalid_masked_state_count() {
+        let mut decoder = PpmdDecoder::new();
+        decoder.init_model(4);
+        decoder.contexts.push(Context {
+            states: vec![
+                State {
+                    symbol: b'a',
+                    freq: 1,
+                    successor: Successor::None,
+                },
+                State {
+                    symbol: b'b',
+                    freq: 1,
+                    successor: Successor::None,
+                },
+            ],
+            summ_freq: 2,
+            suffix: Some(0),
+        });
+        decoder.min_context = 1;
+
+        assert!(matches!(
+            decoder.make_esc_freq(2),
+            Err(Error::InvalidData("RAR PPMd masked-state count is invalid"))
+        ));
+    }
+
+    #[test]
+    fn update_model_rejects_invalid_frequency_arithmetic() {
+        let mut decoder = PpmdDecoder::new();
+        decoder.init_model(4);
+        decoder.contexts.push(Context {
+            states: vec![State {
+                symbol: b'a',
+                freq: 10,
+                successor: Successor::None,
+            }],
+            summ_freq: 1,
+            suffix: Some(0),
+        });
+        decoder.min_context = 1;
+        decoder.max_context = 0;
+        decoder.found_state = StateRef {
+            context: 1,
+            index: 0,
+        };
+        decoder.order_fall = 1;
+
+        assert!(matches!(
+            decoder.update_model(),
+            Err(Error::InvalidData("RAR PPMd model frequency is invalid"))
+        ));
     }
 }

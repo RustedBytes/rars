@@ -1711,7 +1711,7 @@ fn arm_decode(data: &mut [u8], file_offset: u32) {
             let mut offset = u32::from(data[pos])
                 | (u32::from(data[pos + 1]) << 8)
                 | (u32::from(data[pos + 2]) << 16);
-            offset = offset.wrapping_sub((file_offset + pos as u32) / 4);
+            offset = offset.wrapping_sub(file_offset.wrapping_add(pos as u32) / 4);
             data[pos] = offset as u8;
             data[pos + 1] = (offset >> 8) as u8;
             data[pos + 2] = (offset >> 16) as u8;
@@ -1727,7 +1727,7 @@ fn arm_encode(data: &mut [u8], file_offset: u32) {
             let mut offset = u32::from(data[pos])
                 | (u32::from(data[pos + 1]) << 8)
                 | (u32::from(data[pos + 2]) << 16);
-            offset = offset.wrapping_add((file_offset + pos as u32) / 4);
+            offset = offset.wrapping_add(file_offset.wrapping_add(pos as u32) / 4);
             data[pos] = offset as u8;
             data[pos + 1] = (offset >> 8) as u8;
             data[pos + 2] = (offset >> 16) as u8;
@@ -2407,6 +2407,18 @@ mod tests {
 
         assert_eq!(output, data);
         assert_ne!(lengths.main[256], 0);
+    }
+
+    #[test]
+    fn arm_filter_uses_wrapping_address_arithmetic_at_u32_boundary() {
+        let original = [0x04, 0x00, 0x00, 0xeb, 0x08, 0x00, 0x00, 0xeb];
+        let mut filtered = original;
+
+        arm_encode(&mut filtered, u32::MAX - 3);
+        assert_ne!(filtered, original);
+        arm_decode(&mut filtered, u32::MAX - 3);
+
+        assert_eq!(filtered, original);
     }
 
     #[test]

@@ -9,6 +9,7 @@ const HASH_ROUNDS: u32 = 0x40000;
 #[non_exhaustive]
 pub enum Error {
     NonUtf8Password,
+    UnalignedInput,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -28,16 +29,24 @@ impl Rar30Cipher {
         })
     }
 
-    pub fn decrypt_in_place(&mut self, data: &mut [u8]) {
+    pub fn decrypt_in_place(&mut self, data: &mut [u8]) -> Result<()> {
+        if !data.len().is_multiple_of(16) {
+            return Err(Error::UnalignedInput);
+        }
         for block in data.chunks_exact_mut(16) {
             self.decrypt_block(block);
         }
+        Ok(())
     }
 
-    pub fn encrypt_in_place(&mut self, data: &mut [u8]) {
+    pub fn encrypt_in_place(&mut self, data: &mut [u8]) -> Result<()> {
+        if !data.len().is_multiple_of(16) {
+            return Err(Error::UnalignedInput);
+        }
         for block in data.chunks_exact_mut(16) {
             self.encrypt_block(block);
         }
+        Ok(())
     }
 
     fn encrypt_block(&mut self, block: &mut [u8]) {
@@ -285,7 +294,8 @@ mod tests {
 
         Rar30Cipher::new(b"password", salt)
             .unwrap()
-            .encrypt_in_place(&mut data);
+            .encrypt_in_place(&mut data)
+            .unwrap();
         assert_eq!(
             data,
             [
@@ -297,7 +307,8 @@ mod tests {
 
         Rar30Cipher::new(b"password", salt)
             .unwrap()
-            .decrypt_in_place(&mut data);
+            .decrypt_in_place(&mut data)
+            .unwrap();
         assert_eq!(data, plain);
     }
 
@@ -313,13 +324,33 @@ mod tests {
 
         Rar30Cipher::new(password, salt)
             .unwrap()
-            .encrypt_in_place(&mut data);
+            .encrypt_in_place(&mut data)
+            .unwrap();
         assert_ne!(data, plain);
 
         Rar30Cipher::new(password, salt)
             .unwrap()
-            .decrypt_in_place(&mut data);
+            .decrypt_in_place(&mut data)
+            .unwrap();
         assert_eq!(data, plain);
+    }
+
+    #[test]
+    fn rar30_aes_rejects_partial_tail() {
+        let mut data = *b"partial block!!";
+
+        assert_eq!(
+            Rar30Cipher::new(b"password", None)
+                .unwrap()
+                .encrypt_in_place(&mut data),
+            Err(Error::UnalignedInput)
+        );
+        assert_eq!(
+            Rar30Cipher::new(b"password", None)
+                .unwrap()
+                .decrypt_in_place(&mut data),
+            Err(Error::UnalignedInput)
+        );
     }
 
     #[test]

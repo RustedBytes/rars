@@ -593,11 +593,10 @@ impl<R: Read> DecryptingReader<R> {
                 SplitCipher::Rar20(cipher) => cipher
                     .decrypt_in_place(&mut data)
                     .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?,
-                SplitCipher::Rar30(cipher) => {
-                    for block in data.chunks_exact_mut(16) {
-                        cipher.decrypt_in_place(block);
-                    }
-                }
+                SplitCipher::Rar30(cipher) => cipher
+                    .decrypt_in_place(&mut data)
+                    .map_err(super::map_rar30_crypto_error)
+                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?,
             }
             self.decrypted = data;
         } else if self.eof && !self.encrypted_block.is_empty() {
@@ -707,7 +706,8 @@ mod tests {
         let mut encrypted = plain;
         Rar30Cipher::new(b"pw", salt)
             .unwrap()
-            .encrypt_in_place(&mut encrypted);
+            .encrypt_in_place(&mut encrypted)
+            .unwrap();
         let mut reader = DecryptingReader::new(Cursor::new(encrypted), 29, b"pw", salt).unwrap();
         let mut out = Vec::new();
         reader.read_to_end(&mut out).unwrap();

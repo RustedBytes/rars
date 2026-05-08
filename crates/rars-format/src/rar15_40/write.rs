@@ -844,7 +844,8 @@ fn encrypt_split_packed_data(
             data.resize(padded_len, 0);
             Rar30Cipher::new(password, Some(salt))
                 .map_err(super::map_rar30_crypto_error)?
-                .encrypt_in_place(data);
+                .encrypt_in_place(data)
+                .map_err(super::map_rar30_crypto_error)?;
             Ok(Some(salt))
         }
         _ => Err(Error::UnsupportedVersion(target)),
@@ -914,7 +915,8 @@ fn encrypt_packed_data_for_writer(
             data.resize(padded_len, 0);
             Rar30Cipher::new(password, Some(salt))
                 .map_err(super::map_rar30_crypto_error)?
-                .encrypt_in_place(data);
+                .encrypt_in_place(data)
+                .map_err(super::map_rar30_crypto_error)?;
             Ok(Some(salt))
         }
         _ => Err(Error::UnsupportedFeature {
@@ -1177,7 +1179,8 @@ fn write_encrypted_header_and_data(
     encrypted_header.resize(encrypted_size, 0);
     Rar30Cipher::new(password, Some(salt))
         .map_err(super::map_rar30_crypto_error)?
-        .encrypt_in_place(&mut encrypted_header);
+        .encrypt_in_place(&mut encrypted_header)
+        .map_err(super::map_rar30_crypto_error)?;
     out.extend_from_slice(&salt);
     out.extend_from_slice(&encrypted_header);
     out.extend_from_slice(data);

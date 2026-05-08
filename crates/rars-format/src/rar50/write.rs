@@ -2110,7 +2110,9 @@ fn encrypted_payload(
         .ok_or(Error::InvalidHeader("RAR 5 encrypted data size overflows"))?
         & !15;
     encrypted_data.resize(padded_len, 0);
-    Rar50Cipher::new(keys.key, iv).encrypt_in_place(&mut encrypted_data);
+    Rar50Cipher::new(keys.key, iv)
+        .encrypt_in_place(&mut encrypted_data)
+        .map_err(map_rar50_crypto_error)?;
 
     Ok(EncryptedStoredPayload {
         data: encrypted_data,
@@ -2666,7 +2668,9 @@ fn encrypted_header_block(
     ))? & !15;
     let mut encrypted_header = header;
     encrypted_header.resize(padded_len, 0);
-    Rar50Cipher::new(keys.key, iv).encrypt_in_place(&mut encrypted_header);
+    Rar50Cipher::new(keys.key, iv)
+        .encrypt_in_place(&mut encrypted_header)
+        .map_err(map_rar50_crypto_error)?;
     let mut out = Vec::with_capacity(16 + encrypted_header.len() + data.len());
     out.extend_from_slice(&iv);
     out.extend_from_slice(&encrypted_header);
@@ -2747,6 +2751,9 @@ fn map_rar50_crypto_error(error: rars_crypto::rar50::Error) -> Error {
             feature: "RAR 5 KDF count",
         },
         rars_crypto::rar50::Error::BadPassword => Error::WrongPasswordOrCorruptData,
+        rars_crypto::rar50::Error::UnalignedInput => {
+            Error::InvalidHeader("RAR 5 AES input is not block aligned")
+        }
         _ => Error::InvalidHeader("RAR 5 crypto error"),
     }
 }

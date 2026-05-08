@@ -2,17 +2,6 @@
 
 ## Active Tasks
 
-- Review pass 3, batch 2: hostile-input parser and crypto hardening.
-  - Validate RAR30/RAR50 cipher input alignment consistently instead of
-    dropping partial blocks.
-  - Make RAR50 password checks constant-time across CRC/HMAC comparison.
-  - Harden RAR5 REV metadata parsing: safe table reads, tolerate trailing
-    forward-compatible data, and reject truncated tables.
-  - Add minimum-size validation for legacy AV/SIGN blocks even when their
-    header CRC is skipped.
-  - Add defensive PPMd checks around masked-state escape frequencies and
-    `update_model` arithmetic.
-  - Use wrapping ARM filter address arithmetic and add boundary tests.
 - Review pass 3, batch 3: API semantics and CLI contracts.
   - Resolve `Archive::repair_recovery_to` semantics so RAR2/RAR3 and RAR5
     return the same kind of repaired data, with tests.

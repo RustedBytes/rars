@@ -11,6 +11,7 @@ type HmacSha256 = Hmac<Sha256>;
 pub enum Error {
     KdfCountTooLarge,
     BadPassword,
+    UnalignedInput,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -63,9 +64,9 @@ impl Rar50Keys {
 
     pub fn check_password(&self, stored: &[u8; 12]) -> Result<()> {
         let checksum = sha256(&stored[..8]);
-        if !constant_time_eq(&checksum[..4], &stored[8..12])
-            || !constant_time_eq(&self.password_check, &stored[..8])
-        {
+        let checksum_matches = constant_time_eq(&checksum[..4], &stored[8..12]);
+        let password_matches = constant_time_eq(&self.password_check, &stored[..8]);
+        if !(checksum_matches & password_matches) {
             return Err(Error::BadPassword);
         }
         Ok(())
@@ -114,16 +115,24 @@ impl Rar50Cipher {
         }
     }
 
-    pub fn decrypt_in_place(&mut self, data: &mut [u8]) {
+    pub fn decrypt_in_place(&mut self, data: &mut [u8]) -> Result<()> {
+        if !data.len().is_multiple_of(16) {
+            return Err(Error::UnalignedInput);
+        }
         for block in data.chunks_exact_mut(16) {
             self.decrypt_block(block);
         }
+        Ok(())
     }
 
-    pub fn encrypt_in_place(&mut self, data: &mut [u8]) {
+    pub fn encrypt_in_place(&mut self, data: &mut [u8]) -> Result<()> {
+        if !data.len().is_multiple_of(16) {
+            return Err(Error::UnalignedInput);
+        }
         for block in data.chunks_exact_mut(16) {
             self.encrypt_block(block);
         }
+        Ok(())
     }
 
     fn encrypt_block(&mut self, block: &mut [u8]) {
@@ -191,6 +200,40 @@ mod tests {
         let mut record = keys.password_check_record();
         record[11] ^= 0x01;
         assert_eq!(keys.check_password(&record), Err(Error::BadPassword));
+    }
+
+    #[test]
+    fn rar50_aes_encrypt_decrypt_round_trips_blocks() {
+        let key = [9u8; 32];
+        let iv = [5u8; 16];
+        let mut data = *b"0123456789abcdefRAR5 block two!!";
+        let plain = data;
+
+        Rar50Cipher::new(key, iv)
+            .encrypt_in_place(&mut data)
+            .unwrap();
+        assert_ne!(data, plain);
+
+        Rar50Cipher::new(key, iv)
+            .decrypt_in_place(&mut data)
+            .unwrap();
+        assert_eq!(data, plain);
+    }
+
+    #[test]
+    fn rar50_aes_rejects_partial_tail() {
+        let key = [9u8; 32];
+        let iv = [5u8; 16];
+        let mut data = *b"partial block!!";
+
+        assert_eq!(
+            Rar50Cipher::new(key, iv).encrypt_in_place(&mut data),
+            Err(Error::UnalignedInput)
+        );
+        assert_eq!(
+            Rar50Cipher::new(key, iv).decrypt_in_place(&mut data),
+            Err(Error::UnalignedInput)
+        );
     }
 
     #[test]

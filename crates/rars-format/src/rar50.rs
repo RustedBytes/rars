@@ -709,7 +709,13 @@ impl Rev5VolumeMeta {
         }
 
         let expected_table_len = data_count as usize * 12;
-        if body.len() != 11 + expected_table_len {
+        let expected_table_end =
+            11usize
+                .checked_add(expected_table_len)
+                .ok_or(Error::InvalidHeader(
+                    "RAR 5 REV metadata table size overflows",
+                ))?;
+        if body.len() < expected_table_end {
             return Err(Error::InvalidHeader(
                 "RAR 5 REV metadata table size is invalid",
             ));
@@ -1145,6 +1151,9 @@ fn map_rar50_crypto_error(error: rars_crypto::rar50::Error) -> Error {
             feature: "RAR 5 KDF count",
         },
         rars_crypto::rar50::Error::BadPassword => Error::WrongPasswordOrCorruptData,
+        rars_crypto::rar50::Error::UnalignedInput => {
+            Error::InvalidHeader("RAR 5 AES input is not block aligned")
+        }
         _ => Error::InvalidHeader("RAR 5 crypto error"),
     }
 }
@@ -1337,7 +1346,9 @@ fn parse_encrypted_block_header_bytes(
     let mut iv = [0; 16];
     iv.copy_from_slice(&first[..16]);
     let mut first_plain = first[16..32].to_vec();
-    Rar50Cipher::new(keys.key, iv).decrypt_in_place(&mut first_plain);
+    Rar50Cipher::new(keys.key, iv)
+        .decrypt_in_place(&mut first_plain)
+        .map_err(map_rar50_crypto_error)?;
     let header_crc = read_u32(&first_plain, 0)?;
     let (header_size, header_size_len) = read_vint_at(&first_plain, 4, first_plain.len())?;
     let header_body_len = usize_from_u64(header_size, "RAR 5 header size overflows usize")?;
@@ -1358,7 +1369,9 @@ fn parse_encrypted_block_header_bytes(
         .get(offset + 16..offset + disk_header_len)
         .ok_or(Error::TooShort)?;
     let mut header = encrypted.to_vec();
-    Rar50Cipher::new(keys.key, iv).decrypt_in_place(&mut header);
+    Rar50Cipher::new(keys.key, iv)
+        .decrypt_in_place(&mut header)
+        .map_err(map_rar50_crypto_error)?;
     header.truncate(header_total);
 
     parse_block_header_image(
@@ -1430,7 +1443,9 @@ fn read_encrypted_block_header_at(
     let mut iv = [0; 16];
     iv.copy_from_slice(&first[..16]);
     let mut first_plain = first[16..32].to_vec();
-    Rar50Cipher::new(keys.key, iv).decrypt_in_place(&mut first_plain);
+    Rar50Cipher::new(keys.key, iv)
+        .decrypt_in_place(&mut first_plain)
+        .map_err(map_rar50_crypto_error)?;
     let header_crc = read_u32(&first_plain, 0)?;
     let (header_size, header_size_len) = read_vint_at(&first_plain, 4, first_plain.len())?;
     let header_body_len = usize_from_u64(header_size, "RAR 5 header size overflows usize")?;
@@ -1449,7 +1464,9 @@ fn read_encrypted_block_header_at(
     }
     let encrypted = read_exact_at(file, sfx_offset + offset + 16, encrypted_len)?;
     let mut header = encrypted;
-    Rar50Cipher::new(keys.key, iv).decrypt_in_place(&mut header);
+    Rar50Cipher::new(keys.key, iv)
+        .decrypt_in_place(&mut header)
+        .map_err(map_rar50_crypto_error)?;
     header.truncate(header_total);
 
     parse_block_header_image(

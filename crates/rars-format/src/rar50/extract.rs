@@ -374,6 +374,9 @@ fn map_rar50_crypto_error(error: rars_crypto::rar50::Error) -> Error {
             feature: "RAR 5 KDF count",
         },
         rars_crypto::rar50::Error::BadPassword => Error::WrongPasswordOrCorruptData,
+        rars_crypto::rar50::Error::UnalignedInput => {
+            Error::InvalidHeader("RAR 5 AES input is not block aligned")
+        }
         _ => Error::InvalidHeader("RAR 5 crypto error"),
     }
 }
@@ -942,7 +945,10 @@ impl<R: Read> Rar50DecryptingReader<R> {
             read += count;
         }
         self.buffer = encrypted;
-        self.cipher.decrypt_in_place(&mut self.buffer);
+        self.cipher
+            .decrypt_in_place(&mut self.buffer)
+            .map_err(map_rar50_crypto_error)
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
         self.pos = 0;
         self.len = self.buffer.len();
         Ok(true)
@@ -1090,7 +1096,9 @@ mod tests {
         let iv = [4u8; 16];
         let plain = *b"0123456789abcdefRAR5 block two!!";
         let mut encrypted = plain;
-        Rar50Cipher::new(key, iv).encrypt_in_place(&mut encrypted);
+        Rar50Cipher::new(key, iv)
+            .encrypt_in_place(&mut encrypted)
+            .unwrap();
         let mut reader = Rar50DecryptingReader::new(Cursor::new(encrypted), key, iv);
         let mut out = Vec::new();
         let mut buf = [0u8; 5];

@@ -225,6 +225,7 @@ fn display_rar50_crypto_error(error: &rars_crypto::rar50::Error) -> &'static str
     match error {
         rars_crypto::rar50::Error::KdfCountTooLarge => "RAR 5 KDF count is too large",
         rars_crypto::rar50::Error::BadPassword => "wrong password or corrupt encrypted data",
+        rars_crypto::rar50::Error::UnalignedInput => "RAR 5 AES input is not block aligned",
         _ => "RAR 5 crypto error",
     }
 }
