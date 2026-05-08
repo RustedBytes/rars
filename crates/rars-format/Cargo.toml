@@ -5,15 +5,18 @@ description = "RAR archive format parser and writer implementation used by rars.
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-readme.workspace = true
+readme = false
 homepage.workspace = true
 repository.workspace = true
 documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[package.metadata.docs.rs]
+all-features = true
+
 [dependencies]
-getrandom = "0.2"
-rars-codec = { version = "0.1.0", path = "../rars-codec" }
-rars-crypto = { version = "0.1.0", path = "../rars-crypto" }
-rars-recovery = { version = "0.1.0", path = "../rars-recovery" }
+getrandom.workspace = true
+rars-codec.workspace = true
+rars-crypto.workspace = true
+rars-recovery.workspace = true

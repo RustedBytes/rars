@@ -12,5 +12,8 @@ documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[package.metadata.docs.rs]
+all-features = true
+
 [dependencies]
-rars-format = { version = "0.1.0", path = "../rars-format" }
+rars-format.workspace = true

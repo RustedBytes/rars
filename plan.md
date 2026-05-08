@@ -2,6 +2,14 @@
 
 ## Active Tasks
 
+- Fix facade recovery semantics so `Archive::repair_recovery_to` returns the
+  same kind of output for RAR 2.x/3.x recovery records and RAR5 recovery
+  records. Add tests that prove callers get a full repaired archive, not a
+  header-only repair fragment.
+- Rework RAR5 large compressed-member extraction: align the streaming
+  thresholds, replace string-matched filter fallback with typed codec state,
+  avoid double-decoding large members, and keep the external large fixture as
+  coverage for the genuine streaming path.
 - Add adversarial PPMd fixtures as corpus bugs appear.
 - Add real RAR-created RAR5 filter fixtures for E8, E8E9, Delta, and ARM
   reader coverage.
@@ -27,6 +35,10 @@
 
 ## Hardening
 
+- Harden PPMd hostile-state arithmetic paths (`make_esc_freq`,
+  `update_model`) with focused malformed-stream regression tests.
+- Tighten RAR5 REV metadata parsing so table reads use checked slice helpers
+  and forward-compatible trailing bytes are accepted deliberately.
 - Reduce remaining whole-member codec buffers for encrypted RAR15/RAR20/RAR29
   entries and compressed split-volume decrypt-before-chain paths.
 - Add fuzz targets for `Archive::parse`, `Unpack29::decode_member`, PPMd decode,

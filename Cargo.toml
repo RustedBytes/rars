@@ -19,3 +19,16 @@ repository = "https://github.com/bitplane/rars"
 documentation = "https://docs.rs/rars"
 keywords = ["rar", "archive", "compression"]
 categories = ["compression"]
+
+[workspace.dependencies]
+aes = "0.8"
+getrandom = "0.2"
+hmac = "0.12"
+rars = { version = "0.1.0", path = "crates/rars" }
+rars-codec = { version = "0.1.0", path = "crates/rars-codec" }
+rars-crypto = { version = "0.1.0", path = "crates/rars-crypto" }
+rars-format = { version = "0.1.0", path = "crates/rars-format" }
+rars-recovery = { version = "0.1.0", path = "crates/rars-recovery" }
+rpassword = "7"
+sha1 = "0.10"
+sha2 = "0.10"

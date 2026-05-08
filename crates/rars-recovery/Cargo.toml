@@ -5,11 +5,14 @@ description = "RAR recovery record planning and repair primitives."
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-readme.workspace = true
+readme = false
 homepage.workspace = true
 repository.workspace = true
 documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
 
 [dependencies]

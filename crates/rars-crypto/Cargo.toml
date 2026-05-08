@@ -5,15 +5,18 @@ description = "RAR legacy and modern archive encryption primitives."
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-readme.workspace = true
+readme = false
 homepage.workspace = true
 repository.workspace = true
 documentation.workspace = true
 keywords.workspace = true
 categories = ["cryptography"]
 
+[package.metadata.docs.rs]
+all-features = true
+
 [dependencies]
-aes = "0.8"
-hmac = "0.12"
-sha1 = "0.10"
-sha2 = "0.10"
+aes.workspace = true
+hmac.workspace = true
+sha1.workspace = true
+sha2.workspace = true

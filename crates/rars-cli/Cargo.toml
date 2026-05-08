@@ -12,10 +12,13 @@ documentation.workspace = true
 keywords.workspace = true
 categories = ["command-line-utilities", "compression"]
 
+[package.metadata.docs.rs]
+all-features = true
+
 [[bin]]
 name = "rars"
 path = "src/main.rs"
 
 [dependencies]
-rars = { version = "0.1.0", path = "../rars" }
-rpassword = "7"
+rars.workspace = true
+rpassword.workspace = true

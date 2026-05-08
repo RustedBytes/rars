@@ -45,7 +45,7 @@ export RUSTFLAGS="${RUSTFLAGS:-} -Cinstrument-coverage"
 export LLVM_PROFILE_FILE="$profraw_dir/%p-%m.profraw"
 
 test_status=0
-cargo test --workspace --all-targets || test_status=$?
+cargo test --workspace --all-targets --no-fail-fast || test_status=$?
 
 shopt -s nullglob
 profraw_files=("$profraw_dir"/*.profraw)
