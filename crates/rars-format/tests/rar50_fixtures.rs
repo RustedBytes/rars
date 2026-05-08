@@ -4078,3 +4078,66 @@ fn rejects_corrupt_rar50_stored_payload_checksum_when_crc32_is_present() {
         }) if name == b"hello.txt" && matches!(*source, Error::Crc32Mismatch { .. })
     ));
 }
+
+#[test]
+fn parse_owned_takes_input_buffer_by_value() {
+    let bytes = fs::read(fixture("empty_file.rar")).unwrap();
+    let archive = Archive::parse_owned(bytes.clone()).unwrap();
+    assert_eq!(archive.files().count(), 1);
+
+    let with_options = Archive::parse_owned_with_options(
+        bytes.clone(),
+        ArchiveReadOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(with_options.files().count(), 1);
+
+    let no_password = Archive::parse_owned_with_password(bytes, None).unwrap();
+    assert_eq!(no_password.files().count(), 1);
+}
+
+#[test]
+fn parse_owned_with_password_unlocks_header_encrypted_archive() {
+    let bytes = fs::read(fixture("header_encrypted.rar")).unwrap();
+
+    assert!(matches!(
+        Archive::parse_owned(bytes.clone()),
+        Err(Error::NeedPassword)
+    ));
+
+    let archive =
+        Archive::parse_owned_with_password(bytes.clone(), Some(b"password")).unwrap();
+    assert_eq!(archive.files().next().unwrap().name, b"hello.txt");
+
+    let with_options = Archive::parse_owned_with_options(
+        bytes,
+        ArchiveReadOptions::with_password(b"password"),
+    )
+    .unwrap();
+    assert_eq!(with_options.files().next().unwrap().name, b"hello.txt");
+}
+
+#[test]
+fn parse_with_options_accepts_borrowed_bytes_and_options() {
+    let bytes = fs::read(fixture("header_encrypted.rar")).unwrap();
+    let archive = Archive::parse_with_options(
+        &bytes,
+        ArchiveReadOptions::with_password(b"password"),
+    )
+    .unwrap();
+    assert_eq!(archive.files().next().unwrap().name, b"hello.txt");
+}
+
+#[test]
+fn parse_path_family_accepts_os_string_paths() {
+    let path: std::ffi::OsString = fixture("empty_file.rar").into_os_string();
+    let archive = Archive::parse_path(path.clone()).unwrap();
+    assert_eq!(archive.files().count(), 1);
+
+    let with_options =
+        Archive::parse_path_with_options(path.clone(), ArchiveReadOptions::default()).unwrap();
+    assert_eq!(with_options.files().count(), 1);
+
+    let no_password = Archive::parse_path_with_password(path, None).unwrap();
+    assert_eq!(no_password.files().count(), 1);
+}

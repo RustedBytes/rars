@@ -2432,4 +2432,179 @@ mod tests {
 
         assert!(matches!(Archive::parse(&archive), Err(Error::TooShort)));
     }
+
+    fn block_header_with(flags: u16) -> BlockHeader {
+        BlockHeader {
+            head_crc: 0,
+            head_type: FILE_HEAD,
+            flags,
+            head_size: 32,
+            add_size: None,
+            offset: 0,
+        }
+    }
+
+    fn file_header_with(flags: u16) -> FileHeader {
+        FileHeader {
+            block: block_header_with(flags),
+            pack_size: 0,
+            unp_size: 0,
+            host_os: 0,
+            file_crc: 0,
+            file_time: 0,
+            unp_ver: 29,
+            method: 0x30,
+            name: b"entry".to_vec(),
+            attr: 0,
+            salt: None,
+            file_comment: Vec::new(),
+            ext_time: Vec::new(),
+            packed_range: 0..0,
+        }
+    }
+
+    fn main_header_with(flags: u16) -> MainHeader {
+        MainHeader {
+            head_crc: 0,
+            flags,
+            head_size: 13,
+            reserved1: 0,
+            reserved2: 0,
+            encrypt_version: None,
+        }
+    }
+
+    #[test]
+    fn main_header_predicates_match_each_flag_bit() {
+        let cases = [
+            (MHD_VOLUME, MainHeader::is_volume as fn(&MainHeader) -> bool),
+            (MHD_COMMENT, MainHeader::has_archive_comment),
+            (MHD_SOLID, MainHeader::is_solid),
+            (MHD_NEWNUMBERING, MainHeader::uses_new_numbering),
+            (MHD_PROTECT, MainHeader::has_recovery_record),
+            (MHD_PASSWORD, MainHeader::has_encrypted_headers),
+            (MHD_FIRSTVOLUME, MainHeader::is_first_volume),
+        ];
+        let zero = main_header_with(0);
+        for (bit, predicate) in cases {
+            assert!(!predicate(&zero), "expected false when bit {bit:#x} is clear");
+            let one = main_header_with(bit);
+            assert!(predicate(&one), "expected true when bit {bit:#x} is set");
+        }
+    }
+
+    #[test]
+    fn file_header_flag_predicates_track_each_bit() {
+        let cases = [
+            (
+                FHD_SPLIT_BEFORE,
+                FileHeader::is_split_before as fn(&FileHeader) -> bool,
+            ),
+            (FHD_SPLIT_AFTER, FileHeader::is_split_after),
+            (FHD_PASSWORD, FileHeader::is_encrypted),
+            (FHD_SOLID, FileHeader::is_solid),
+            (FHD_EXTTIME, FileHeader::has_ext_time),
+        ];
+        let zero = file_header_with(0);
+        for (bit, predicate) in cases {
+            assert!(
+                !predicate(&zero),
+                "expected false on FileHeader for bit {bit:#x}"
+            );
+            let one = file_header_with(bit);
+            assert!(
+                predicate(&one),
+                "expected true on FileHeader for bit {bit:#x}"
+            );
+        }
+
+        let directory = file_header_with(FHD_DIRECTORY_MASK);
+        assert!(directory.is_directory());
+        assert!(!file_header_with(0).is_directory());
+
+        let stored = file_header_with(0);
+        assert!(stored.is_stored());
+        let mut packed = file_header_with(0);
+        packed.method = 0x33;
+        assert!(!packed.is_stored());
+    }
+
+    #[test]
+    fn file_header_comment_extracts_payload_after_two_byte_size_prefix() {
+        let mut without_flag = file_header_with(0);
+        without_flag.file_comment = vec![3, 0, b'a', b'b', b'c'];
+        assert!(!without_flag.has_file_comment());
+        assert_eq!(without_flag.file_comment().unwrap(), None);
+
+        let mut with_flag = file_header_with(FHD_COMMENT);
+        with_flag.file_comment = vec![3, 0, b'h', b'e', b'y'];
+        assert!(with_flag.has_file_comment());
+        assert_eq!(with_flag.file_comment().unwrap().unwrap(), b"hey");
+
+        let mut empty_flagged = file_header_with(FHD_COMMENT);
+        empty_flagged.file_comment.clear();
+        assert!(!empty_flagged.has_file_comment());
+
+        let mut truncated = file_header_with(FHD_COMMENT);
+        truncated.file_comment = vec![10, 0, b'a'];
+        assert!(matches!(truncated.file_comment(), Err(Error::TooShort)));
+    }
+
+    #[test]
+    fn file_header_name_metadata_and_crc_helpers_describe_entry() {
+        let mut header = file_header_with(0);
+        header.name = b"r\xc3\xa9sum\xc3\xa9.txt".to_vec();
+        header.file_crc = crc32(b"hello");
+        header.attr = 0x20;
+        header.host_os = 3;
+        header.file_time = 0x5a21_0000;
+
+        assert_eq!(header.name_lossy(), "résumé.txt");
+        let meta = header.metadata();
+        assert_eq!(meta.name, header.name);
+        assert_eq!(meta.attr, 0x20);
+        assert_eq!(meta.host_os, 3);
+        assert_eq!(meta.file_time, 0x5a21_0000);
+        assert!(!meta.is_directory);
+
+        header.verify_crc32(b"hello").unwrap();
+        match header.verify_crc32(b"different") {
+            Err(Error::Crc32Mismatch { expected, actual }) => {
+                assert_eq!(expected, header.file_crc);
+                assert_ne!(actual, expected);
+            }
+            other => panic!("expected Crc32Mismatch, got {other:?}"),
+        }
+
+        let directory = file_header_with(FHD_DIRECTORY_MASK);
+        assert!(directory.metadata().is_directory);
+
+        // Garbage bytes still produce a String through lossy decoding.
+        let mut garbage = file_header_with(0);
+        garbage.name = vec![0xff, 0xfe, b'/', 0x80, b'x'];
+        let lossy = garbage.name_lossy();
+        assert!(lossy.ends_with("/\u{fffd}x"), "got {lossy:?}");
+    }
+
+    #[test]
+    fn newsub_header_name_lossy_delegates_to_inner_file_header() {
+        let mut file = file_header_with(0);
+        file.name = b"CMT".to_vec();
+        let sub = NewSubHeader {
+            file,
+            kind: NewSubKind::ArchiveComment,
+        };
+        assert_eq!(sub.name_lossy(), "CMT");
+    }
+
+    #[test]
+    fn writer_options_constructor_and_default_match_documented_targets() {
+        let default = WriterOptions::default();
+        assert_eq!(default.target, ArchiveVersion::Rar15);
+        assert_eq!(default.features, FeatureSet::store_only());
+
+        let explicit = WriterOptions::new(ArchiveVersion::Rar20, FeatureSet::store_only());
+        assert_eq!(explicit.target, ArchiveVersion::Rar20);
+        assert_eq!(explicit.features, FeatureSet::store_only());
+    }
 }
