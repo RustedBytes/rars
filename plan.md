@@ -11,13 +11,6 @@
 
 ## Hardening
 
-- Review #4 batch 4: fixture/oracle checks:
-  - Verify RAR2 `PROTECT_HEAD` parity behaviour when the protected range
-    overlaps the recovery block before changing repair logic.
-  - Confirm old-numbered volume extensions beyond `.rNN` before adding CLI
-    chaining support.
-  - Pin or document RAR29 zero-offset match handling before changing
-    `copy_match`.
 - Add adversarial PPMd fixtures as corpus bugs appear.
 - Harden PPMd hostile-state arithmetic paths (`make_esc_freq`,
   `update_model`) with focused malformed-stream regression tests.

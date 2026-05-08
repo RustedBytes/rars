@@ -1850,6 +1850,9 @@ impl Unpack29 {
     }
 
     fn copy_match(&mut self, length: usize, offset: usize, output_size: usize) -> Result<()> {
+        // The bitstream normally encodes match distances as offset+1, so zero
+        // is not emitted for fresh matches. Keep the legacy decoder boundary
+        // tolerant here: a zero internal offset behaves as distance one.
         let offset = if offset == 0 { 1 } else { offset };
         let current = self.current_pos();
         if offset > current {
@@ -2445,6 +2448,16 @@ mod tests {
         let packed = unpack29_encode_literals(input).unwrap();
 
         assert_eq!(unpack29_decode(&packed, input.len()).unwrap(), input);
+    }
+
+    #[test]
+    fn copy_match_treats_zero_offset_as_distance_one() {
+        let mut decoder = Unpack29::new();
+        decoder.output.push(b'Z');
+
+        decoder.copy_match(4, 0, 5).unwrap();
+
+        assert_eq!(decoder.output, b"ZZZZZ");
     }
 
     #[test]

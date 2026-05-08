@@ -1780,6 +1780,8 @@ fn volume_part_path(first_path: &Path, index: usize) -> CliResult<PathBuf> {
     if index == 0 {
         return Ok(first_path.to_path_buf());
     }
+    // Extension-based RAR volume names are finite: first .rar, then .r00
+    // through .r99. Later RAR families use part-number names instead.
     if index > 100 {
         return Err("RAR 1.4 old-style volume names only support .r00 through .r99 here".into());
     }
@@ -2133,6 +2135,7 @@ mod tests {
     use super::{
         checked_output_path, error_needs_password, infer_part_index, output_relative_path,
         parse_size, rar50_volume_part_path, redirection_warning, should_prompt_password,
+        volume_part_path,
     };
     use rars::Error;
     use std::path::{Path, PathBuf};
@@ -2147,6 +2150,23 @@ mod tests {
         assert_eq!(infer_part_index(Path::new("archive.r00"), 4), Some(1));
         assert_eq!(infer_part_index(Path::new("archive.r02"), 4), Some(3));
         assert_eq!(infer_part_index(Path::new("archive.r03"), 4), None);
+    }
+
+    #[test]
+    fn old_style_volume_writer_stops_at_r99() {
+        assert_eq!(
+            volume_part_path(Path::new("archive.rar"), 0).unwrap(),
+            PathBuf::from("archive.rar")
+        );
+        assert_eq!(
+            volume_part_path(Path::new("archive.rar"), 1).unwrap(),
+            PathBuf::from("archive.r00")
+        );
+        assert_eq!(
+            volume_part_path(Path::new("archive.rar"), 100).unwrap(),
+            PathBuf::from("archive.r99")
+        );
+        assert!(volume_part_path(Path::new("archive.rar"), 101).is_err());
     }
 
     #[test]
