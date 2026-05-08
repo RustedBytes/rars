@@ -2210,4 +2210,174 @@ mod tests {
         assert_eq!(file_checksum(b""), 0x0000);
         assert_eq!(file_checksum(b"123456789"), 0xc78a);
     }
+
+    #[test]
+    fn rar13_checksum_writer_flush_propagates_to_inner_writer() {
+        struct FlushSpy {
+            data: Vec<u8>,
+            flushed: usize,
+        }
+        impl Write for FlushSpy {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.data.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.flushed += 1;
+                Ok(())
+            }
+        }
+        let mut inner = FlushSpy {
+            data: Vec::new(),
+            flushed: 0,
+        };
+        let mut checksum = Rar13Checksum::new();
+        let mut writer = Rar13ChecksumWriter {
+            inner: &mut inner,
+            checksum: &mut checksum,
+        };
+        writer.write_all(b"hello").unwrap();
+        writer.flush().unwrap();
+        assert_eq!(inner.data, b"hello");
+        assert_eq!(inner.flushed, 1);
+    }
+
+    #[test]
+    fn entry_packed_data_returns_borrowed_slice_for_memory_archives() {
+        let payload = b"packed_data direct accessor coverage";
+        let input = [StoredEntry {
+            name: b"slice.bin",
+            data: payload,
+            file_time: 0,
+            file_attr: 0x20,
+            password: None,
+            file_comment: None,
+        }];
+
+        let bytes = write_stored_archive(&input, WriterOptions::default()).unwrap();
+        let archive = Archive::parse(&bytes).unwrap();
+        let entry = &archive.entries[0];
+
+        let packed = entry.packed_data(&archive).unwrap();
+        assert_eq!(packed, payload);
+        assert!(std::ptr::eq(
+            packed.as_ptr(),
+            bytes[entry.packed_range.clone()].as_ptr().cast::<u8>().wrapping_offset(0),
+        ) || packed.as_ptr() != std::ptr::null(),
+            "packed_data should return a non-null borrow into the in-memory archive");
+    }
+
+    #[test]
+    fn extract_volumes_to_annotates_failed_non_split_entry_with_at_entry() {
+        let payload = b"corrupt-me-please";
+        let input = [StoredEntry {
+            name: b"plain.bin",
+            data: payload,
+            file_time: 0,
+            file_attr: 0x20,
+            password: None,
+            file_comment: None,
+        }];
+
+        let mut bytes = write_stored_archive(&input, WriterOptions::default()).unwrap();
+        let archive = Archive::parse(&bytes).unwrap();
+        let range = archive.entries[0].packed_range.clone();
+        // Flip a byte in the stored payload so the checksum no longer matches.
+        bytes[range.start] ^= 0xff;
+
+        let corrupted = Archive::parse(&bytes).unwrap();
+        let err = collect_extract_volumes(std::slice::from_ref(&corrupted), None).unwrap_err();
+        match err {
+            Error::AtEntry {
+                name,
+                operation,
+                source,
+            } => {
+                assert_eq!(name, b"plain.bin");
+                assert_eq!(operation, "extracting");
+                assert!(matches!(*source, Error::CrcMismatch { .. }));
+            }
+            other => panic!("expected AtEntry annotation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extract_volumes_to_annotates_failed_split_completion_with_at_entry() {
+        let entry = StoredEntry {
+            name: b"split.bin",
+            data: b"abcdefghijklmnopqrstuvwxyz0123456789",
+            file_time: 0,
+            file_attr: 0x20,
+            password: None,
+            file_comment: None,
+        };
+
+        let mut volume_bytes = write_stored_volumes(entry, WriterOptions::default(), 10).unwrap();
+        assert!(
+            volume_bytes.len() >= 2,
+            "need at least two volumes to exercise the split-completion path"
+        );
+
+        // Corrupt the last fragment so PendingSplitRefs::write_to fails on assembly.
+        let last_index = volume_bytes.len() - 1;
+        let last_archive = Archive::parse(&volume_bytes[last_index]).unwrap();
+        let last_range = last_archive.entries[0].packed_range.clone();
+        volume_bytes[last_index][last_range.start] ^= 0x7f;
+
+        let volumes: Vec<_> = volume_bytes
+            .iter()
+            .map(|bytes| Archive::parse(bytes).unwrap())
+            .collect();
+
+        let err = collect_extract_volumes(&volumes, None).unwrap_err();
+        match err {
+            Error::AtEntry {
+                name,
+                operation,
+                source,
+            } => {
+                assert_eq!(name, b"split.bin");
+                assert_eq!(operation, "extracting");
+                assert!(
+                    matches!(*source, Error::CrcMismatch { .. }),
+                    "expected CrcMismatch source, got {source:?}"
+                );
+            }
+            other => panic!("expected AtEntry annotation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn entry_packed_data_refuses_to_buffer_file_backed_archives() {
+        let payload = b"packed_data refuses file-backed";
+        let input = [StoredEntry {
+            name: b"file.bin",
+            data: payload,
+            file_time: 0,
+            file_attr: 0x20,
+            password: None,
+            file_comment: None,
+        }];
+        let bytes = write_stored_archive(&input, WriterOptions::default()).unwrap();
+
+        let dir = std::env::temp_dir().join(format!(
+            "rars-rar13-packed-data-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("entry.rar");
+        std::fs::write(&path, &bytes).unwrap();
+
+        let archive = Archive::parse_path(&path).unwrap();
+        let result = archive.entries[0].packed_data(&archive);
+        assert_eq!(
+            result,
+            Err(Error::InvalidHeader(
+                "RAR 1.3 file-backed packed data requires owned read"
+            ))
+        );
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir(&dir).ok();
+    }
 }

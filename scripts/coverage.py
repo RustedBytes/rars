@@ -98,9 +98,17 @@ def demangle(names: list[str]) -> list[str]:
 
 
 def is_test_symbol(demangled: str) -> bool:
-    # Inline #[cfg(test)] mod tests blocks render as "::tests::" in demangled paths.
-    # Catch helper functions inside that mod (e.g. block_header_with) too.
-    return "::tests::" in demangled
+    """True iff the function itself lives in an inline `mod tests` block.
+
+    The path component check has to skip generic substitutions: a production
+    function instantiated for a test caller shows up as
+    `Archive::extract_to::<rars::tests::collect_x::{closure#0}>::{closure#0}`,
+    which contains "::tests::" deep inside the angle-bracket payload but is
+    actually a production function. Strip everything from the first "::<"
+    onward and check the namespace prefix only.
+    """
+    head = demangled.split("::<", 1)[0]
+    return "::tests::" in head or head.endswith("::tests")
 
 
 def relative_to_crates(path: str) -> str:
