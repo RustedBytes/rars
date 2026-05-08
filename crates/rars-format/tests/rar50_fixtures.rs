@@ -1,4 +1,6 @@
-use rars_codec::rar50::{decode_lz, parse_compressed_block, read_table_lengths, DecodeTables};
+use rars_codec::rar50::{
+    decode_lz, encode_lz_member, parse_compressed_block, read_table_lengths, DecodeTables,
+};
 use rars_format::rar50::{
     extract_volumes_to, repair_inline_recovery_bytes, repair_rev5_volumes_to, Archive,
     ArchiveMetadataEntry, EncryptedArchiveCommentEntry, EncryptedCompressedEntry,
@@ -138,6 +140,16 @@ fn read_options(password: Option<&[u8]>) -> ArchiveReadOptions<'_> {
         Some(password) => ArchiveReadOptions::with_password(password),
         None => ArchiveReadOptions::default(),
     }
+}
+
+fn deterministic_noise(len: usize) -> Vec<u8> {
+    let mut state = 0x1234_5678u32;
+    (0..len)
+        .map(|_| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 24) as u8
+        })
+        .collect()
 }
 
 fn repair_rev5_volumes(
@@ -736,9 +748,7 @@ fn writes_compressed_rar50_archive_that_reader_extracts() {
     let archive = Archive::parse(&bytes).unwrap();
     let files: Vec<_> = archive.files().collect();
     assert_eq!(files.len(), 2);
-    assert!(files.iter().all(|file| !file.is_stored()));
     assert!(files.iter().all(|file| file.hash.is_some()));
-    assert_eq!(files[0].decoded_compression_info().unwrap().method, 1);
     assert_eq!(
         files[0].data_crc32,
         Some(rars_format::rar15_40::crc32(entries[0].data))
@@ -750,6 +760,35 @@ fn writes_compressed_rar50_archive_that_reader_extracts() {
     assert_eq!(extracted[0].file_time, 0x5a21_0001);
     assert_eq!(extracted[1].name, entries[1].name);
     assert_eq!(extracted[1].data, entries[1].data);
+}
+
+#[test]
+fn compressed_rar50_writer_stores_member_when_lz_payload_would_grow() {
+    let data = deterministic_noise(8192);
+    assert!(encode_lz_member(&data, 0).unwrap().len() >= data.len());
+    for target in [ArchiveVersion::Rar50, ArchiveVersion::Rar70] {
+        let entries = [rar50::CompressedEntry {
+            name: b"incompressible.bin",
+            data: &data,
+            mtime: Some(0x5a21_00a0),
+            attributes: 0x20,
+            host_os: 3,
+        }];
+        let bytes = write_compressed_archive(
+            &entries,
+            rar50::WriterOptions::new(target, FeatureSet::store_only()),
+        )
+        .unwrap();
+
+        let archive = Archive::parse(&bytes).unwrap();
+        let file = archive.files().next().unwrap();
+        assert!(file.is_stored(), "{target:?}");
+        assert_eq!(file.packed_size(), data.len() as u64);
+        let extracted = collect_extract(&archive).unwrap();
+        assert_eq!(extracted[0].name, b"incompressible.bin");
+        assert_eq!(extracted[0].data, data);
+        assert_eq!(extracted[0].file_time, 0x5a21_00a0);
+    }
 }
 
 #[test]
@@ -1011,6 +1050,38 @@ fn writes_compressed_rar50_volume_set_that_reader_reassembles() {
     assert_eq!(extracted[0].name, b"compressed-split.txt");
     assert_eq!(extracted[0].data, payload);
     assert_eq!(extracted[0].file_time, 0x5a21_0002);
+}
+
+#[test]
+fn compressed_rar50_volume_writer_stores_member_when_lz_payload_would_grow() {
+    let data = deterministic_noise(8192);
+    assert!(encode_lz_member(&data, 0).unwrap().len() >= data.len());
+    let entry = rar50::CompressedEntry {
+        name: b"incompressible-split.bin",
+        data: &data,
+        mtime: Some(0x5a21_00a2),
+        attributes: 0x20,
+        host_os: 3,
+    };
+    let parts = write_compressed_volumes(
+        entry,
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, FeatureSet::store_only()),
+        1024,
+    )
+    .unwrap();
+
+    assert!(parts.len() >= 2);
+    let archives: Vec<_> = parts
+        .iter()
+        .map(|part| Archive::parse(part).unwrap())
+        .collect();
+    assert!(archives
+        .iter()
+        .all(|archive| archive.files().next().unwrap().is_stored()));
+    let extracted = collect_extract_volumes(&archives).unwrap();
+    assert_eq!(extracted[0].name, b"incompressible-split.bin");
+    assert_eq!(extracted[0].data, data);
+    assert_eq!(extracted[0].file_time, 0x5a21_00a2);
 }
 
 #[test]
@@ -2151,6 +2222,36 @@ fn writes_encrypted_compressed_rar50_archive_that_reader_extracts_with_password(
 }
 
 #[test]
+fn encrypted_compressed_rar50_writer_stores_member_when_lz_payload_would_grow() {
+    let data = deterministic_noise(8192);
+    assert!(encode_lz_member(&data, 0).unwrap().len() >= data.len());
+    let entries = [EncryptedCompressedEntry {
+        name: b"secret-incompressible.bin",
+        data: &data,
+        mtime: Some(0x5a21_00a1),
+        attributes: 0x20,
+        host_os: 3,
+        password: b"secret",
+    }];
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    let bytes = write_encrypted_compressed_archive(
+        &entries,
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
+    )
+    .unwrap();
+
+    let archive = Archive::parse(&bytes).unwrap();
+    let file = archive.files().next().unwrap();
+    assert!(file.encrypted);
+    assert!(file.is_stored());
+    let extracted = collect_extract_with_password(&archive, Some(b"secret")).unwrap();
+    assert_eq!(extracted[0].name, b"secret-incompressible.bin");
+    assert_eq!(extracted[0].data, data);
+    assert_eq!(extracted[0].file_time, 0x5a21_00a1);
+}
+
+#[test]
 fn writes_encrypted_compressed_rar50_archive_metadata_record() {
     let payload = b"encrypted compressed metadata payload repeated repeated\n".repeat(8);
     let entries = [EncryptedCompressedEntry {
@@ -3001,6 +3102,42 @@ fn writes_encrypted_compressed_rar50_volume_set_that_reader_reassembles_with_pas
     assert_eq!(extracted[0].name, b"split-secret-compressed50.txt");
     assert_eq!(extracted[0].data, payload);
     assert_eq!(extracted[0].file_time, 0x5a21_0057);
+}
+
+#[test]
+fn encrypted_compressed_rar50_volume_writer_stores_member_when_lz_payload_would_grow() {
+    let data = deterministic_noise(8192);
+    assert!(encode_lz_member(&data, 0).unwrap().len() >= data.len());
+    let entry = EncryptedCompressedEntry {
+        name: b"secret-incompressible-split.bin",
+        data: &data,
+        mtime: Some(0x5a21_00a3),
+        attributes: 0x20,
+        host_os: 3,
+        password: b"password",
+    };
+    let mut features = FeatureSet::store_only();
+    features.file_encryption = true;
+    let parts = write_encrypted_compressed_volumes(
+        entry,
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
+        1024,
+    )
+    .unwrap();
+
+    assert!(parts.len() >= 2);
+    let archives: Vec<_> = parts
+        .iter()
+        .map(|part| Archive::parse(part).unwrap())
+        .collect();
+    assert!(archives.iter().all(|archive| {
+        let file = archive.files().next().unwrap();
+        file.encrypted && file.is_stored()
+    }));
+    let extracted = collect_extract_volumes_with_password(&archives, Some(b"password")).unwrap();
+    assert_eq!(extracted[0].name, b"secret-incompressible-split.bin");
+    assert_eq!(extracted[0].data, data);
+    assert_eq!(extracted[0].file_time, 0x5a21_00a3);
 }
 
 #[test]

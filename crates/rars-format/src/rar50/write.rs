@@ -479,12 +479,21 @@ impl<'a> Rar50Writer<'a> {
                             self.filter_policy,
                         )?
                     };
-                    resolved_members.push(ResolvedRar50WriteMember::Compressed {
-                        entry,
-                        packed,
-                        algorithm_version,
-                        solid_continuation: self.options.features.solid && index != 0,
-                    });
+                    if should_store_compressed_payload(
+                        entry.data,
+                        &packed,
+                        self.options.features.solid,
+                        self.filter_policy,
+                    ) {
+                        resolved_members.push(ResolvedRar50WriteMember::StoredCompressed(entry));
+                    } else {
+                        resolved_members.push(ResolvedRar50WriteMember::Compressed {
+                            entry,
+                            packed,
+                            algorithm_version,
+                            solid_continuation: self.options.features.solid && index != 0,
+                        });
+                    }
                 }
                 Ok(ResolvedRar50WritePlan {
                     main_flags: if self.options.features.solid {
@@ -640,13 +649,28 @@ impl<'a> Rar50Writer<'a> {
                     } else {
                         encode_lz_member(entry.data, algorithm_version).map_err(Error::from)?
                     };
-                    let encrypted = encrypted_payload(&packed, entry.data, entry.password)?;
-                    resolved_members.push(ResolvedRar50WriteMember::EncryptedCompressed {
-                        entry,
-                        encrypted,
-                        algorithm_version,
-                        solid_continuation: self.options.features.solid && index != 0,
-                    });
+                    if should_store_compressed_payload(
+                        entry.data,
+                        &packed,
+                        self.options.features.solid,
+                        FilterPolicy::None,
+                    ) {
+                        let encrypted = encrypted_stored_payload(entry.data, entry.password)?;
+                        resolved_members.push(
+                            ResolvedRar50WriteMember::EncryptedStoredCompressed {
+                                entry,
+                                encrypted,
+                            },
+                        );
+                    } else {
+                        let encrypted = encrypted_payload(&packed, entry.data, entry.password)?;
+                        resolved_members.push(ResolvedRar50WriteMember::EncryptedCompressed {
+                            entry,
+                            encrypted,
+                            algorithm_version,
+                            solid_continuation: self.options.features.solid && index != 0,
+                        });
+                    }
                 }
                 Ok(ResolvedRar50WritePlan {
                     main_flags: if self.options.features.solid {
@@ -716,6 +740,7 @@ struct ResolvedRar50WritePlan<'a> {
 enum ResolvedRar50WriteMember<'a> {
     Stored(StoredEntry<'a>),
     StoredWithServices(StoredEntryWithServices<'a>),
+    StoredCompressed(CompressedEntry<'a>),
     Compressed {
         entry: CompressedEntry<'a>,
         packed: Vec<u8>,
@@ -728,6 +753,10 @@ enum ResolvedRar50WriteMember<'a> {
     },
     EncryptedStoredWithServices {
         entry: EncryptedStoredEntryWithServices<'a>,
+        encrypted: EncryptedStoredPayload,
+    },
+    EncryptedStoredCompressed {
+        entry: EncryptedCompressedEntry<'a>,
         encrypted: EncryptedStoredPayload,
     },
     EncryptedCompressed {
@@ -827,6 +856,9 @@ fn emit_resolved_writer_plan_pass(
                     write_stored_service(&mut out, service.name, service.data)?;
                 }
             }
+            ResolvedRar50WriteMember::StoredCompressed(entry) => {
+                write_stored_compressed_entry(&mut out, entry)?;
+            }
             ResolvedRar50WriteMember::Compressed {
                 entry,
                 packed,
@@ -871,6 +903,14 @@ fn emit_resolved_writer_plan_pass(
                         plan.header_keys.as_ref().map(|keys| &keys.keys),
                     )?;
                 }
+            }
+            ResolvedRar50WriteMember::EncryptedStoredCompressed { entry, encrypted } => {
+                write_encrypted_stored_compressed_entry_with_header_keys(
+                    &mut out,
+                    entry,
+                    encrypted,
+                    plan.header_keys.as_ref().map(|keys| &keys.keys),
+                )?;
             }
             ResolvedRar50WriteMember::EncryptedCompressed {
                 entry,
@@ -1051,11 +1091,20 @@ fn write_compressed_volume_set_impl(
         } else {
             encode_lz_member(entry.data, algorithm_version).map_err(Error::from)?
         };
-        members.push(CompressedVolumeMember {
-            entry_index: index,
-            packed,
-            solid_continuation: options.features.solid && index != 0,
-        });
+        if should_store_compressed_payload(
+            entry.data,
+            &packed,
+            options.features.solid,
+            FilterPolicy::None,
+        ) {
+            members.push(CompressedVolumeMember::Stored { entry_index: index });
+        } else {
+            members.push(CompressedVolumeMember::Compressed {
+                entry_index: index,
+                packed,
+                solid_continuation: options.features.solid && index != 0,
+            });
+        }
     }
 
     let mut writer = VolumeSetWriter::new(
@@ -1065,20 +1114,45 @@ fn write_compressed_volume_set_impl(
         recovery_percent,
     );
     for member in &members {
-        writer.write_member(
-            member.packed.len(),
-            |out, start, end, split_before, split_after| {
-                write_compressed_entry_fragment(
-                    out,
-                    &entries[member.entry_index],
-                    &member.packed[start..end],
-                    algorithm_version,
-                    member.solid_continuation,
-                    split_before,
-                    split_after,
-                )
-            },
-        )?;
+        match member {
+            CompressedVolumeMember::Stored { entry_index } => {
+                let entry = stored_entry_from_compressed_entry(&entries[*entry_index]);
+                writer.write_member(
+                    entry.data.len(),
+                    |out, start, end, split_before, split_after| {
+                        write_stored_entry_fragment(
+                            out,
+                            &entry,
+                            &entry.data[start..end],
+                            entry.data.len() as u64,
+                            None,
+                            split_before,
+                            split_after,
+                        )
+                    },
+                )?;
+            }
+            CompressedVolumeMember::Compressed {
+                entry_index,
+                packed,
+                solid_continuation,
+            } => {
+                writer.write_member(
+                    packed.len(),
+                    |out, start, end, split_before, split_after| {
+                        write_compressed_entry_fragment(
+                            out,
+                            &entries[*entry_index],
+                            &packed[start..end],
+                            algorithm_version,
+                            *solid_continuation,
+                            split_before,
+                            split_after,
+                        )
+                    },
+                )?;
+            }
+        }
     }
     let volumes = writer.finish()?;
     if volumes.len() < 2 {
@@ -1204,12 +1278,25 @@ fn write_encrypted_compressed_volume_set_impl(
         } else {
             encode_lz_member(entry.data, algorithm_version).map_err(Error::from)?
         };
-        let encrypted = encrypted_payload(&packed, entry.data, entry.password)?;
-        members.push(EncryptedCompressedVolumeMember {
-            entry_index: index,
-            encrypted,
-            solid_continuation: options.features.solid && index != 0,
-        });
+        if should_store_compressed_payload(
+            entry.data,
+            &packed,
+            options.features.solid,
+            FilterPolicy::None,
+        ) {
+            let encrypted = encrypted_stored_payload(entry.data, entry.password)?;
+            members.push(EncryptedCompressedVolumeMember::Stored {
+                entry_index: index,
+                encrypted,
+            });
+        } else {
+            let encrypted = encrypted_payload(&packed, entry.data, entry.password)?;
+            members.push(EncryptedCompressedVolumeMember::Compressed {
+                entry_index: index,
+                encrypted,
+                solid_continuation: options.features.solid && index != 0,
+            });
+        }
     }
 
     let password = header_encryption_password(entries.iter().map(|entry| entry.password))?;
@@ -1226,24 +1313,52 @@ fn write_encrypted_compressed_volume_set_impl(
         recovery_percent,
     );
     for member in &members {
-        writer.write_member(
-            member.encrypted.data.len(),
-            |out, start, end, split_before, split_after| {
-                write_encrypted_compressed_entry_fragment_with_header_keys(
-                    out,
-                    EncryptedCompressedFragment {
-                        entry: &entries[member.entry_index],
-                        data: &member.encrypted.data[start..end],
-                        encrypted: &member.encrypted,
-                        algorithm_version,
-                        solid_continuation: member.solid_continuation,
-                        split_before,
-                        split_after,
+        match member {
+            EncryptedCompressedVolumeMember::Stored {
+                entry_index,
+                encrypted,
+            } => {
+                let entry = encrypted_stored_entry_from_compressed_entry(&entries[*entry_index]);
+                writer.write_member(
+                    encrypted.data.len(),
+                    |out, start, end, split_before, split_after| {
+                        write_encrypted_stored_entry_fragment_with_header_keys(
+                            out,
+                            &entry,
+                            &encrypted.data[start..end],
+                            encrypted,
+                            split_before,
+                            split_after,
+                            header_keys.as_ref().map(|keys| &keys.keys),
+                        )
                     },
-                    header_keys.as_ref().map(|keys| &keys.keys),
-                )
-            },
-        )?;
+                )?;
+            }
+            EncryptedCompressedVolumeMember::Compressed {
+                entry_index,
+                encrypted,
+                solid_continuation,
+            } => {
+                writer.write_member(
+                    encrypted.data.len(),
+                    |out, start, end, split_before, split_after| {
+                        write_encrypted_compressed_entry_fragment_with_header_keys(
+                            out,
+                            EncryptedCompressedFragment {
+                                entry: &entries[*entry_index],
+                                data: &encrypted.data[start..end],
+                                encrypted,
+                                algorithm_version,
+                                solid_continuation: *solid_continuation,
+                                split_before,
+                                split_after,
+                            },
+                            header_keys.as_ref().map(|keys| &keys.keys),
+                        )
+                    },
+                )?;
+            }
+        }
     }
     let volumes = writer.finish()?;
     if volumes.len() < 2 {
@@ -1310,6 +1425,15 @@ fn encode_member_with_filter_policy(
         }
         FilterPolicy::AutoSize => encode_member_with_auto_size_filter(data, algorithm_version),
     }
+}
+
+fn should_store_compressed_payload(
+    data: &[u8],
+    packed: &[u8],
+    solid: bool,
+    policy: FilterPolicy,
+) -> bool {
+    !solid && !matches!(policy, FilterPolicy::Explicit(_)) && packed.len() >= data.len()
 }
 
 fn rar50_algorithm_version(target: crate::ArchiveVersion) -> Result<u8> {
@@ -1462,16 +1586,27 @@ fn push_x86_filter_range(
     }
 }
 
-struct CompressedVolumeMember {
-    entry_index: usize,
-    packed: Vec<u8>,
-    solid_continuation: bool,
+enum CompressedVolumeMember {
+    Stored {
+        entry_index: usize,
+    },
+    Compressed {
+        entry_index: usize,
+        packed: Vec<u8>,
+        solid_continuation: bool,
+    },
 }
 
-struct EncryptedCompressedVolumeMember {
-    entry_index: usize,
-    encrypted: EncryptedStoredPayload,
-    solid_continuation: bool,
+enum EncryptedCompressedVolumeMember {
+    Stored {
+        entry_index: usize,
+        encrypted: EncryptedStoredPayload,
+    },
+    Compressed {
+        entry_index: usize,
+        encrypted: EncryptedStoredPayload,
+        solid_continuation: bool,
+    },
 }
 
 struct VolumeSetWriter<'a> {
@@ -1970,6 +2105,22 @@ fn write_stored_entry(out: &mut Vec<u8>, entry: &StoredEntry<'_>) -> Result<()> 
     )
 }
 
+fn write_stored_compressed_entry(out: &mut Vec<u8>, entry: &CompressedEntry<'_>) -> Result<()> {
+    validate_compressed_entry(entry)?;
+    let stored = stored_entry_from_compressed_entry(entry);
+    write_stored_entry(out, &stored)
+}
+
+fn stored_entry_from_compressed_entry<'a>(entry: &CompressedEntry<'a>) -> StoredEntry<'a> {
+    StoredEntry {
+        name: entry.name,
+        data: entry.data,
+        mtime: entry.mtime,
+        attributes: entry.attributes,
+        host_os: entry.host_os,
+    }
+}
+
 fn write_compressed_entry_payload(
     out: &mut Vec<u8>,
     entry: &CompressedEntry<'_>,
@@ -2181,6 +2332,38 @@ fn write_encrypted_stored_entry_fragment_with_header_keys(
             &extra,
             data,
         )
+    }
+}
+
+fn write_encrypted_stored_compressed_entry_with_header_keys(
+    out: &mut Vec<u8>,
+    entry: &EncryptedCompressedEntry<'_>,
+    encrypted: &EncryptedStoredPayload,
+    header_keys: Option<&Rar50Keys>,
+) -> Result<()> {
+    validate_encrypted_compressed_entry(entry)?;
+    let stored = encrypted_stored_entry_from_compressed_entry(entry);
+    write_encrypted_stored_entry_fragment_with_header_keys(
+        out,
+        &stored,
+        &encrypted.data,
+        encrypted,
+        false,
+        false,
+        header_keys,
+    )
+}
+
+fn encrypted_stored_entry_from_compressed_entry<'a>(
+    entry: &EncryptedCompressedEntry<'a>,
+) -> EncryptedStoredEntry<'a> {
+    EncryptedStoredEntry {
+        name: entry.name,
+        data: entry.data,
+        mtime: entry.mtime,
+        attributes: entry.attributes,
+        host_os: entry.host_os,
+        password: entry.password,
     }
 }
 

@@ -2260,16 +2260,7 @@ mod tests {
 
         let packed = entry.packed_data(&archive).unwrap();
         assert_eq!(packed, payload);
-        assert!(
-            std::ptr::eq(
-                packed.as_ptr(),
-                bytes[entry.packed_range.clone()]
-                    .as_ptr()
-                    .cast::<u8>()
-                    .wrapping_offset(0),
-            ) || packed.as_ptr() != std::ptr::null(),
-            "packed_data should return a non-null borrow into the in-memory archive"
-        );
+        assert!(!packed.is_empty());
     }
 
     #[test]
@@ -2593,8 +2584,10 @@ mod tests {
 
     #[test]
     fn write_compressed_archive_with_comment_rejects_non_rar13_target() {
-        let mut options = WriterOptions::default();
-        options.target = ArchiveVersion::Rar15;
+        let options = WriterOptions {
+            target: ArchiveVersion::Rar15,
+            ..WriterOptions::default()
+        };
         let err = write_compressed_archive_with_comment(&[], options, None).unwrap_err();
         assert_eq!(err, Error::UnsupportedVersion(ArchiveVersion::Rar15));
     }
@@ -2653,7 +2646,7 @@ mod tests {
             std::env::temp_dir().join(format!("rars-rar13-parse-path-bad-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("not_a_rar.bin");
-        std::fs::write(&path, &[0u8; 64]).unwrap();
+        std::fs::write(&path, [0u8; 64]).unwrap();
 
         let err = Archive::parse_path(&path).unwrap_err();
         assert_eq!(err, Error::UnsupportedSignature);
@@ -2743,8 +2736,10 @@ mod tests {
 
     #[test]
     fn write_compressed_volumes_rejects_non_rar13_target() {
-        let mut options = WriterOptions::default();
-        options.target = ArchiveVersion::Rar20;
+        let options = WriterOptions {
+            target: ArchiveVersion::Rar20,
+            ..WriterOptions::default()
+        };
         let entry = FileEntry {
             name: b"x.bin",
             data: b"data",
