@@ -878,12 +878,15 @@ impl PpmdDecoder {
 }
 
 impl PpmdEncoder {
-    pub fn new(max_order: usize, esc_char: u8) -> Result<Self> {
+    pub fn new(max_order: usize, esc_char: u8, dictionary_mb: usize) -> Result<Self> {
         if !(2..=64).contains(&max_order) {
             return Err(Error::InvalidData("RAR PPMd order is invalid"));
         }
+        if dictionary_mb == 0 {
+            return Err(Error::InvalidData("RAR PPMd dictionary size is invalid"));
+        }
         let mut model = PpmdDecoder::new();
-        model.max_contexts = model_context_limit(1);
+        model.max_contexts = model_context_limit(dictionary_mb);
         model.init_model(max_order);
         model.allocated = true;
         Ok(Self {
@@ -1148,12 +1151,20 @@ mod tests {
     #[test]
     fn encoder_rejects_orders_outside_model_bounds() {
         assert!(matches!(
-            PpmdEncoder::new(1, 2),
+            PpmdEncoder::new(1, 2, 1),
             Err(Error::InvalidData("RAR PPMd order is invalid"))
         ));
         assert!(matches!(
-            PpmdEncoder::new(65, 2),
+            PpmdEncoder::new(65, 2, 1),
             Err(Error::InvalidData("RAR PPMd order is invalid"))
+        ));
+    }
+
+    #[test]
+    fn encoder_rejects_zero_dictionary_size() {
+        assert!(matches!(
+            PpmdEncoder::new(4, 2, 0),
+            Err(Error::InvalidData("RAR PPMd dictionary size is invalid"))
         ));
     }
 

@@ -2260,11 +2260,16 @@ mod tests {
 
         let packed = entry.packed_data(&archive).unwrap();
         assert_eq!(packed, payload);
-        assert!(std::ptr::eq(
-            packed.as_ptr(),
-            bytes[entry.packed_range.clone()].as_ptr().cast::<u8>().wrapping_offset(0),
-        ) || packed.as_ptr() != std::ptr::null(),
-            "packed_data should return a non-null borrow into the in-memory archive");
+        assert!(
+            std::ptr::eq(
+                packed.as_ptr(),
+                bytes[entry.packed_range.clone()]
+                    .as_ptr()
+                    .cast::<u8>()
+                    .wrapping_offset(0),
+            ) || packed.as_ptr() != std::ptr::null(),
+            "packed_data should return a non-null borrow into the in-memory archive"
+        );
     }
 
     #[test]
@@ -2360,10 +2365,8 @@ mod tests {
         }];
         let bytes = write_stored_archive(&input, WriterOptions::default()).unwrap();
 
-        let dir = std::env::temp_dir().join(format!(
-            "rars-rar13-packed-data-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("rars-rar13-packed-data-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("entry.rar");
         std::fs::write(&path, &bytes).unwrap();

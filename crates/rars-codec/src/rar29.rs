@@ -142,13 +142,14 @@ fn encode_ppmd_member(
     initial_filter: Option<&[u8]>,
 ) -> Result<Vec<u8>> {
     const PPMD_ORDER: usize = 4;
+    const PPMD_DICTIONARY_MB: u8 = 16;
     const PPMD_ESC: u8 = 2;
 
     let mut out = Vec::new();
     out.push(0x80 | 0x40 | 0x20 | ((PPMD_ORDER as u8) - 1));
-    out.push(0);
+    out.push(PPMD_DICTIONARY_MB - 1);
     out.push(PPMD_ESC);
-    let mut encoder = PpmdEncoder::new(PPMD_ORDER, PPMD_ESC)?;
+    let mut encoder = PpmdEncoder::new(PPMD_ORDER, PPMD_ESC, usize::from(PPMD_DICTIONARY_MB))?;
     if let Some(record) = initial_filter {
         encoder.encode_vm_filter_record(record)?;
     }
@@ -2403,6 +2404,14 @@ mod tests {
 
         assert_eq!(unpack29_decode(&packed, input.len()).unwrap(), input);
         assert_ne!(packed.first().copied(), Some(0));
+    }
+
+    #[test]
+    fn ppmd_encoder_advertises_16mb_model_for_external_decoders() {
+        let packed = unpack29_encode_ppmd(b"rar29 ppmd dictionary header").unwrap();
+
+        assert_eq!(packed[0] & 0xe0, 0xe0);
+        assert_eq!(packed[1], 15);
     }
 
     #[test]
