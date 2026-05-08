@@ -901,15 +901,6 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
     {
         return Err("multivolume writer currently supports one input file".into());
     }
-    if matches!(compression_level, Some(1..=5))
-        && !matches!(
-            target,
-            ArchiveVersion::Rar29 | ArchiveVersion::Rar30 | ArchiveVersion::Rar40
-        )
-    {
-        return Err("compression levels are currently implemented for RAR 2.9/3.x/4.x writers; use --store or --level 0 for stored output".into());
-    }
-
     let owned = read_inputs(input_paths, password.as_deref())?;
     if matches!(
         target,

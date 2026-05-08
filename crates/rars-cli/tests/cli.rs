@@ -974,21 +974,52 @@ fn creates_rar29_archives_with_distinct_compression_levels() {
 }
 
 #[test]
-fn rejects_unwired_compression_level_for_rar50() {
-    let dir = scratch("reject-rar50-level");
+fn accepts_rar50_compression_level() {
+    let dir = scratch("accept-rar50-level");
     let source = dir.join("source.txt");
     let archive = dir.join("level.rar");
-    fs::write(&source, b"rar50 level not wired yet\n").unwrap();
+    fs::write(&source, b"rar50 level accepted by cli\n").unwrap();
 
-    let output = rars()
+    let create = rars()
         .args(["a", "--format", "rar50", "--level", "5"])
         .arg(&archive)
         .arg(&source)
         .output()
         .unwrap();
 
-    assert_eq!(output.status.code(), Some(1));
-    assert!(stderr(&output).contains("compression levels are currently implemented"));
+    assert!(create.status.success(), "stderr: {}", stderr(&create));
+    assert_archive_tests_and_extracts_file(
+        &archive,
+        None,
+        "source.txt",
+        b"rar50 level accepted by cli\n",
+    );
+}
+
+#[test]
+fn level_zero_stores_payload_for_rar50() {
+    let dir = scratch("level-zero-rar50");
+    let source = dir.join("source.txt");
+    let archive = dir.join("level0.rar");
+    fs::write(&source, b"rar50 level zero store\n").unwrap();
+
+    let create = rars()
+        .args(["a", "--format", "rar50", "--level", "0"])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(create.status.success(), "stderr: {}", stderr(&create));
+
+    let info = rars().arg("info").arg(&archive).output().unwrap();
+    assert!(info.status.success(), "stderr: {}", stderr(&info));
+    assert!(stdout(&info).contains("method=0"));
+    assert_archive_tests_and_extracts_file(
+        &archive,
+        None,
+        "source.txt",
+        b"rar50 level zero store\n",
+    );
 }
 
 #[test]

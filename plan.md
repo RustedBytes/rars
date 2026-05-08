@@ -54,6 +54,10 @@
 - Improve RAR29/RAR30/RAR40 max-level policy after `--level` is wired:
   filter-block boundary tuning, match-finder quality, lazy parsing, and PPMd
   tuning against WinRAR 2.90/3.x/4.x oracles.
+- Refine non-zero `--level` mappings for RAR13/RAR15/RAR20/RAR50/RAR70 after
+  the bench harness reports which policy differences matter. The CLI accepts
+  the levels now, but only RAR29/RAR30/RAR40 currently distinguish low and high
+  compression policies.
 - Improve RAR5/RAR7 compressed-writer policy after the RAR70 bench lands:
   audio/filter placement and match selection beyond the deterministic method-1
   bounded hash-chain baseline.

@@ -2445,9 +2445,11 @@ mod tests {
         let volumes = parse_volumes(&bytes);
 
         // Use only the first volume, which leaves pending=Some after the loop.
-        let err =
-            collect_extract_volumes(std::slice::from_ref(&volumes[0]), None).unwrap_err();
-        assert_eq!(err, Error::InvalidHeader("RAR 1.3 split entry is incomplete"));
+        let err = collect_extract_volumes(std::slice::from_ref(&volumes[0]), None).unwrap_err();
+        assert_eq!(
+            err,
+            Error::InvalidHeader("RAR 1.3 split entry is incomplete")
+        );
     }
 
     #[test]
@@ -2460,7 +2462,10 @@ mod tests {
         volumes[1].entries[0].name = b"different.bin".to_vec();
 
         let err = collect_extract_volumes(&volumes, None).unwrap_err();
-        assert_eq!(err, Error::InvalidHeader("RAR 1.3 split entry name changed"));
+        assert_eq!(
+            err,
+            Error::InvalidHeader("RAR 1.3 split entry name changed")
+        );
     }
 
     #[test]
@@ -2508,7 +2513,10 @@ mod tests {
         // ChainedReader::read across multiple volumes.
         let payload: Vec<u8> = (0..96).map(|i| ((i * 53) ^ 0xa5) as u8).collect();
         let bytes = split_volumes_for(b"chain.bin", &payload);
-        assert!(bytes.len() >= 3, "need at least three volumes for the chain");
+        assert!(
+            bytes.len() >= 3,
+            "need at least three volumes for the chain"
+        );
         let volumes = parse_volumes(&bytes);
 
         let extracted = collect_extract_volumes(&volumes, None).unwrap();
@@ -2529,16 +2537,16 @@ mod tests {
             file_comment: None,
         }];
 
-        let bytes = write_compressed_archive_with_comment(
-            &input,
-            WriterOptions::default(),
-            Some(comment),
-        )
-        .unwrap();
+        let bytes =
+            write_compressed_archive_with_comment(&input, WriterOptions::default(), Some(comment))
+                .unwrap();
         let archive = Archive::parse(&bytes).unwrap();
         assert!(archive.main.has_archive_comment());
         assert!(archive.main.has_packed_comment());
-        assert_eq!(archive.archive_comment().unwrap().as_deref(), Some(&comment[..]));
+        assert_eq!(
+            archive.archive_comment().unwrap().as_deref(),
+            Some(&comment[..])
+        );
 
         let extracted = collect_extract(&archive, None).unwrap();
         assert_eq!(extracted[0].data, data);
@@ -2620,10 +2628,8 @@ mod tests {
         )
         .unwrap();
 
-        let dir = std::env::temp_dir().join(format!(
-            "rars-rar13-parse-seekable-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("rars-rar13-parse-seekable-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("multi.rar");
         std::fs::write(&path, &bytes).unwrap();
@@ -2643,10 +2649,8 @@ mod tests {
 
     #[test]
     fn parse_path_rejects_files_without_rar13_signature() {
-        let dir = std::env::temp_dir().join(format!(
-            "rars-rar13-parse-path-bad-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("rars-rar13-parse-path-bad-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("not_a_rar.bin");
         std::fs::write(&path, &[0u8; 64]).unwrap();
@@ -2673,10 +2677,8 @@ mod tests {
         }];
         let bytes = write_stored_archive(&input, WriterOptions::default()).unwrap();
 
-        let dir = std::env::temp_dir().join(format!(
-            "rars-rar13-decrypt-file-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("rars-rar13-decrypt-file-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("encrypted.rar");
         std::fs::write(&path, &bytes).unwrap();
@@ -2790,12 +2792,9 @@ mod tests {
             password: None,
             file_comment: None,
         }];
-        let bytes = write_stored_archive_with_comment(
-            &input,
-            WriterOptions::default(),
-            Some(b"hi"),
-        )
-        .unwrap();
+        let bytes =
+            write_stored_archive_with_comment(&input, WriterOptions::default(), Some(b"hi"))
+                .unwrap();
         let mut archive = Archive::parse(&bytes).unwrap();
         // The first two bytes of `main.extra` are the comment_field length —
         // overwrite them with 1 to declare a sub-2-byte payload while keeping
@@ -2820,12 +2819,9 @@ mod tests {
             password: None,
             file_comment: None,
         }];
-        let bytes = write_stored_archive_with_comment(
-            &input,
-            WriterOptions::default(),
-            Some(b"hi"),
-        )
-        .unwrap();
+        let bytes =
+            write_stored_archive_with_comment(&input, WriterOptions::default(), Some(b"hi"))
+                .unwrap();
         let mut archive = Archive::parse(&bytes).unwrap();
         // Pump the declared comment field length up so the packed range walks
         // past the end of `main.extra`.

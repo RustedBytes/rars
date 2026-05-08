@@ -322,10 +322,8 @@ mod tests {
             std::io::ErrorKind::PermissionDenied,
             "locked",
         ));
-        let different_kind = Error::from(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "locked",
-        ));
+        let different_kind =
+            Error::from(std::io::Error::new(std::io::ErrorKind::NotFound, "locked"));
         let different_message = Error::from(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "elsewhere",
