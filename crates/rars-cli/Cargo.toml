@@ -21,4 +21,5 @@ path = "src/main.rs"
 
 [dependencies]
 rars.workspace = true
+rars-crc32.workspace = true
 rpassword.workspace = true

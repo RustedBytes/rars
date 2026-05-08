@@ -11,6 +11,7 @@ use rars::{
     extract_volumes_to, Archive as DetectedArchive, ArchiveReadOptions, ArchiveReader,
     ArchiveVersion, Error, ExtractedEntryMeta, FeatureSet,
 };
+use rars_crc32::crc32;
 use std::env;
 use std::error::Error as StdError;
 use std::fs::{self, File, OpenOptions};
@@ -549,9 +550,11 @@ fn cmd_repair_rev5(paths: &[String]) -> CliResult<()> {
             slots[index] = Some(bytes.as_slice());
             continue;
         }
-        if let Some((index, _)) = first.data_volumes.iter().enumerate().find(|(_, meta)| {
-            bytes.len() as u64 == meta.file_size && rars::rar15_40::crc32(bytes) == meta.crc32
-        }) {
+        if let Some((index, _)) =
+            first.data_volumes.iter().enumerate().find(|(_, meta)| {
+                bytes.len() as u64 == meta.file_size && crc32(bytes) == meta.crc32
+            })
+        {
             slots[index] = Some(bytes.as_slice());
         }
     }
@@ -644,7 +647,7 @@ fn parse_rar3_new_style_rev(bytes: &[u8]) -> Option<(usize, usize, usize)> {
     }
     let trailer = &bytes[bytes.len() - 7..];
     let stored_crc = u32::from_le_bytes(trailer[3..7].try_into().ok()?);
-    if rars::rar15_40::crc32(&bytes[..bytes.len() - 4]) != stored_crc {
+    if crc32(&bytes[..bytes.len() - 4]) != stored_crc {
         return None;
     }
     let recovery_index = usize::from(trailer[2]);
