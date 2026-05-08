@@ -20,6 +20,12 @@
 
 ## Optimization
 
+- Revisit RAR 1.4 old-distance token emission with DOS RAR 1.402 oracle
+  coverage. The writer currently avoids that compatibility-sensitive
+  vocabulary and relies on repeat-last, short-LZ, and long-LZ matches.
+- Improve RAR 1.4 compressed-writer quality after the DOS compatibility path
+  is stable: match selection, safe old-distance reuse, and text-heavy corpus
+  tuning.
 - Improve RAR29/RAR30/RAR40 writer policy beyond the current default auto
   selector: filter-block boundary tuning, match-finder quality, lazy parsing,
   and PPMd tuning.

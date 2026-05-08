@@ -4085,11 +4085,8 @@ fn parse_owned_takes_input_buffer_by_value() {
     let archive = Archive::parse_owned(bytes.clone()).unwrap();
     assert_eq!(archive.files().count(), 1);
 
-    let with_options = Archive::parse_owned_with_options(
-        bytes.clone(),
-        ArchiveReadOptions::default(),
-    )
-    .unwrap();
+    let with_options =
+        Archive::parse_owned_with_options(bytes.clone(), ArchiveReadOptions::default()).unwrap();
     assert_eq!(with_options.files().count(), 1);
 
     let no_password = Archive::parse_owned_with_password(bytes, None).unwrap();
@@ -4105,26 +4102,21 @@ fn parse_owned_with_password_unlocks_header_encrypted_archive() {
         Err(Error::NeedPassword)
     ));
 
-    let archive =
-        Archive::parse_owned_with_password(bytes.clone(), Some(b"password")).unwrap();
+    let archive = Archive::parse_owned_with_password(bytes.clone(), Some(b"password")).unwrap();
     assert_eq!(archive.files().next().unwrap().name, b"hello.txt");
 
-    let with_options = Archive::parse_owned_with_options(
-        bytes,
-        ArchiveReadOptions::with_password(b"password"),
-    )
-    .unwrap();
+    let with_options =
+        Archive::parse_owned_with_options(bytes, ArchiveReadOptions::with_password(b"password"))
+            .unwrap();
     assert_eq!(with_options.files().next().unwrap().name, b"hello.txt");
 }
 
 #[test]
 fn parse_with_options_accepts_borrowed_bytes_and_options() {
     let bytes = fs::read(fixture("header_encrypted.rar")).unwrap();
-    let archive = Archive::parse_with_options(
-        &bytes,
-        ArchiveReadOptions::with_password(b"password"),
-    )
-    .unwrap();
+    let archive =
+        Archive::parse_with_options(&bytes, ArchiveReadOptions::with_password(b"password"))
+            .unwrap();
     assert_eq!(archive.files().next().unwrap().name, b"hello.txt");
 }
 

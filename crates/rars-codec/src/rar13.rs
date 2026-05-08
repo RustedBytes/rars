@@ -314,8 +314,12 @@ impl Unpack15Encoder {
                 )
             }
             EncodedToken::OldDist(token) => {
-                let length_code =
-                    old_dist_lz_length_code(token.length, token.distance, state.max_dist3)?;
+                let length_code = old_dist_lz_length_code(
+                    token.length,
+                    token.distance,
+                    state.max_dist3,
+                    token.short_code,
+                )?;
                 Some(
                     flag_cost
                         + l_count_break_bit_cost(state.l_count)
@@ -521,8 +525,13 @@ impl Unpack15Encoder {
                 "RAR 1.3 old-distance state is not encodable",
             ));
         }
-        let length_code = old_dist_lz_length_code(old_lz.length, old_lz.distance, self.max_dist3)
-            .ok_or(Error::InvalidData(
+        let length_code = old_dist_lz_length_code(
+            old_lz.length,
+            old_lz.distance,
+            self.max_dist3,
+            old_lz.short_code,
+        )
+        .ok_or(Error::InvalidData(
             "RAR 1.3 old-distance length is not encodable",
         ))?;
         emit_decode_num(&mut self.bits, length_code, 2, DEC_L1, POS_L1)?;
@@ -975,8 +984,10 @@ fn find_lz_tokens(
     if let Some(repeat) = find_repeat_last_lz(input, pos, last_dist, last_length) {
         tokens.push(EncodedToken::RepeatLast(repeat));
     }
-    if let Some(old_lz) = find_old_dist_lz(input, pos, old_dist, old_dist_ptr, max_dist3) {
-        tokens.push(EncodedToken::OldDist(old_lz));
+    if old_distance_encoder_enabled() {
+        if let Some(old_lz) = find_old_dist_lz(input, pos, old_dist, old_dist_ptr, max_dist3) {
+            tokens.push(EncodedToken::OldDist(old_lz));
+        }
     }
     if let Some(short_lz) = find_short_lz(input, pos) {
         tokens.push(EncodedToken::ShortLz(short_lz));
@@ -1089,7 +1100,7 @@ fn find_old_dist_lz(
             length += 1;
         }
         if length >= 3
-            && old_dist_lz_is_encodable(length as u32, distance)
+            && old_dist_lz_is_encodable(length as u32, distance, short_code)
             && length > best.length as usize
         {
             best = OldDistLz {
@@ -1103,14 +1114,31 @@ fn find_old_dist_lz(
     (best.length >= 3).then_some(best)
 }
 
-fn old_dist_lz_is_encodable(length: u32, distance: u32) -> bool {
-    old_dist_lz_length_code(length, distance, 0x2001).is_some()
-        && old_dist_lz_length_code(length, distance, 0x7f00).is_some()
+fn old_distance_encoder_enabled() -> bool {
+    // RAR 1.402 decodes some writer-generated old-distance forms differently
+    // from our decoder, especially around the Buf60 toggle encoding. Keep the
+    // decoder support, but avoid emitting this compatibility-sensitive
+    // vocabulary until it has a DOS oracle-backed encoder model.
+    false
 }
 
-fn old_dist_lz_length_code(length: u32, distance: u32, max_dist3: u32) -> Option<u32> {
+fn old_dist_lz_is_encodable(length: u32, distance: u32, short_code: u32) -> bool {
+    old_dist_lz_length_code(length, distance, 0x2001, short_code).is_some()
+        && old_dist_lz_length_code(length, distance, 0x7f00, short_code).is_some()
+}
+
+fn old_dist_lz_length_code(
+    length: u32,
+    distance: u32,
+    max_dist3: u32,
+    short_code: u32,
+) -> Option<u32> {
     let decoded_bonus = u32::from(distance > 256) + u32::from(distance >= max_dist3);
-    length.checked_sub(2 + decoded_bonus)
+    let length_code = length.checked_sub(2 + decoded_bonus)?;
+    if short_code == 10 && length_code == 0xff {
+        return None;
+    }
+    Some(length_code)
 }
 
 fn long_lz_length_code_for_distance(long_lz: LongLz, max_dist3: u32) -> Option<u32> {
@@ -1981,6 +2009,19 @@ mod tests {
                 length: 20,
                 short_code: 11,
             })
+        );
+    }
+
+    #[test]
+    fn old_distance_finder_rejects_buf60_toggle_encoding() {
+        let mut input = b"abcd".repeat(128);
+        let pos = input.len();
+        input.extend((0..257).map(|index| b"abcd"[index % 4]));
+
+        assert_eq!(
+            find_old_dist_lz(&input, pos, [u32::MAX, 4, u32::MAX, u32::MAX], 2, 0x2001),
+            None,
+            "short-code 10 with decoded base length 0x101 is the Buf60 toggle, not a match"
         );
     }
 

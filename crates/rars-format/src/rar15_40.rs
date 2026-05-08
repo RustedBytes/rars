@@ -2487,7 +2487,10 @@ mod tests {
         ];
         let zero = main_header_with(0);
         for (bit, predicate) in cases {
-            assert!(!predicate(&zero), "expected false when bit {bit:#x} is clear");
+            assert!(
+                !predicate(&zero),
+                "expected false when bit {bit:#x} is clear"
+            );
             let one = main_header_with(bit);
             assert!(predicate(&one), "expected true when bit {bit:#x} is set");
         }
