@@ -642,10 +642,7 @@ fn writes_store_only_rar50_archive_that_reader_extracts() {
     ];
     let bytes = write_stored_archive(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features: FeatureSet::store_only(),
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, FeatureSet::store_only()),
     )
     .unwrap();
 
@@ -687,18 +684,15 @@ fn rar50_writer_builder_writes_stored_archive_with_comment_and_metadata() {
     }];
     let mut features = FeatureSet::store_only();
     features.archive_comment = true;
-    let bytes = rar50::Rar50Writer::new(rar50::WriterOptions {
-        target: ArchiveVersion::Rar70,
-        features,
-    })
-    .stored_entries(&entries)
-    .archive_comment(Some(b"builder archive comment"))
-    .archive_metadata(Some(ArchiveMetadataEntry {
-        name: Some(b"builder-metadata.rar"),
-        creation_time: Some(0x01dcd60e_662d7a32),
-    }))
-    .finish()
-    .unwrap();
+    let bytes = rar50::Rar50Writer::new(rar50::WriterOptions::new(ArchiveVersion::Rar70, features))
+        .stored_entries(&entries)
+        .archive_comment(Some(b"builder archive comment"))
+        .archive_metadata(Some(ArchiveMetadataEntry {
+            name: Some(b"builder-metadata.rar"),
+            creation_time: Some(0x01dcd60e_662d7a32),
+        }))
+        .finish()
+        .unwrap();
 
     let archive = Archive::parse(&bytes).unwrap();
     let services: Vec<_> = archive.services().collect();
@@ -735,10 +729,7 @@ fn writes_compressed_rar50_archive_that_reader_extracts() {
     ];
     let bytes = write_compressed_archive(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features: FeatureSet::store_only(),
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, FeatureSet::store_only()),
     )
     .unwrap();
 
@@ -771,10 +762,10 @@ fn rar50_writer_builder_writes_filtered_compressed_archive() {
         attributes: 0x20,
         host_os: 3,
     }];
-    let bytes = rar50::Rar50Writer::new(rar50::WriterOptions {
-        target: ArchiveVersion::Rar50,
-        features: FeatureSet::store_only(),
-    })
+    let bytes = rar50::Rar50Writer::new(rar50::WriterOptions::new(
+        ArchiveVersion::Rar50,
+        FeatureSet::store_only(),
+    ))
     .compressed_entries(&entries)
     .filter_policy(FilterPolicy::Explicit(rar50::FilterKind::E8))
     .finish()
@@ -808,18 +799,12 @@ fn writes_solid_compressed_rar50_archive_that_reader_extracts() {
     features.solid = true;
     let solid = write_compressed_archive(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
     )
     .unwrap();
     let standalone_second = write_compressed_archive(
         &[entries[1]],
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features: FeatureSet::store_only(),
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, FeatureSet::store_only()),
     )
     .unwrap();
 
@@ -857,10 +842,7 @@ fn writes_delta_filtered_compressed_rar50_archive_that_reader_extracts() {
     }];
     let bytes = write_compressed_archive_with_filter_policy(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features: FeatureSet::store_only(),
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, FeatureSet::store_only()),
         FilterPolicy::Explicit(FilterKind::Delta { channels: 3 }),
     )
     .unwrap();
@@ -891,10 +873,7 @@ fn writes_e8_filtered_compressed_rar50_archive_that_reader_extracts() {
     }];
     let bytes = write_compressed_archive_with_filter_policy(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features: FeatureSet::store_only(),
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, FeatureSet::store_only()),
         FilterPolicy::Explicit(FilterKind::E8),
     )
     .unwrap();
@@ -924,10 +903,7 @@ fn writes_e8e9_filtered_compressed_rar50_archive_that_reader_extracts() {
     }];
     let bytes = write_compressed_archive_with_filter_policy(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features: FeatureSet::store_only(),
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, FeatureSet::store_only()),
         FilterPolicy::Explicit(FilterKind::E8E9),
     )
     .unwrap();
@@ -951,10 +927,7 @@ fn writes_arm_filtered_compressed_rar50_archive_that_reader_extracts() {
     }];
     let bytes = write_compressed_archive_with_filter_policy(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features: FeatureSet::store_only(),
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, FeatureSet::store_only()),
         FilterPolicy::Explicit(FilterKind::Arm),
     )
     .unwrap();
@@ -985,10 +958,7 @@ fn writes_auto_filtered_compressed_rar50_archive_that_reader_extracts() {
         attributes: 0x20,
         host_os: 3,
     }];
-    let options = rar50::WriterOptions {
-        target: ArchiveVersion::Rar50,
-        features: FeatureSet::store_only(),
-    };
+    let options = rar50::WriterOptions::new(ArchiveVersion::Rar50, FeatureSet::store_only());
     let plain = write_compressed_archive(&entries, options).unwrap();
     let auto =
         write_compressed_archive_with_filter_policy(&entries, options, FilterPolicy::AutoSize)
@@ -1018,10 +988,7 @@ fn writes_compressed_rar50_volume_set_that_reader_reassembles() {
     };
     let parts = write_compressed_volumes(
         entry,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features: FeatureSet::store_only(),
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, FeatureSet::store_only()),
         32,
     )
     .unwrap();
@@ -1060,10 +1027,7 @@ fn writes_compressed_rar50_volume_set_with_recovery_records() {
     features.recovery_record = true;
     let parts = write_compressed_volume_set_with_recovery(
         &[entry],
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         32,
         8,
     )
@@ -1104,10 +1068,7 @@ fn writes_solid_compressed_rar50_volume_set_that_reader_reassembles() {
     features.solid = true;
     let parts = write_compressed_volumes(
         entry,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         32,
     )
     .unwrap();
@@ -1156,10 +1117,7 @@ fn writes_multi_file_solid_compressed_rar50_volume_set_that_reader_reassembles()
     features.solid = true;
     let parts = write_compressed_volume_set(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         96,
     )
     .unwrap();
@@ -1200,10 +1158,7 @@ fn writes_rar50_archive_comment_service_record() {
     features.archive_comment = true;
     let bytes = write_stored_archive_with_comment(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         Some(b"RAR5 comment from rars\n"),
     )
     .unwrap();
@@ -1237,10 +1192,7 @@ fn writes_compressed_rar50_archive_comment_service_record() {
     features.archive_comment = true;
     let bytes = write_compressed_archive_with_comment_and_metadata(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         Some(b"compressed RAR5 comment from rars\n"),
         None,
     )
@@ -1281,10 +1233,7 @@ fn writes_rar50_quick_open_service_record() {
     features.quick_open = true;
     let bytes = write_stored_archive_with_comment(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         Some(b"QO comment from rars\n"),
     )
     .unwrap();
@@ -1330,10 +1279,7 @@ fn writes_rar50_acl_and_stream_file_service_records() {
     }];
     let bytes = write_stored_archive_with_file_services(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features: FeatureSet::store_only(),
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, FeatureSet::store_only()),
     )
     .unwrap();
 
@@ -1374,10 +1320,7 @@ fn writes_rar50_file_comment_service_record() {
     }];
     let bytes = write_stored_archive_with_file_services(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features: FeatureSet::store_only(),
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, FeatureSet::store_only()),
     )
     .unwrap();
 
@@ -1419,10 +1362,7 @@ fn writes_encrypted_rar50_file_comment_service_record() {
     features.file_comment = true;
     let bytes = write_encrypted_stored_archive_with_file_services(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
     )
     .unwrap();
 
@@ -1475,10 +1415,7 @@ fn writes_header_encrypted_rar50_file_comment_service_record() {
     features.file_comment = true;
     let bytes = write_encrypted_stored_archive_with_file_services(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
     )
     .unwrap();
 
@@ -1523,10 +1460,7 @@ fn reference_rar_accepts_rar50_acl_and_stream_file_service_records() {
     }];
     let bytes = write_stored_archive_with_file_services(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features: FeatureSet::store_only(),
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, FeatureSet::store_only()),
     )
     .unwrap();
 
@@ -1565,10 +1499,7 @@ fn writes_rar50_recovery_service_record() {
     features.recovery_record = true;
     let bytes = write_stored_archive_with_recovery(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         7,
     )
     .unwrap();
@@ -1619,10 +1550,7 @@ fn repairs_rar50_inline_recovery_payload_damage() {
     features.recovery_record = true;
     let bytes = write_stored_archive_with_recovery(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         20,
     )
     .unwrap();
@@ -1657,10 +1585,7 @@ fn repairs_rar50_inline_recovery_header_damage_without_parsing() {
     features.recovery_record = true;
     let bytes = write_stored_archive_with_recovery(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         20,
     )
     .unwrap();
@@ -1693,10 +1618,7 @@ fn rejects_rar50_inline_recovery_service_header_damage_without_prefix_damage() {
     features.recovery_record = true;
     let bytes = write_stored_archive_with_recovery(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         20,
     )
     .unwrap();
@@ -1723,10 +1645,7 @@ fn repairs_rar50_inline_recovery_with_damaged_recovery_chunk() {
     features.recovery_record = true;
     let bytes = write_stored_archive_with_recovery(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         20,
     )
     .unwrap();
@@ -1767,10 +1686,7 @@ fn repairs_encrypted_rar50_inline_recovery_payload_damage_with_password() {
     features.recovery_record = true;
     let bytes = write_encrypted_stored_archive_with_recovery(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         20,
         b"password",
     )
@@ -1808,10 +1724,7 @@ fn repairs_header_encrypted_rar50_inline_recovery_payload_damage_with_password()
     features.recovery_record = true;
     let bytes = write_encrypted_stored_archive_with_recovery(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         20,
         b"password",
     )
@@ -1847,10 +1760,7 @@ fn writes_compressed_rar50_recovery_service_record() {
     features.recovery_record = true;
     let bytes = write_compressed_archive_with_recovery(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         7,
     )
     .unwrap();
@@ -1893,10 +1803,7 @@ fn rejects_rar50_recovery_feature_without_recovery_writer() {
     features.recovery_record = true;
     let err = write_stored_archive(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
     )
     .unwrap_err();
     assert!(matches!(
@@ -1920,10 +1827,7 @@ fn writes_stored_rar50_volume_set_that_reader_reassembles() {
     };
     let parts = write_stored_volumes(
         entry,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features: FeatureSet::store_only(),
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, FeatureSet::store_only()),
         97,
     )
     .unwrap();
@@ -1967,10 +1871,7 @@ fn writes_stored_rar50_volume_set_with_recovery_records() {
     features.recovery_record = true;
     let parts = write_stored_volumes_with_recovery(
         entry,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         97,
         8,
     )
@@ -2012,10 +1913,7 @@ fn writes_rar50_archive_metadata_main_extra_record() {
     }];
     let bytes = write_stored_archive_with_comment_and_metadata(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar70,
-            features: FeatureSet::store_only(),
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar70, FeatureSet::store_only()),
         None,
         Some(ArchiveMetadataEntry {
             name: Some(b"metadata-name.rar"),
@@ -2052,10 +1950,7 @@ fn writes_compressed_rar50_archive_metadata_main_extra_record() {
     }];
     let bytes = write_compressed_archive_with_metadata(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar70,
-            features: FeatureSet::store_only(),
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar70, FeatureSet::store_only()),
         Some(ArchiveMetadataEntry {
             name: Some(b"compressed-metadata.rar"),
             creation_time: Some(0x01dcd60e_662d7a32),
@@ -2088,18 +1983,12 @@ fn writes_encrypted_stored_rar50_archive_that_reader_extracts_with_password() {
     features.file_encryption = true;
     let first = write_encrypted_stored_archive(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
     )
     .unwrap();
     let second = write_encrypted_stored_archive(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
     )
     .unwrap();
 
@@ -2170,10 +2059,7 @@ fn writes_encrypted_stored_rar50_archive_metadata_record() {
     features.file_encryption = true;
     let bytes = write_encrypted_stored_archive_with_comment_and_metadata(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar70,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar70, features),
         None,
         Some(ArchiveMetadataEntry {
             name: Some(b"encrypted-metadata.rar"),
@@ -2207,18 +2093,12 @@ fn writes_encrypted_compressed_rar50_archive_that_reader_extracts_with_password(
     features.file_encryption = true;
     let first = write_encrypted_compressed_archive(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
     )
     .unwrap();
     let second = write_encrypted_compressed_archive(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
     )
     .unwrap();
 
@@ -2264,10 +2144,7 @@ fn writes_encrypted_compressed_rar50_archive_metadata_record() {
     features.file_encryption = true;
     let bytes = write_encrypted_compressed_archive_with_metadata(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar70,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar70, features),
         Some(ArchiveMetadataEntry {
             name: Some(b"encrypted-compressed-metadata.rar"),
             creation_time: Some(0x01dcd60e_662d7a32),
@@ -2312,10 +2189,7 @@ fn writes_encrypted_solid_compressed_rar50_archive_that_reader_extracts_with_pas
     features.solid = true;
     let bytes = write_encrypted_compressed_archive(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
     )
     .unwrap();
 
@@ -2345,10 +2219,7 @@ fn writes_encrypted_rar50_archive_comment_service_that_reader_extracts_with_pass
     features.archive_comment = true;
     let bytes = write_encrypted_stored_archive_with_comment(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         Some(EncryptedArchiveCommentEntry {
             data: b"encrypted CMT from rars\n",
             password: b"password",
@@ -2357,10 +2228,7 @@ fn writes_encrypted_rar50_archive_comment_service_that_reader_extracts_with_pass
     .unwrap();
     let second = write_encrypted_stored_archive_with_comment(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         Some(EncryptedArchiveCommentEntry {
             data: b"encrypted CMT from rars\n",
             password: b"password",
@@ -2411,10 +2279,7 @@ fn writes_encrypted_compressed_rar50_archive_comment_service_with_password() {
     features.archive_comment = true;
     let bytes = write_encrypted_compressed_archive_with_comment_and_metadata(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         Some(EncryptedArchiveCommentEntry {
             data: b"encrypted compressed CMT from rars\n",
             password: b"secret",
@@ -2459,20 +2324,14 @@ fn writes_encrypted_rar50_recovery_service_that_reader_extracts_with_password() 
     features.recovery_record = true;
     let bytes = write_encrypted_stored_archive_with_recovery(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         6,
         b"password",
     )
     .unwrap();
     let second = write_encrypted_stored_archive_with_recovery(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         6,
         b"password",
     )
@@ -2524,19 +2383,13 @@ fn writes_encrypted_compressed_rar50_recovery_service_that_reader_extracts_with_
     features.recovery_record = true;
     let bytes = write_encrypted_compressed_archive_with_recovery(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         6,
     )
     .unwrap();
     let second = write_encrypted_compressed_archive_with_recovery(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         6,
     )
     .unwrap();
@@ -2581,18 +2434,12 @@ fn writes_header_encrypted_rar50_archive_that_reader_extracts_with_password() {
     features.header_encryption = true;
     let bytes = write_encrypted_stored_archive(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
     )
     .unwrap();
     let second = write_encrypted_stored_archive(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
     )
     .unwrap();
     let (salt, first_header_iv) = header_encryption_salt_and_first_header_iv(&bytes);
@@ -2626,18 +2473,12 @@ fn writes_header_encrypted_compressed_rar50_archive_that_reader_extracts_with_pa
     features.header_encryption = true;
     let bytes = write_encrypted_compressed_archive(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
     )
     .unwrap();
     let second = write_encrypted_compressed_archive(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
     )
     .unwrap();
     let (salt, first_header_iv) = header_encryption_salt_and_first_header_iv(&bytes);
@@ -2688,10 +2529,7 @@ fn writes_header_encrypted_solid_compressed_rar50_archive_that_reader_extracts_w
     features.solid = true;
     let bytes = write_encrypted_compressed_archive(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
     )
     .unwrap();
 
@@ -2723,10 +2561,7 @@ fn writes_header_encrypted_rar50_archive_comment_service_that_reader_extracts_wi
     features.archive_comment = true;
     let bytes = write_encrypted_stored_archive_with_comment(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         Some(EncryptedArchiveCommentEntry {
             data: b"header encrypted CMT from rars\n",
             password: b"password",
@@ -2763,10 +2598,7 @@ fn writes_header_encrypted_compressed_rar50_archive_comment_service_with_passwor
     features.archive_comment = true;
     let bytes = write_encrypted_compressed_archive_with_comment_and_metadata(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         Some(EncryptedArchiveCommentEntry {
             data: b"header encrypted compressed CMT from rars\n",
             password: b"password",
@@ -2802,10 +2634,7 @@ fn writes_header_encrypted_rar50_archive_metadata_record() {
     features.header_encryption = true;
     let bytes = write_encrypted_stored_archive_with_comment_and_metadata(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar70,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar70, features),
         None,
         Some(ArchiveMetadataEntry {
             name: Some(b"header-encrypted-metadata.rar"),
@@ -2842,10 +2671,7 @@ fn writes_header_encrypted_rar50_recovery_service_that_reader_extracts_with_pass
     features.recovery_record = true;
     let bytes = write_encrypted_stored_archive_with_recovery(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         4,
         b"password",
     )
@@ -2886,10 +2712,7 @@ fn writes_header_encrypted_compressed_rar50_recovery_service_that_reader_extract
     features.recovery_record = true;
     let bytes = write_encrypted_compressed_archive_with_recovery(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         4,
     )
     .unwrap();
@@ -2923,10 +2746,7 @@ fn writes_header_encrypted_compressed_rar50_archive_metadata_record() {
     features.header_encryption = true;
     let bytes = write_encrypted_compressed_archive_with_metadata(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar70,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar70, features),
         Some(ArchiveMetadataEntry {
             name: Some(b"header-encrypted-compressed-metadata.rar"),
             creation_time: Some(0x01dcd60e_662d7a32),
@@ -2960,19 +2780,13 @@ fn writes_encrypted_stored_rar50_volume_set_that_reader_reassembles_with_passwor
     features.file_encryption = true;
     let parts = write_encrypted_stored_volumes(
         entry,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         97,
     )
     .unwrap();
     let second_parts = write_encrypted_stored_volumes(
         entry,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         97,
     )
     .unwrap();
@@ -3038,10 +2852,7 @@ fn writes_encrypted_stored_rar50_volume_set_with_recovery_records() {
     features.recovery_record = true;
     let parts = write_encrypted_stored_volumes_with_recovery(
         entry,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         97,
         8,
     )
@@ -3085,19 +2896,13 @@ fn writes_header_encrypted_stored_rar50_volume_set_that_reader_reassembles_with_
     features.header_encryption = true;
     let parts = write_encrypted_stored_volumes(
         entry,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         97,
     )
     .unwrap();
     let second_parts = write_encrypted_stored_volumes(
         entry,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         97,
     )
     .unwrap();
@@ -3142,19 +2947,13 @@ fn writes_encrypted_compressed_rar50_volume_set_that_reader_reassembles_with_pas
     features.file_encryption = true;
     let parts = write_encrypted_compressed_volumes(
         entry,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         32,
     )
     .unwrap();
     let second_parts = write_encrypted_compressed_volumes(
         entry,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         32,
     )
     .unwrap();
@@ -3199,10 +2998,7 @@ fn writes_encrypted_compressed_rar50_volume_set_with_recovery_records() {
     features.recovery_record = true;
     let parts = write_encrypted_compressed_volume_set_with_recovery(
         &[entry],
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         32,
         8,
     )
@@ -3245,10 +3041,7 @@ fn writes_encrypted_solid_compressed_rar50_volume_set_that_reader_reassembles_wi
     features.solid = true;
     let parts = write_encrypted_compressed_volumes(
         entry,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         32,
     )
     .unwrap();
@@ -3284,19 +3077,13 @@ fn writes_header_encrypted_compressed_rar50_volume_set_that_reader_reassembles_w
     features.header_encryption = true;
     let parts = write_encrypted_compressed_volumes(
         entry,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         32,
     )
     .unwrap();
     let second_parts = write_encrypted_compressed_volumes(
         entry,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         32,
     )
     .unwrap();
@@ -3341,10 +3128,7 @@ fn writes_header_encrypted_solid_compressed_rar50_volume_set_that_reader_reassem
     features.solid = true;
     let parts = write_encrypted_compressed_volumes(
         entry,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         32,
     )
     .unwrap();
@@ -3397,10 +3181,7 @@ fn writes_encrypted_multi_file_solid_compressed_rar50_volume_set_that_reader_rea
     features.solid = true;
     let parts = write_encrypted_compressed_volume_set(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         96,
     )
     .unwrap();
@@ -3452,10 +3233,7 @@ fn writes_header_encrypted_multi_file_solid_compressed_rar50_volume_set_that_rea
     features.solid = true;
     let parts = write_encrypted_compressed_volume_set(
         &entries,
-        rar50::WriterOptions {
-            target: ArchiveVersion::Rar50,
-            features,
-        },
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
         96,
     )
     .unwrap();

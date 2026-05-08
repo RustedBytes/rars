@@ -1,6 +1,8 @@
 use crate::{Error, Result};
 
 const MAX_FREQ: u32 = 124;
+const MIN_MODEL_CONTEXTS: usize = 1;
+const PPMD_CONTEXT_BYTES: usize = 64;
 const BIN_SCALE: u32 = 1 << 14;
 const INT_BITS: u32 = 7;
 const PERIOD_BITS: u8 = 7;
@@ -36,6 +38,7 @@ pub struct PpmdDecoder {
     text: Vec<u8>,
     range: RangeDecoder,
     allocated: bool,
+    max_contexts: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -140,6 +143,7 @@ impl PpmdDecoder {
             text: Vec::new(),
             range: RangeDecoder::new(),
             allocated: false,
+            max_contexts: MIN_MODEL_CONTEXTS,
         }
     }
 
@@ -167,7 +171,8 @@ impl PpmdDecoder {
             if max_order == 1 {
                 return Err(Error::InvalidData("RAR PPMd order is invalid"));
             }
-            let _dictionary_mb = max_mb.unwrap_or(0) as usize + 1;
+            let dictionary_mb = max_mb.unwrap_or(0) as usize + 1;
+            self.max_contexts = model_context_limit(dictionary_mb);
             self.init_model(max_order);
             self.allocated = true;
         } else if !self.allocated {
@@ -770,8 +775,7 @@ impl PpmdDecoder {
         };
 
         while let Some(state_ref) = ps.pop() {
-            let context = self.contexts.len();
-            self.contexts.push(Context {
+            let context = self.push_context(Context {
                 states: vec![State {
                     symbol: new_sym,
                     freq: new_freq,
@@ -779,11 +783,20 @@ impl PpmdDecoder {
                 }],
                 summ_freq: 0,
                 suffix: Some(c),
-            });
+            })?;
             self.state_mut(state_ref).successor = Successor::Context(context);
             c = context;
         }
         Some(c)
+    }
+
+    fn push_context(&mut self, context: Context) -> Option<usize> {
+        if self.contexts.len() >= self.max_contexts {
+            return None;
+        }
+        let index = self.contexts.len();
+        self.contexts.push(context);
+        Some(index)
     }
 
     fn rescale(&mut self) {
@@ -847,6 +860,7 @@ impl PpmdEncoder {
             return Err(Error::InvalidData("RAR PPMd order is invalid"));
         }
         let mut model = PpmdDecoder::new();
+        model.max_contexts = model_context_limit(1);
         model.init_model(max_order);
         model.allocated = true;
         Ok(Self {
@@ -1038,6 +1052,14 @@ fn hi_bits_flag(symbol: u8, bits: u32) -> u32 {
     ((symbol as u32 + 0xc0) >> (8 - bits)) & (1 << bits)
 }
 
+fn model_context_limit(dictionary_mb: usize) -> usize {
+    dictionary_mb
+        .saturating_mul(1024 * 1024)
+        .checked_div(PPMD_CONTEXT_BYTES)
+        .unwrap_or(usize::MAX)
+        .max(MIN_MODEL_CONTEXTS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1097,6 +1119,7 @@ mod tests {
         assert_eq!(decoder.max_order, 64);
         assert_eq!(decoder.contexts.len(), 1);
         assert_eq!(decoder.contexts[0].states.len(), 256);
+        assert_eq!(decoder.max_contexts, model_context_limit(1));
     }
 
     #[test]
@@ -1122,6 +1145,22 @@ mod tests {
         assert_eq!(
             decoder.get_threshold(0),
             Err(Error::InvalidData("RAR PPMd frequency sum is zero"))
+        );
+    }
+
+    #[test]
+    fn context_allocation_respects_dictionary_limit() {
+        let mut decoder = PpmdDecoder::new();
+        decoder.max_contexts = 1;
+        decoder.init_model(4);
+
+        assert_eq!(
+            decoder.push_context(Context {
+                states: Vec::new(),
+                summ_freq: 0,
+                suffix: None,
+            }),
+            None
         );
     }
 }

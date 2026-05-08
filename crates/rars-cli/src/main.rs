@@ -978,7 +978,7 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
             features.quick_open = quick_open;
             features.recovery_record = recovery_percent.is_some();
             features.solid = solid;
-            let options = rars::rar50::WriterOptions { target, features };
+            let options = rars::rar50::WriterOptions::new(target, features);
             if let Some(volume_size) = volume_size {
                 if archive_comment.is_some() {
                     return Err("RAR 5 writer does not support comments on volumes yet".into());
@@ -1251,18 +1251,13 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
             Ok(())
         }
         AddWritePlan::Rar15To40 => {
-            let options = Rar15WriterOptions {
-                target,
-                features: {
-                    let mut features = FeatureSet::store_only();
-                    features.solid = solid;
-                    features.file_encryption = password.is_some();
-                    features.header_encryption = header_encryption;
-                    features.archive_comment = archive_comment.is_some();
-                    features.file_comment = file_comment.is_some();
-                    features
-                },
-            };
+            let mut features = FeatureSet::store_only();
+            features.solid = solid;
+            features.file_encryption = password.is_some();
+            features.header_encryption = header_encryption;
+            features.archive_comment = archive_comment.is_some();
+            features.file_comment = file_comment.is_some();
+            let options = Rar15WriterOptions::new(target, features);
             if let Some(volume_size) = volume_size {
                 // Invariant: parse_add_command rejects add commands without inputs.
                 let entry = owned.first().expect("one input checked above");
@@ -1420,7 +1415,7 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
         AddWritePlan::Rar13 => {
             let mut features = FeatureSet::store_only();
             features.solid = solid;
-            let options = Rar13WriterOptions { target, features };
+            let options = Rar13WriterOptions::new(target, features);
             if let Some(volume_size) = volume_size {
                 // Invariant: parse_add_command rejects add commands without inputs.
                 let entry = owned.first().expect("one input checked above");
@@ -1745,7 +1740,7 @@ fn open_output_writer(
 ) -> rars::Result<Box<dyn std::io::Write>> {
     let rel = output_relative_path(&entry.name)
         .map_err(|_| Error::InvalidHeader("unsafe archive path"))?;
-    let out_path = out_dir.join(rel);
+    let out_path = checked_output_path(out_dir, &rel)?;
     if entry.is_directory {
         fs::create_dir_all(&out_path)?;
         return Ok(Box::new(std::io::sink()));
@@ -1754,6 +1749,23 @@ fn open_output_writer(
         fs::create_dir_all(parent)?;
     }
     Ok(Box::new(fs::File::create(out_path)?))
+}
+
+fn checked_output_path(out_dir: &Path, rel: &Path) -> rars::Result<PathBuf> {
+    let mut out_path = out_dir.to_path_buf();
+    for component in rel.components() {
+        let Component::Normal(part) = component else {
+            return Err(Error::InvalidHeader("unsafe archive path"));
+        };
+        out_path.push(part);
+        if fs::symlink_metadata(&out_path)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(Error::InvalidHeader("unsafe archive path crosses symlink"));
+        }
+    }
+    Ok(out_path)
 }
 
 fn print_ok_entry(entry: &ExtractedEntryMeta) {
@@ -1857,8 +1869,8 @@ fn usage() {
 #[cfg(test)]
 mod tests {
     use super::{
-        error_needs_password, infer_part_index, output_relative_path, rar50_volume_part_path,
-        redirection_warning,
+        checked_output_path, error_needs_password, infer_part_index, output_relative_path,
+        rar50_volume_part_path, redirection_warning,
     };
     use rars::Error;
     use std::path::{Path, PathBuf};
@@ -1898,6 +1910,26 @@ mod tests {
         ] {
             assert!(output_relative_path(name).is_err(), "{name:?}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_output_writer_rejects_existing_symlink_components() {
+        let root = std::env::temp_dir().join(format!("rars-symlink-output-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let outside = root.with_extension("outside");
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+        assert!(matches!(
+            checked_output_path(&root, Path::new("link").join("escape.txt").as_path()),
+            Err(Error::InvalidHeader("unsafe archive path crosses symlink"))
+        ));
+        assert!(!outside.join("escape.txt").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 
     #[test]

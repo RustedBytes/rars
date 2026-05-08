@@ -2,14 +2,6 @@
 
 ## Active Tasks
 
-- Review pass 2, batch 2:
-  - Protect CLI extraction from pre-existing symlinks inside the output
-    directory.
-  - Make RAR20 cipher encrypt/decrypt reject partial 16-byte tails instead of
-    leaving them unchanged.
-  - Enforce an explicit PPMd model/context memory cap from the dictionary-size
-    header.
-  - Mark remaining public writer option structs `#[non_exhaustive]`.
 - Review pass 2, batch 3:
   - Replace fuzz-bait slice-to-array `unwrap()` sites in recovery/header parsing
     with checked errors where the input is archive-controlled.

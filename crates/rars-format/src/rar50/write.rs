@@ -13,9 +13,16 @@ const AUTO_X86_MAX_SPAN_RANGES: usize = 2;
 const AUTO_X86_MIN_SPAN_OPCODES: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WriterOptions {
     pub target: crate::ArchiveVersion,
     pub features: crate::FeatureSet,
+}
+
+impl WriterOptions {
+    pub const fn new(target: crate::ArchiveVersion, features: crate::FeatureSet) -> Self {
+        Self { target, features }
+    }
 }
 
 impl Default for WriterOptions {

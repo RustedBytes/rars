@@ -608,10 +608,7 @@ mod tests {
     }
 
     fn rar13_options(target: ArchiveVersion) -> rar13::WriterOptions {
-        rar13::WriterOptions {
-            target,
-            features: FeatureSet::store_only(),
-        }
+        rar13::WriterOptions::new(target, FeatureSet::store_only())
     }
 
     fn rar15_options(target: ArchiveVersion) -> rar15_40::WriterOptions {
@@ -622,7 +619,7 @@ mod tests {
         target: ArchiveVersion,
         features: FeatureSet,
     ) -> rar15_40::WriterOptions {
-        rar15_40::WriterOptions { target, features }
+        rar15_40::WriterOptions::new(target, features)
     }
 
     fn rar50_options(target: ArchiveVersion) -> rar50::WriterOptions {
@@ -633,7 +630,7 @@ mod tests {
         target: ArchiveVersion,
         features: FeatureSet,
     ) -> rar50::WriterOptions {
-        rar50::WriterOptions { target, features }
+        rar50::WriterOptions::new(target, features)
     }
 
     fn write_rar29_filter(

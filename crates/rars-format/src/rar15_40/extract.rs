@@ -566,11 +566,9 @@ impl<R: Read> DecryptingReader<R> {
             let mut data: Vec<u8> = self.encrypted_block.drain(..full_len).collect();
             match &mut self.cipher {
                 SplitCipher::Rar15(_) => unreachable!("RAR 1.5 is byte-stream decrypted"),
-                SplitCipher::Rar20(cipher) => {
-                    for block in data.chunks_exact_mut(16) {
-                        cipher.decrypt_in_place(block);
-                    }
-                }
+                SplitCipher::Rar20(cipher) => cipher
+                    .decrypt_in_place(&mut data)
+                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?,
                 SplitCipher::Rar30(cipher) => {
                     for block in data.chunks_exact_mut(16) {
                         cipher.decrypt_in_place(block);
@@ -579,7 +577,10 @@ impl<R: Read> DecryptingReader<R> {
             }
             self.decrypted = data;
         } else if self.eof && !self.encrypted_block.is_empty() {
-            self.decrypted = std::mem::take(&mut self.encrypted_block);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "RAR encrypted split payload is not block aligned",
+            ));
         }
         Ok(())
     }

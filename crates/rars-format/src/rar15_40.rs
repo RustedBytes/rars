@@ -189,9 +189,16 @@ pub enum NewSubKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WriterOptions {
     pub target: ArchiveVersion,
     pub features: FeatureSet,
+}
+
+impl WriterOptions {
+    pub const fn new(target: ArchiveVersion, features: FeatureSet) -> Self {
+        Self { target, features }
+    }
 }
 
 impl Default for WriterOptions {
@@ -415,7 +422,9 @@ impl FileHeader {
             return Err(Error::NeedPassword);
         };
         if self.unp_ver == 20 || self.unp_ver == 26 {
-            Rar20Cipher::new(password).decrypt_in_place(data);
+            Rar20Cipher::new(password)
+                .decrypt_in_place(data)
+                .map_err(Error::InvalidHeader)?;
             return Ok(());
         }
         if self.unp_ver == 15 {

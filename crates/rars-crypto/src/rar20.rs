@@ -31,16 +31,24 @@ impl Rar20Cipher {
         cipher
     }
 
-    pub fn decrypt_in_place(&mut self, data: &mut [u8]) {
+    pub fn decrypt_in_place(&mut self, data: &mut [u8]) -> Result<(), &'static str> {
+        if !data.len().is_multiple_of(16) {
+            return Err("RAR 2.0 cipher input is not block aligned");
+        }
         for block in data.chunks_exact_mut(16) {
             self.decrypt_block(block);
         }
+        Ok(())
     }
 
-    pub fn encrypt_in_place(&mut self, data: &mut [u8]) {
+    pub fn encrypt_in_place(&mut self, data: &mut [u8]) -> Result<(), &'static str> {
+        if !data.len().is_multiple_of(16) {
+            return Err("RAR 2.0 cipher input is not block aligned");
+        }
         for block in data.chunks_exact_mut(16) {
             self.encrypt_block(block);
         }
+        Ok(())
     }
 
     fn set_key(&mut self, password: &[u8]) {
@@ -165,10 +173,31 @@ mod tests {
         let mut encrypted = *b"0123456789abcdefRAR2.0 block pad";
         let original = encrypted;
 
-        Rar20Cipher::new(b"password").encrypt_in_place(&mut encrypted);
+        Rar20Cipher::new(b"password")
+            .encrypt_in_place(&mut encrypted)
+            .unwrap();
         assert_ne!(encrypted, original);
 
-        Rar20Cipher::new(b"password").decrypt_in_place(&mut encrypted);
+        Rar20Cipher::new(b"password")
+            .decrypt_in_place(&mut encrypted)
+            .unwrap();
         assert_eq!(encrypted, original);
+    }
+
+    #[test]
+    fn rar20_cipher_rejects_partial_tail() {
+        let mut data = *b"0123456789abcdef!";
+        let original = data;
+
+        assert_eq!(
+            Rar20Cipher::new(b"password").encrypt_in_place(&mut data),
+            Err("RAR 2.0 cipher input is not block aligned")
+        );
+        assert_eq!(data, original);
+        assert_eq!(
+            Rar20Cipher::new(b"password").decrypt_in_place(&mut data),
+            Err("RAR 2.0 cipher input is not block aligned")
+        );
+        assert_eq!(data, original);
     }
 }

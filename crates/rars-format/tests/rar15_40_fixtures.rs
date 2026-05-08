@@ -231,10 +231,7 @@ fn generated_rar29_e8_filtered_archive_round_trips() {
 
     let bytes = write_rar29_filter(
         &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar29,
-            features: FeatureSet::store_only(),
-        },
+        WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only()),
         FilterKind::E8,
     );
     let archive = Archive::parse(&bytes).unwrap();
@@ -263,10 +260,7 @@ fn generated_rar29_auto_filtered_archive_round_trips() {
 
     let bytes = write_rar29_auto(
         &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar29,
-            features: FeatureSet::store_only(),
-        },
+        WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only()),
     );
     let archive = Archive::parse(&bytes).unwrap();
     let file = archive.files().next().unwrap();
@@ -274,10 +268,7 @@ fn generated_rar29_auto_filtered_archive_round_trips() {
     assert_eq!(file.unp_ver, 29);
     let plain = write_compressed_archive(
         &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar29,
-            features: FeatureSet::store_only(),
-        },
+        WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only()),
     )
     .unwrap();
     let plain_archive = Archive::parse(&plain).unwrap();
@@ -300,10 +291,7 @@ fn generated_rar29_auto_filtered_archive_considers_delta_candidates() {
         password: None,
         file_comment: None,
     }];
-    let options = WriterOptions {
-        target: ArchiveVersion::Rar29,
-        features: FeatureSet::store_only(),
-    };
+    let options = WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only());
 
     let auto = write_rar29_auto(&entries, options);
     let explicit = write_rar29_filter(&entries, options, FilterKind::Delta { channels: 3 });
@@ -332,10 +320,7 @@ fn generated_rar29_auto_filtered_archive_considers_audio_candidates() {
         password: None,
         file_comment: None,
     }];
-    let options = WriterOptions {
-        target: ArchiveVersion::Rar29,
-        features: FeatureSet::store_only(),
-    };
+    let options = WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only());
 
     let auto = write_rar29_auto(&entries, options);
     let explicit = write_rar29_filter(&entries, options, FilterKind::Audio { channels: 2 });
@@ -372,10 +357,7 @@ fn generated_rar29_auto_filtered_archive_considers_rgb_candidates() {
         password: None,
         file_comment: None,
     }];
-    let options = WriterOptions {
-        target: ArchiveVersion::Rar29,
-        features: FeatureSet::store_only(),
-    };
+    let options = WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only());
 
     let auto = write_rar29_auto(&entries, options);
     let explicit = write_rar29_filter(&entries, options, FilterKind::Rgb { width, pos_r: 0 });
@@ -402,10 +384,7 @@ fn generated_rar29_auto_filtered_archive_considers_itanium_candidates() {
         password: None,
         file_comment: None,
     }];
-    let options = WriterOptions {
-        target: ArchiveVersion::Rar29,
-        features: FeatureSet::store_only(),
-    };
+    let options = WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only());
 
     let auto = write_rar29_auto(&entries, options);
     let explicit = write_rar29_filter(&entries, options, FilterKind::Itanium);
@@ -453,10 +432,7 @@ fn generated_rar29_segmented_e8_filtered_archive_round_trips() {
 
     let bytes = write_rar29_filter_range(
         &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar29,
-            features: FeatureSet::store_only(),
-        },
+        WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only()),
         FilterKind::E8,
         filter_start..filter_end,
     );
@@ -499,10 +475,7 @@ fn generated_rar29_solid_e8_filtered_archive_round_trips() {
 
     let bytes = write_rar29_filter(
         &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar29,
-            features,
-        },
+        WriterOptions::new(ArchiveVersion::Rar29, features),
         FilterKind::E8,
     );
     let archive = Archive::parse(&bytes).unwrap();
@@ -535,10 +508,7 @@ fn generated_rar29_encrypted_e8_filtered_archive_round_trips() {
 
     let bytes = write_rar29_filter(
         &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar29,
-            features,
-        },
+        WriterOptions::new(ArchiveVersion::Rar29, features),
         FilterKind::E8,
     );
     let archive = Archive::parse(&bytes).unwrap();
@@ -573,10 +543,7 @@ fn generated_rar30_header_encrypted_e8_filtered_archive_round_trips() {
 
     let bytes = write_rar29_filter(
         &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar30,
-            features,
-        },
+        WriterOptions::new(ArchiveVersion::Rar30, features),
         FilterKind::E8,
     );
 
@@ -636,10 +603,7 @@ fn reference_unrar_accepts_rar29_solid_e8_filter_record() {
     features.solid = true;
     let bytes = write_rar29_filter(
         &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar29,
-            features,
-        },
+        WriterOptions::new(ArchiveVersion::Rar29, features),
         FilterKind::E8,
     );
     std::fs::write(&archive_path, bytes).unwrap();
@@ -698,10 +662,7 @@ fn reference_unrar_accepts_rar29_segmented_e8_filter_record() {
     }];
     let bytes = write_rar29_filter_range(
         &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar29,
-            features: FeatureSet::store_only(),
-        },
+        WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only()),
         FilterKind::E8,
         filter_start..filter_end,
     );
@@ -759,10 +720,7 @@ fn reference_unrar_accepts_rar29_segmented_e8e9_filter_record() {
     }];
     let bytes = write_rar29_filter_range(
         &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar29,
-            features: FeatureSet::store_only(),
-        },
+        WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only()),
         FilterKind::E8E9,
         filter_start..filter_end,
     );
@@ -802,10 +760,7 @@ fn generated_rar29_e8e9_filtered_archive_round_trips() {
 
     let bytes = write_rar29_filter(
         &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar29,
-            features: FeatureSet::store_only(),
-        },
+        WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only()),
         FilterKind::E8E9,
     );
     let archive = Archive::parse(&bytes).unwrap();
@@ -834,10 +789,7 @@ fn generated_rar29_delta_filtered_archive_round_trips() {
 
     let bytes = write_rar29_filter(
         &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar29,
-            features: FeatureSet::store_only(),
-        },
+        WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only()),
         FilterKind::Delta { channels: 3 },
     );
     let archive = Archive::parse(&bytes).unwrap();
@@ -869,10 +821,7 @@ fn generated_rar29_segmented_delta_filtered_archive_round_trips() {
 
     let bytes = write_rar29_filter_range(
         &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar29,
-            features: FeatureSet::store_only(),
-        },
+        WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only()),
         FilterKind::Delta { channels: 3 },
         filter_start..filter_end,
     );
@@ -919,10 +868,7 @@ fn reference_unrar_accepts_rar29_segmented_delta_filter_record() {
     }];
     let bytes = write_rar29_filter_range(
         &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar29,
-            features: FeatureSet::store_only(),
-        },
+        WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only()),
         FilterKind::Delta { channels: 3 },
         filter_start..filter_end,
     );
@@ -965,10 +911,7 @@ fn generated_rar29_itanium_filtered_archive_round_trips() {
 
     let bytes = write_rar29_filter(
         &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar29,
-            features: FeatureSet::store_only(),
-        },
+        WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only()),
         FilterKind::Itanium,
     );
     let archive = Archive::parse(&bytes).unwrap();
@@ -1003,10 +946,7 @@ fn generated_rar29_segmented_itanium_filtered_archive_round_trips() {
 
     let bytes = write_rar29_filter_range(
         &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar29,
-            features: FeatureSet::store_only(),
-        },
+        WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only()),
         FilterKind::Itanium,
         filter_start..filter_end,
     );
@@ -1056,10 +996,7 @@ fn reference_unrar_accepts_rar29_segmented_itanium_filter_record() {
     }];
     let bytes = write_rar29_filter_range(
         &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar29,
-            features: FeatureSet::store_only(),
-        },
+        WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only()),
         FilterKind::Itanium,
         filter_start..filter_end,
     );
@@ -1100,10 +1037,7 @@ fn generated_rar29_rgb_filtered_archive_round_trips() {
 
     let bytes = write_rar29_filter(
         &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar29,
-            features: FeatureSet::store_only(),
-        },
+        WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only()),
         FilterKind::Rgb { width, pos_r: 0 },
     );
     let archive = Archive::parse(&bytes).unwrap();
@@ -1136,10 +1070,7 @@ fn generated_rar29_segmented_rgb_filtered_archive_round_trips() {
 
     let bytes = write_rar29_filter_range(
         &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar29,
-            features: FeatureSet::store_only(),
-        },
+        WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only()),
         FilterKind::Rgb { width, pos_r: 0 },
         filter_start..filter_end,
     );
@@ -1187,10 +1118,7 @@ fn reference_unrar_accepts_rar29_segmented_rgb_filter_record() {
     }];
     let bytes = write_rar29_filter_range(
         &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar29,
-            features: FeatureSet::store_only(),
-        },
+        WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only()),
         FilterKind::Rgb { width, pos_r: 0 },
         filter_start..filter_end,
     );
@@ -1232,10 +1160,7 @@ fn generated_rar29_audio_filtered_archive_round_trips() {
 
     let bytes = write_rar29_filter(
         &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar29,
-            features: FeatureSet::store_only(),
-        },
+        WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only()),
         FilterKind::Audio { channels: 2 },
     );
     let archive = Archive::parse(&bytes).unwrap();
@@ -1267,10 +1192,7 @@ fn generated_rar29_segmented_audio_filtered_archive_round_trips() {
 
     let bytes = write_rar29_filter_range(
         &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar29,
-            features: FeatureSet::store_only(),
-        },
+        WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only()),
         FilterKind::Audio { channels: 2 },
         filter_start..filter_end,
     );
@@ -1458,10 +1380,7 @@ fn reference_unrar300_accepts_rar29_segmented_filter_records() {
 }
 
 fn reference_rar29_options() -> WriterOptions {
-    WriterOptions {
-        target: ArchiveVersion::Rar29,
-        features: FeatureSet::store_only(),
-    }
+    WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only())
 }
 
 fn write_reference_segmented_archive(
@@ -1516,10 +1435,7 @@ fn reference_unrar_accepts_rar29_segmented_audio_filter_record() {
     }];
     let bytes = write_rar29_filter_range(
         &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar29,
-            features: FeatureSet::store_only(),
-        },
+        WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only()),
         FilterKind::Audio { channels: 2 },
         filter_start..filter_end,
     );
@@ -1635,10 +1551,7 @@ fn writes_stored_rar15_archive_comment_that_reader_decodes() {
 
     let bytes = write_stored_archive_with_comment(
         &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar15,
-            features,
-        },
+        WriterOptions::new(ArchiveVersion::Rar15, features),
         Some(b"archive note\n"),
     )
     .unwrap();
@@ -1666,14 +1579,8 @@ fn writes_rar15_file_comments_that_reader_decodes() {
         password: None,
         file_comment: Some(b"stored note\r\n"),
     }];
-    let stored_bytes = write_stored_archive(
-        &stored,
-        WriterOptions {
-            target: ArchiveVersion::Rar15,
-            features,
-        },
-    )
-    .unwrap();
+    let stored_bytes =
+        write_stored_archive(&stored, WriterOptions::new(ArchiveVersion::Rar15, features)).unwrap();
     let stored_archive = Archive::parse(&stored_bytes).unwrap();
     let stored_file = stored_archive.files().next().unwrap();
     assert!(stored_file.has_file_comment());
@@ -1697,10 +1604,7 @@ fn writes_rar15_file_comments_that_reader_decodes() {
     }];
     let compressed_bytes = write_compressed_archive(
         &compressed,
-        WriterOptions {
-            target: ArchiveVersion::Rar15,
-            features,
-        },
+        WriterOptions::new(ArchiveVersion::Rar15, features),
     )
     .unwrap();
     let compressed_archive = Archive::parse(&compressed_bytes).unwrap();
@@ -1731,10 +1635,7 @@ fn writes_rar20_old_style_comments_that_reader_decodes() {
     }];
     let archive_bytes = write_stored_archive_with_comment(
         &stored,
-        WriterOptions {
-            target: ArchiveVersion::Rar20,
-            features: archive_features,
-        },
+        WriterOptions::new(ArchiveVersion::Rar20, archive_features),
         Some(b"rar20 archive note\r\n"),
     )
     .unwrap();
@@ -1759,10 +1660,7 @@ fn writes_rar20_old_style_comments_that_reader_decodes() {
     }];
     let file_bytes = write_compressed_archive_with_comment(
         &compressed,
-        WriterOptions {
-            target: ArchiveVersion::Rar20,
-            features: file_features,
-        },
+        WriterOptions::new(ArchiveVersion::Rar20, file_features),
         None,
     )
     .unwrap();
@@ -1795,10 +1693,7 @@ fn writes_rar29_old_style_comments_that_reader_decodes() {
     }];
     let archive_bytes = write_stored_archive_with_comment(
         &stored,
-        WriterOptions {
-            target: ArchiveVersion::Rar29,
-            features: archive_features,
-        },
+        WriterOptions::new(ArchiveVersion::Rar29, archive_features),
         Some(b"rar29 archive note\r\n"),
     )
     .unwrap();
@@ -1823,10 +1718,7 @@ fn writes_rar29_old_style_comments_that_reader_decodes() {
     }];
     let file_bytes = write_compressed_archive_with_comment(
         &compressed,
-        WriterOptions {
-            target: ArchiveVersion::Rar29,
-            features: file_features,
-        },
+        WriterOptions::new(ArchiveVersion::Rar29, file_features),
         None,
     )
     .unwrap();
@@ -1860,7 +1752,7 @@ fn writes_rar3_newsub_archive_comment_that_reader_decodes() {
         }];
         let bytes = write_compressed_archive_with_comment(
             &entries,
-            WriterOptions { target, features },
+            WriterOptions::new(target, features),
             Some(b"rar3 NEWSUB archive note\r\n"),
         )
         .unwrap();
@@ -1962,10 +1854,7 @@ fn writes_literal_compressed_rar20_archive_that_reader_extracts() {
     ];
     let bytes = write_compressed_archive(
         &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar20,
-            features: FeatureSet::store_only(),
-        },
+        WriterOptions::new(ArchiveVersion::Rar20, FeatureSet::store_only()),
     )
     .unwrap();
     let archive = Archive::parse(&bytes).unwrap();
@@ -1994,10 +1883,7 @@ fn writes_literal_compressed_rar20_archive_that_reader_extracts() {
 fn writes_encrypted_rar20_archives_that_reader_extracts_with_password() {
     let mut features = FeatureSet::store_only();
     features.file_encryption = true;
-    let options = WriterOptions {
-        target: ArchiveVersion::Rar20,
-        features,
-    };
+    let options = WriterOptions::new(ArchiveVersion::Rar20, features);
 
     let stored = [StoredEntry {
         name: b"rar20-secret-store.txt",
@@ -2056,10 +1942,7 @@ fn writes_encrypted_rar20_archives_that_reader_extracts_with_password() {
 fn writes_encrypted_rar29_archives_that_reader_extracts_with_password() {
     let mut features = FeatureSet::store_only();
     features.file_encryption = true;
-    let options = WriterOptions {
-        target: ArchiveVersion::Rar29,
-        features,
-    };
+    let options = WriterOptions::new(ArchiveVersion::Rar29, features);
 
     let stored = [StoredEntry {
         name: b"rar29-secret-store.txt",
@@ -2158,10 +2041,7 @@ fn writes_literal_compressed_rar29_archive_that_reader_extracts() {
     ];
     let bytes = write_compressed_archive(
         &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar29,
-            features: FeatureSet::store_only(),
-        },
+        WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only()),
     )
     .unwrap();
     let archive = Archive::parse(&bytes).unwrap();
@@ -2217,7 +2097,8 @@ fn writes_solid_compressed_rar29_rar30_and_rar40_archives_that_reader_extracts()
         ];
         let mut features = FeatureSet::store_only();
         features.solid = true;
-        let bytes = write_compressed_archive(&entries, WriterOptions { target, features }).unwrap();
+        let bytes =
+            write_compressed_archive(&entries, WriterOptions::new(target, features)).unwrap();
         let archive = Archive::parse(&bytes).unwrap();
         let files: Vec<_> = archive.files().collect();
 
@@ -2266,10 +2147,7 @@ fn writes_solid_compressed_rar20_archive_that_reader_extracts() {
 
     let bytes = write_compressed_archive(
         &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar20,
-            features,
-        },
+        WriterOptions::new(ArchiveVersion::Rar20, features),
     )
     .unwrap();
     let archive = Archive::parse(&bytes).unwrap();
@@ -2329,10 +2207,7 @@ fn writes_solid_rar20_archive_across_table_boundary_and_multiple_history_members
 
     let bytes = write_compressed_archive(
         &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar20,
-            features,
-        },
+        WriterOptions::new(ArchiveVersion::Rar20, features),
     )
     .unwrap();
     let archive = Archive::parse(&bytes).unwrap();
@@ -2347,10 +2222,7 @@ fn writes_solid_rar20_archive_across_table_boundary_and_multiple_history_members
 
     let independent_third = write_compressed_archive(
         &[entries[2]],
-        WriterOptions {
-            target: ArchiveVersion::Rar20,
-            features: FeatureSet::store_only(),
-        },
+        WriterOptions::new(ArchiveVersion::Rar20, FeatureSet::store_only()),
     )
     .unwrap();
     let independent_third = Archive::parse(&independent_third).unwrap();
@@ -2387,10 +2259,7 @@ fn compressed_rar29_writer_stores_incompressible_member_when_smaller() {
 
     let bytes = write_compressed_archive(
         &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar29,
-            features: FeatureSet::store_only(),
-        },
+        WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only()),
     )
     .unwrap();
     let archive = Archive::parse(&bytes).unwrap();
@@ -2448,10 +2317,7 @@ fn solid_rar29_writer_stores_incompressible_member_and_resets_solid_run() {
 
     let bytes = write_compressed_archive(
         &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar29,
-            features,
-        },
+        WriterOptions::new(ArchiveVersion::Rar29, features),
     )
     .unwrap();
     let archive = Archive::parse(&bytes).unwrap();
@@ -2494,10 +2360,7 @@ fn auto_filtered_rar29_writer_stores_incompressible_member_when_smaller() {
 
     let bytes = write_rar29_compressed_archive_with_filter_policy(
         &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar29,
-            features: FeatureSet::store_only(),
-        },
+        WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only()),
         FilterPolicy::Auto,
     )
     .unwrap();
@@ -2537,10 +2400,7 @@ fn auto_filtered_rar29_writer_chooses_ppmd_for_text_when_smaller() {
 
     let bytes = write_rar29_compressed_archive_with_filter_policy(
         &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar29,
-            features: FeatureSet::store_only(),
-        },
+        WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only()),
         FilterPolicy::Auto,
     )
     .unwrap();
@@ -2567,10 +2427,7 @@ fn default_rar29_writer_uses_auto_policy_for_text() {
 
     let bytes = write_compressed_archive(
         &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar29,
-            features: FeatureSet::store_only(),
-        },
+        WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only()),
     )
     .unwrap();
     let archive = Archive::parse(&bytes).unwrap();
@@ -2611,10 +2468,7 @@ fn auto_filtered_rar29_writer_improves_x86_relative_calls() {
     let plain_packed = rars_codec::rar29::unpack29_encode_literals(&payload).unwrap();
     let auto = write_rar29_compressed_archive_with_filter_policy(
         &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar29,
-            features: FeatureSet::store_only(),
-        },
+        WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only()),
         FilterPolicy::Auto,
     )
     .unwrap();
@@ -2654,10 +2508,7 @@ fn default_rar29_writer_uses_auto_policy_for_x86() {
         password: None,
         file_comment: None,
     }];
-    let options = WriterOptions {
-        target: ArchiveVersion::Rar29,
-        features: FeatureSet::store_only(),
-    };
+    let options = WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only());
 
     let default = write_compressed_archive(&entries, options).unwrap();
     let explicit_auto =
@@ -2689,10 +2540,7 @@ fn default_rar29_writer_uses_auto_policy_for_audio_shaped_data() {
         password: None,
         file_comment: None,
     }];
-    let options = WriterOptions {
-        target: ArchiveVersion::Rar29,
-        features: FeatureSet::store_only(),
-    };
+    let options = WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only());
 
     let default = write_compressed_archive(&entries, options).unwrap();
     let explicit_audio = write_rar29_compressed_archive_with_filter_policy(
@@ -2753,10 +2601,7 @@ fn auto_filtered_rar29_writer_spans_separated_x86_call_clusters() {
         password: None,
         file_comment: None,
     }];
-    let options = WriterOptions {
-        target: ArchiveVersion::Rar29,
-        features: FeatureSet::store_only(),
-    };
+    let options = WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only());
 
     let auto =
         write_rar29_compressed_archive_with_filter_policy(&entries, options, FilterPolicy::Auto)
@@ -2796,10 +2641,7 @@ fn ppmd_rar29_writer_emits_method_35_member() {
 
     let bytes = write_rar29_compressed_archive_with_filter_policy(
         &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar29,
-            features: FeatureSet::store_only(),
-        },
+        WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only()),
         FilterPolicy::Ppmd,
     )
     .unwrap();
@@ -2832,10 +2674,7 @@ fn ppmd_rar29_writer_uses_lz_escapes_for_repeated_data() {
         password: None,
         file_comment: None,
     }];
-    let options = WriterOptions {
-        target: ArchiveVersion::Rar29,
-        features: FeatureSet::store_only(),
-    };
+    let options = WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only());
 
     let ppmd =
         write_rar29_compressed_archive_with_filter_policy(&entries, options, FilterPolicy::Ppmd)
@@ -2864,10 +2703,7 @@ fn ppmd_rar29_writer_embeds_vm_filter_record() {
 
     let bytes = write_rar29_compressed_archive_with_filter_policy(
         &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar29,
-            features: FeatureSet::store_only(),
-        },
+        WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only()),
         FilterPolicy::PpmdFiltered(FilterSpec::whole(FilterKind::E8)),
     )
     .unwrap();
@@ -2904,10 +2740,7 @@ fn writes_solid_compressed_rar15_archive_that_reader_extracts() {
     features.solid = true;
     let bytes = write_compressed_archive(
         &entries,
-        WriterOptions {
-            target: ArchiveVersion::Rar15,
-            features,
-        },
+        WriterOptions::new(ArchiveVersion::Rar15, features),
     )
     .unwrap();
     let archive = Archive::parse(&bytes).unwrap();
@@ -2938,14 +2771,8 @@ fn writes_encrypted_rar15_archives_that_reader_extracts_with_password() {
         password: Some(b"password"),
         file_comment: None,
     }];
-    let stored_bytes = write_stored_archive(
-        &stored,
-        WriterOptions {
-            target: ArchiveVersion::Rar15,
-            features,
-        },
-    )
-    .unwrap();
+    let stored_bytes =
+        write_stored_archive(&stored, WriterOptions::new(ArchiveVersion::Rar15, features)).unwrap();
     let stored_archive = Archive::parse(&stored_bytes).unwrap();
     let stored_file = stored_archive.files().next().unwrap();
     assert!(stored_file.is_encrypted());
@@ -2967,10 +2794,7 @@ fn writes_encrypted_rar15_archives_that_reader_extracts_with_password() {
     }];
     let compressed_bytes = write_compressed_archive(
         &compressed,
-        WriterOptions {
-            target: ArchiveVersion::Rar15,
-            features,
-        },
+        WriterOptions::new(ArchiveVersion::Rar15, features),
     )
     .unwrap();
     let compressed_archive = Archive::parse(&compressed_bytes).unwrap();
@@ -2999,7 +2823,7 @@ fn writes_aes_encrypted_rar3_and_rar4_archives_that_reader_extracts_with_passwor
             password: Some(b"password"),
             file_comment: None,
         }];
-        let stored_bytes = write_stored_archive(&stored, WriterOptions { target, features })
+        let stored_bytes = write_stored_archive(&stored, WriterOptions::new(target, features))
             .unwrap_or_else(|error| panic!("{target:?} stored AES writer failed: {error}"));
         let stored_archive = Archive::parse(&stored_bytes).unwrap();
         let stored_file = stored_archive.files().next().unwrap();
@@ -3028,7 +2852,7 @@ fn writes_aes_encrypted_rar3_and_rar4_archives_that_reader_extracts_with_passwor
             file_comment: None,
         }];
         let compressed_bytes =
-            write_compressed_archive(&compressed, WriterOptions { target, features })
+            write_compressed_archive(&compressed, WriterOptions::new(target, features))
                 .unwrap_or_else(|error| panic!("{target:?} compressed AES writer failed: {error}"));
         let compressed_archive = Archive::parse(&compressed_bytes).unwrap();
         let compressed_file = compressed_archive.files().next().unwrap();
@@ -3065,7 +2889,8 @@ fn writes_header_encrypted_rar3_and_rar4_archives_that_reader_extracts_with_pass
             password: Some(b"password"),
             file_comment: None,
         }];
-        let bytes = write_compressed_archive(&entries, WriterOptions { target, features }).unwrap();
+        let bytes =
+            write_compressed_archive(&entries, WriterOptions::new(target, features)).unwrap();
 
         assert!(matches!(Archive::parse(&bytes), Err(Error::NeedPassword)));
         let archive = Archive::parse_with_password(&bytes, Some(b"password")).unwrap();
@@ -3108,7 +2933,8 @@ fn writes_solid_header_encrypted_rar3_and_rar4_archives_that_reader_extracts_wit
                 file_comment: None,
             },
         ];
-        let bytes = write_compressed_archive(&entries, WriterOptions { target, features }).unwrap();
+        let bytes =
+            write_compressed_archive(&entries, WriterOptions::new(target, features)).unwrap();
 
         assert!(matches!(Archive::parse(&bytes), Err(Error::NeedPassword)));
         let archive = Archive::parse_with_password(&bytes, Some(b"password")).unwrap();
@@ -3140,22 +2966,12 @@ fn rar3_and_rar4_aes_writer_uses_fresh_salts() {
         file_comment: None,
     }];
 
-    let first = write_compressed_archive(
-        &entry,
-        WriterOptions {
-            target: ArchiveVersion::Rar30,
-            features,
-        },
-    )
-    .unwrap();
-    let second = write_compressed_archive(
-        &entry,
-        WriterOptions {
-            target: ArchiveVersion::Rar30,
-            features,
-        },
-    )
-    .unwrap();
+    let first =
+        write_compressed_archive(&entry, WriterOptions::new(ArchiveVersion::Rar30, features))
+            .unwrap();
+    let second =
+        write_compressed_archive(&entry, WriterOptions::new(ArchiveVersion::Rar30, features))
+            .unwrap();
     let first_archive = Archive::parse(&first).unwrap();
     let second_archive = Archive::parse(&second).unwrap();
     let first_file = first_archive.files().next().unwrap();
@@ -3246,10 +3062,7 @@ fn writes_compressed_rar20_volume_set_that_reader_reassembles() {
         password: None,
         file_comment: None,
     };
-    let options = WriterOptions {
-        target: ArchiveVersion::Rar20,
-        features: FeatureSet::store_only(),
-    };
+    let options = WriterOptions::new(ArchiveVersion::Rar20, FeatureSet::store_only());
 
     let parts = write_compressed_volumes(entry, options, 8).unwrap();
     assert!(parts.len() >= 2);
@@ -3281,10 +3094,7 @@ fn writes_compressed_rar29_volume_set_that_reader_reassembles() {
         password: None,
         file_comment: None,
     };
-    let options = WriterOptions {
-        target: ArchiveVersion::Rar29,
-        features: FeatureSet::store_only(),
-    };
+    let options = WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only());
 
     let parts = write_compressed_volumes(entry, options, 8).unwrap();
     assert!(parts.len() >= 2);
@@ -3309,10 +3119,7 @@ fn writes_compressed_rar29_volume_set_that_reader_reassembles() {
 fn writes_encrypted_rar15_volume_sets_that_reader_reassembles_with_password() {
     let mut features = FeatureSet::store_only();
     features.file_encryption = true;
-    let options = WriterOptions {
-        target: ArchiveVersion::Rar15,
-        features,
-    };
+    let options = WriterOptions::new(ArchiveVersion::Rar15, features);
 
     let stored = StoredEntry {
         name: b"split-secret-store.bin",
@@ -3369,10 +3176,7 @@ fn writes_encrypted_rar15_volume_sets_that_reader_reassembles_with_password() {
 fn writes_encrypted_rar20_volume_sets_that_reader_reassembles_with_password() {
     let mut features = FeatureSet::store_only();
     features.file_encryption = true;
-    let options = WriterOptions {
-        target: ArchiveVersion::Rar20,
-        features,
-    };
+    let options = WriterOptions::new(ArchiveVersion::Rar20, features);
 
     let stored = StoredEntry {
         name: b"split-rar20-secret-store.bin",
@@ -3433,10 +3237,7 @@ fn writes_encrypted_rar20_volume_sets_that_reader_reassembles_with_password() {
 fn writes_encrypted_rar29_volume_sets_that_reader_reassembles_with_password() {
     let mut features = FeatureSet::store_only();
     features.file_encryption = true;
-    let options = WriterOptions {
-        target: ArchiveVersion::Rar29,
-        features,
-    };
+    let options = WriterOptions::new(ArchiveVersion::Rar29, features);
 
     let stored = StoredEntry {
         name: b"split-rar29-secret-store.bin",
@@ -3518,7 +3319,7 @@ fn writes_header_encrypted_rar3_and_rar4_volume_sets_that_reader_reassembles_wit
 fn assert_encrypted_rar3_volume_sets_round_trip(target: ArchiveVersion) {
     let mut features = FeatureSet::store_only();
     features.file_encryption = true;
-    let options = WriterOptions { target, features };
+    let options = WriterOptions::new(target, features);
 
     let stored = StoredEntry {
         name: b"rar30-split-secret-store.bin",
@@ -3597,7 +3398,7 @@ fn assert_header_encrypted_rar3_volume_sets_round_trip(target: ArchiveVersion) {
     let mut features = FeatureSet::store_only();
     features.file_encryption = true;
     features.header_encryption = true;
-    let options = WriterOptions { target, features };
+    let options = WriterOptions::new(target, features);
 
     let stored = StoredEntry {
         name: b"rar30-header-split-secret-store.bin",
@@ -3756,10 +3557,7 @@ fn extracts_rars_generated_rar15_writer_volume_oracles() {
 fn rar15_store_only_writer_rejects_non_baseline_features() {
     let mut features = FeatureSet::store_only();
     features.archive_comment = true;
-    let options = WriterOptions {
-        target: ArchiveVersion::Rar15,
-        features,
-    };
+    let options = WriterOptions::new(ArchiveVersion::Rar15, features);
     let entry = StoredEntry {
         name: b"hello.txt",
         data: b"hello",

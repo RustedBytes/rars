@@ -101,9 +101,16 @@ pub struct ExtractedEntryMeta {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WriterOptions {
     pub target: ArchiveVersion,
     pub features: FeatureSet,
+}
+
+impl WriterOptions {
+    pub const fn new(target: ArchiveVersion, features: FeatureSet) -> Self {
+        Self { target, features }
+    }
 }
 
 impl Default for WriterOptions {
