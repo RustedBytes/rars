@@ -11,10 +11,6 @@
 
 ## Hardening
 
-- Review #4 batch 3: shared utilities:
-  - Extract the shared x86 filter-range scanner used by RAR29 and RAR5 writers.
-  - Consolidate duplicated `read_exact_at`, endian-read, and `align16` helpers
-    within `rars-format`.
 - Review #4 batch 4: fixture/oracle checks:
   - Verify RAR2 `PROTECT_HEAD` parity behaviour when the protected range
     overlaps the recovery block before changing repair logic.

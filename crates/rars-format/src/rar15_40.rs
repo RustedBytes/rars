@@ -1,6 +1,7 @@
 use crate::detect::{find_archive_start, RAR15_SIGNATURE};
 use crate::error::{Error, Result};
 use crate::features::FeatureSet;
+use crate::io_util::{align16 as checked_align16, read_exact_at, read_u16, read_u32};
 use crate::version::ArchiveFamily;
 use crate::ArchiveVersion;
 use rars_codec::rar13::Unpack15;
@@ -1665,7 +1666,7 @@ fn decrypt_encrypted_header_at(
     if head_size < 7 {
         return Err(Error::InvalidHeader("RAR 1.5 block header is too short"));
     }
-    let encrypted_header_size = align16(head_size)?;
+    let encrypted_header_size = checked_align16(head_size, "RAR 1.5 block size overflows usize")?;
     let encrypted_start = offset
         .checked_add(8)
         .ok_or(Error::InvalidHeader("RAR 1.5 block offset overflows usize"))?;
@@ -1724,7 +1725,7 @@ fn read_encrypted_header_at(
     if head_size < 7 {
         return Err(Error::InvalidHeader("RAR 1.5 block header is too short"));
     }
-    let encrypted_header_size = align16(head_size)?;
+    let encrypted_header_size = checked_align16(head_size, "RAR 1.5 block size overflows usize")?;
     let encrypted_start = absolute
         .checked_add(8)
         .ok_or(Error::InvalidHeader("RAR 1.5 block offset overflows usize"))?;
@@ -1760,12 +1761,6 @@ fn read_header_salt(input: &[u8], offset: usize) -> Result<[u8; 8]> {
         .get(offset..offset + 8)
         .ok_or(Error::TooShort)
         .map(|salt| salt.try_into().expect("RAR 3 salt size"))
-}
-
-fn align16(size: usize) -> Result<usize> {
-    size.checked_add(15)
-        .map(|size| size & !15)
-        .ok_or(Error::InvalidHeader("RAR 1.5 block size overflows usize"))
 }
 
 fn parse_file_like_header(
@@ -2011,13 +2006,6 @@ fn read_block_header_at(
     let mut block = parse_block_header(&header, 0)?;
     block.offset = offset;
     Ok(block)
-}
-
-fn read_exact_at(file: &mut File, offset: usize, len: usize) -> Result<Vec<u8>> {
-    file.seek(SeekFrom::Start(offset as u64))?;
-    let mut data = vec![0; len];
-    file.read_exact(&mut data)?;
-    Ok(data)
 }
 
 fn relative_block(block: &BlockHeader) -> BlockHeader {
@@ -2298,16 +2286,6 @@ fn packed_range(
         .checked_sub(pack_size)
         .ok_or(Error::InvalidHeader("RAR 1.5 block size overflows usize"))?;
     Ok(block_start..block_end)
-}
-
-fn read_u16(input: &[u8], offset: usize) -> Result<u16> {
-    let bytes = input.get(offset..offset + 2).ok_or(Error::TooShort)?;
-    Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
-}
-
-fn read_u32(input: &[u8], offset: usize) -> Result<u32> {
-    let bytes = input.get(offset..offset + 4).ok_or(Error::TooShort)?;
-    Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
 pub fn crc32(input: &[u8]) -> u32 {
@@ -2648,11 +2626,9 @@ mod tests {
         assert_eq!(file.name, b"owned.txt");
 
         // Default ArchiveReadOptions delegate also drives the same code path.
-        let with_options = Archive::parse_owned_with_options(
-            bytes.clone(),
-            crate::ArchiveReadOptions::default(),
-        )
-        .unwrap();
+        let with_options =
+            Archive::parse_owned_with_options(bytes.clone(), crate::ArchiveReadOptions::default())
+                .unwrap();
         assert_eq!(with_options.files().count(), 1);
 
         let no_password = Archive::parse_owned_with_password(bytes, None).unwrap();
@@ -2770,7 +2746,10 @@ mod tests {
             offset: 0,
         };
         let err = parse_main_header(&[0u8; 32], &block).unwrap_err();
-        assert_eq!(err, Error::InvalidHeader("RAR 1.5 main header is too short"));
+        assert_eq!(
+            err,
+            Error::InvalidHeader("RAR 1.5 main header is too short")
+        );
     }
 
     #[test]
@@ -2853,7 +2832,8 @@ mod tests {
         let mut raw = b"".to_vec();
         raw.push(0); // separator (zero_pos = 0)
         raw.push(0); // high_byte placeholder
-        raw.push(0b10_10_00_00); // two mode-2, then two mode-0 (which we won't reach)
+                     // Two mode-2 units, then two mode-0 units which we will not reach.
+        raw.push(0b10_10_00_00);
         // First unit 'H' = U+0048: low=0x48, high=0x00
         raw.extend_from_slice(&[0x48, 0x00]);
         // Second unit 'i' = U+0069

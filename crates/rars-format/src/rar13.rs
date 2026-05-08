@@ -1,6 +1,7 @@
 use crate::detect::{find_archive_start, RAR13_SIGNATURE};
 use crate::error::{Error, Result};
 use crate::features::FeatureSet;
+use crate::io_util::{read_exact_at, read_u16, read_u32};
 use crate::version::{ArchiveFamily, ArchiveVersion};
 use rars_codec::rar13::{unpack15_decode, unpack15_encode, Unpack15, Unpack15Encoder};
 use rars_crypto::rar13::{Rar13Cipher, Rar13DecryptReader};
@@ -825,13 +826,6 @@ where
     Ok(())
 }
 
-fn read_exact_at(file: &mut File, offset: usize, len: usize) -> Result<Vec<u8>> {
-    file.seek(SeekFrom::Start(offset as u64))?;
-    let mut data = vec![0; len];
-    file.read_exact(&mut data)?;
-    Ok(data)
-}
-
 struct Rar13ChecksumWriter<'a, W: Write + ?Sized> {
     inner: &'a mut W,
     checksum: &'a mut Rar13Checksum,
@@ -1477,16 +1471,6 @@ fn validate_file_entry(name: &[u8], data: &[u8]) -> Result<()> {
         ));
     }
     Ok(())
-}
-
-fn read_u16(input: &[u8], offset: usize) -> Result<u16> {
-    let bytes = input.get(offset..offset + 2).ok_or(Error::TooShort)?;
-    Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
-}
-
-fn read_u32(input: &[u8], offset: usize) -> Result<u32> {
-    let bytes = input.get(offset..offset + 4).ok_or(Error::TooShort)?;
-    Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
 pub fn file_checksum(input: &[u8]) -> u16 {

@@ -13,7 +13,9 @@ pub mod rar15_40;
 pub mod rar50;
 pub mod version;
 
+mod io_util;
 mod volume_extract;
+mod x86_filter_scan;
 
 pub use detect::{detect_archive_family, find_archive_start, ArchiveSignature};
 pub use error::{Error, Result};

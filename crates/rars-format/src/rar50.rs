@@ -1,5 +1,6 @@
 use crate::detect::{find_archive_start, RAR50_SIGNATURE};
 use crate::error::{Error, Result};
+use crate::io_util::{align16 as checked_align16, read_exact_at, read_u32};
 use crate::rar15_40::crc32;
 use crate::version::ArchiveFamily;
 use rars_crypto::rar50::{Rar50Cipher, Rar50Keys};
@@ -1189,15 +1190,6 @@ fn read_array_at<const N: usize>(input: &[u8], pos: &mut usize, end: usize) -> R
     Ok(out)
 }
 
-fn align16(value: usize) -> Result<usize> {
-    value
-        .checked_add(15)
-        .map(|value| value & !15)
-        .ok_or(Error::InvalidHeader(
-            "RAR 5 encrypted header size overflows",
-        ))
-}
-
 fn parse_archive_blocks<F, G>(
     archive_len: usize,
     password: Option<&[u8]>,
@@ -1377,7 +1369,7 @@ fn parse_encrypted_block_header_bytes(
         .checked_add(header_size_len)
         .and_then(|size| size.checked_add(header_body_len))
         .ok_or(Error::InvalidHeader("RAR 5 header size overflows usize"))?;
-    let encrypted_len = align16(header_total)?;
+    let encrypted_len = checked_align16(header_total, "RAR 5 encrypted header size overflows")?;
     let disk_header_len = 16usize
         .checked_add(encrypted_len)
         .ok_or(Error::InvalidHeader(
@@ -1474,7 +1466,7 @@ fn read_encrypted_block_header_at(
         .checked_add(header_size_len)
         .and_then(|size| size.checked_add(header_body_len))
         .ok_or(Error::InvalidHeader("RAR 5 header size overflows usize"))?;
-    let encrypted_len = align16(header_total)?;
+    let encrypted_len = checked_align16(header_total, "RAR 5 encrypted header size overflows")?;
     let disk_header_len = 16usize
         .checked_add(encrypted_len)
         .ok_or(Error::InvalidHeader(
@@ -1700,18 +1692,6 @@ fn read_vint_at(input: &[u8], offset: usize, end: usize) -> Result<(u64, usize)>
         shift += 7;
     }
     Err(Error::InvalidHeader("RAR 5 vint is too long"))
-}
-
-fn read_u32(input: &[u8], offset: usize) -> Result<u32> {
-    let bytes = input.get(offset..offset + 4).ok_or(Error::TooShort)?;
-    Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-}
-
-fn read_exact_at(file: &mut File, offset: usize, len: usize) -> Result<Vec<u8>> {
-    file.seek(SeekFrom::Start(offset as u64))?;
-    let mut bytes = vec![0; len];
-    file.read_exact(&mut bytes)?;
-    Ok(bytes)
 }
 
 fn usize_from_u64(value: u64, message: &'static str) -> Result<usize> {
