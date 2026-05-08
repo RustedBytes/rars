@@ -662,7 +662,7 @@ fn rejects_missing_add_option_values() {
         &["a", "--password-file"][..],
     ] {
         let output = rars().args(args).output().unwrap();
-        assert!(!output.status.success(), "args: {args:?}");
+        assert_eq!(output.status.code(), Some(2), "args: {args:?}");
         assert!(stderr(&output).contains("missing"), "args: {args:?}");
     }
 }
@@ -680,7 +680,7 @@ fn rejects_invalid_volume_size() {
         .arg(&source)
         .output()
         .unwrap();
-    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(2));
     assert!(stderr(&output).contains("invalid digit"));
 }
 
@@ -4372,7 +4372,7 @@ fn rejects_solid_store_output() {
         .arg(&source)
         .output()
         .unwrap();
-    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(2));
     assert!(stderr(&output).contains("solid output requires compression"));
 }
 
@@ -4386,7 +4386,7 @@ fn rejects_add_without_inputs() {
         .arg(&archive)
         .output()
         .unwrap();
-    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(2));
     assert!(stderr(&output).contains("no input files"));
 }
 
@@ -4403,7 +4403,7 @@ fn rejects_unknown_add_option() {
         .arg(&source)
         .output()
         .unwrap();
-    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(2));
     assert!(stderr(&output).contains("unknown add option: --not-a-real-option"));
 }
 

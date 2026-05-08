@@ -12,12 +12,15 @@ use rars::{
     ArchiveVersion, Error, ExtractedEntryMeta, FeatureSet,
 };
 use std::env;
+use std::error::Error as StdError;
 use std::fs::{self, File, OpenOptions};
 use std::io::IsTerminal;
+use std::num::ParseIntError;
 use std::path::{Component, Path, PathBuf};
+use std::string::FromUtf8Error;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-type CliResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+type CliResult<T> = std::result::Result<T, CliError>;
 
 const ADD_USAGE: &str =
     "usage: rars a [--password <password>|--password-file <path>] --format <rar14|rar15|rar20|rar29|rar30|rar40|rar50|rar70> [--store] [--level <0..5>] [--solid] [--encrypt-headers] [--quick-open] [--comment <text>] [--archive-name <name>] [--file-comment <text>] [--recovery-percent <1..100>] [--volume-size <bytes|k|m|g>] [--ppmd|--auto-filter|--delta-filter <channels>|--e8-filter|--e8e9-filter|--itanium-filter|--rgb-filter <width>|--audio-filter <channels>|--arm-filter] <archive> <files...>";
@@ -36,24 +39,99 @@ fn read_options(password: Option<&[u8]>) -> ArchiveReadOptions<'_> {
 fn main() {
     if let Err(err) = run() {
         eprintln!("error: {err}");
-        std::process::exit(exit_code_for_error(&err.to_string()));
+        std::process::exit(err.exit_code());
     }
 }
 
-fn exit_code_for_error(message: &str) -> i32 {
-    if message.contains("password is required")
-        || message.contains("wrong password or corrupt encrypted data")
-    {
-        3
-    } else if message.contains("usage:")
-        || message.starts_with("unknown command:")
-        || message.starts_with("unknown add option:")
-        || message.starts_with("missing ")
-        || message.contains("ambiguous extract arguments")
-    {
-        2
-    } else {
-        1
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CliErrorClass {
+    General,
+    Usage,
+    Password,
+}
+
+#[derive(Debug)]
+struct CliError {
+    class: CliErrorClass,
+    message: String,
+}
+
+impl CliError {
+    fn general(message: impl Into<String>) -> Self {
+        Self {
+            class: CliErrorClass::General,
+            message: message.into(),
+        }
+    }
+
+    fn usage(message: impl Into<String>) -> Self {
+        Self {
+            class: CliErrorClass::Usage,
+            message: message.into(),
+        }
+    }
+
+    fn password(message: impl Into<String>) -> Self {
+        Self {
+            class: CliErrorClass::Password,
+            message: message.into(),
+        }
+    }
+
+    fn exit_code(&self) -> i32 {
+        match self.class {
+            CliErrorClass::General => 1,
+            CliErrorClass::Usage => 2,
+            CliErrorClass::Password => 3,
+        }
+    }
+}
+
+impl std::fmt::Display for CliError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl StdError for CliError {}
+
+impl From<&str> for CliError {
+    fn from(message: &str) -> Self {
+        Self::general(message)
+    }
+}
+
+impl From<String> for CliError {
+    fn from(message: String) -> Self {
+        Self::general(message)
+    }
+}
+
+impl From<std::io::Error> for CliError {
+    fn from(error: std::io::Error) -> Self {
+        Self::general(error.to_string())
+    }
+}
+
+impl From<ParseIntError> for CliError {
+    fn from(error: ParseIntError) -> Self {
+        Self::usage(error.to_string())
+    }
+}
+
+impl From<FromUtf8Error> for CliError {
+    fn from(error: FromUtf8Error) -> Self {
+        Self::general(error.to_string())
+    }
+}
+
+impl From<rars::Error> for CliError {
+    fn from(error: rars::Error) -> Self {
+        if error_is_password_class(&error) {
+            Self::password(error.to_string())
+        } else {
+            Self::general(error.to_string())
+        }
     }
 }
 
@@ -75,14 +153,16 @@ fn run() -> CliResult<()> {
             usage();
             Ok(())
         }
-        _ => Err(format!("unknown command: {command}").into()),
+        _ => Err(CliError::usage(format!("unknown command: {command}"))),
     }
 }
 
 fn cmd_info(args: &[String]) -> CliResult<()> {
     let (mut password, paths) = parse_password(args)?;
     if paths.is_empty() {
-        return Err("usage: rars info [--password <password>] <archive>...".into());
+        return Err(CliError::usage(
+            "usage: rars info [--password <password>] <archive>...",
+        ));
     }
 
     for path in paths {
@@ -250,7 +330,9 @@ fn cmd_info(args: &[String]) -> CliResult<()> {
 fn cmd_test(args: &[String]) -> CliResult<()> {
     let (mut password, paths) = parse_password(args)?;
     if paths.is_empty() {
-        return Err("usage: rars test [--password <password>] <archive> [parts...]".into());
+        return Err(CliError::usage(
+            "usage: rars test [--password <password>] <archive> [parts...]",
+        ));
     }
 
     if paths.len() == 1 {
@@ -263,7 +345,11 @@ fn cmd_test(args: &[String]) -> CliResult<()> {
                 entries.push(meta.clone());
                 Ok(Box::new(std::io::sink()))
             })
-            .map_err(|err| format!("failed to test archive '{}': {err}", paths[0]))?;
+            .map_err(|err| {
+                classify_rars_error(err, |err| {
+                    format!("failed to test archive '{}': {err}", paths[0])
+                })
+            })?;
         for entry in &entries {
             print_ok_entry(entry);
         }
@@ -278,7 +364,11 @@ fn cmd_test(args: &[String]) -> CliResult<()> {
             entries.push(meta.clone());
             Ok(Box::new(std::io::sink()))
         })
-        .map_err(|err| format!("failed to test volume set '{}': {err}", paths.join(", ")))?;
+        .map_err(|err| {
+            classify_rars_error(err, |err| {
+                format!("failed to test volume set '{}': {err}", paths.join(", "))
+            })
+        })?;
         for entry in &entries {
             print_ok_entry(entry);
         }
@@ -289,7 +379,9 @@ fn cmd_test(args: &[String]) -> CliResult<()> {
 fn cmd_extract(args: &[String]) -> CliResult<()> {
     let (mut password, mut paths) = parse_password(args)?;
     if paths.len() < 2 {
-        return Err("usage: rars x [--password <password>] <archive> [parts...] <outdir>".into());
+        return Err(CliError::usage(
+            "usage: rars x [--password <password>] <archive> [parts...] <outdir>",
+        ));
     }
     reject_ambiguous_extract_target(&paths)?;
     // Invariant: the length check above guarantees an output directory argument.
@@ -306,10 +398,12 @@ fn cmd_extract(args: &[String]) -> CliResult<()> {
                 open_output_writer(&out_dir, meta)
             })
             .map_err(|err| {
-                format!(
-                    "failed to write extracted entry to '{}': {err}",
-                    out_dir.display()
-                )
+                classify_rars_error(err, |err| {
+                    format!(
+                        "failed to write extracted entry to '{}': {err}",
+                        out_dir.display()
+                    )
+                })
             })?;
         for name in &names {
             println!("x {}", String::from_utf8_lossy(name));
@@ -325,7 +419,11 @@ fn cmd_extract(args: &[String]) -> CliResult<()> {
             names.push(meta.name.clone());
             open_output_writer(&out_dir, meta)
         })
-        .map_err(|err| format!("failed to extract volume set '{}': {err}", paths.join(", ")))?;
+        .map_err(|err| {
+            classify_rars_error(err, |err| {
+                format!("failed to extract volume set '{}': {err}", paths.join(", "))
+            })
+        })?;
         for name in &names {
             println!("x {}", String::from_utf8_lossy(name));
         }
@@ -336,7 +434,9 @@ fn cmd_extract(args: &[String]) -> CliResult<()> {
 fn cmd_repair(args: &[String]) -> CliResult<()> {
     let (mut password, paths) = parse_password(args)?;
     if paths.len() < 2 {
-        return Err("usage: rars repair [--password <password>] <archive> <repaired-archive>\n       rars repair <rar-parts-and-rev-files...> <outdir>".into());
+        return Err(CliError::usage(
+            "usage: rars repair [--password <password>] <archive> <repaired-archive>\n       rars repair <rar-parts-and-rev-files...> <outdir>",
+        ));
     }
     if paths.len() > 2 {
         if password.is_some() {
@@ -383,7 +483,7 @@ fn reject_ambiguous_extract_target(paths: &[String]) -> CliResult<()> {
         return Ok(());
     };
     if looks_like_archive_path(out_path)? {
-        return Err("ambiguous extract arguments: final argument looks like an archive; pass an explicit output directory".into());
+        return Err(CliError::usage("ambiguous extract arguments: final argument looks like an archive; pass an explicit output directory"));
     }
     Ok(())
 }
@@ -400,7 +500,9 @@ fn looks_like_archive_path(path: &str) -> CliResult<bool> {
             return Ok(false);
         }
         Err(error) => {
-            return Err(format!("failed to inspect extract output path '{path}': {error}").into())
+            return Err(CliError::general(format!(
+                "failed to inspect extract output path '{path}': {error}"
+            )))
         }
     };
     Ok(ArchiveReader::detect(&bytes).is_ok())
@@ -432,7 +534,9 @@ fn cmd_repair_rev5(paths: &[String]) -> CliResult<()> {
             Ok(rev) => recovery.push(rev),
             Err(Error::UnsupportedSignature) => data_inputs.push((PathBuf::from(path), bytes)),
             Err(error) => {
-                return Err(format!("failed to parse REV volume '{path}': {error}").into())
+                return Err(CliError::general(format!(
+                    "failed to parse REV volume '{path}': {error}"
+                )))
             }
         }
     }
@@ -458,7 +562,7 @@ fn cmd_repair_rev5(paths: &[String]) -> CliResult<()> {
         println!("repaired {}", path.display());
         Ok(())
     })
-    .map_err(|err| format!("failed to repair RAR 5 REV volume set: {err}"))?;
+    .map_err(|err| CliError::general(format!("failed to repair RAR 5 REV volume set: {err}")))?;
     Ok(())
 }
 
@@ -476,8 +580,9 @@ fn cmd_repair_rev3(paths: &[String]) -> CliResult<()> {
         let bytes = fs::read(path)?;
         if path_has_extension(path, "rev") {
             let (recovery_index, rec_count, dat_count, payload) =
-                parse_rar3_rev_volume(Path::new(path), &bytes)
-                    .ok_or_else(|| format!("failed to parse RAR 3 REV volume name '{path}'"))?;
+                parse_rar3_rev_volume(Path::new(path), &bytes).ok_or_else(|| {
+                    CliError::general(format!("failed to parse RAR 3 REV volume name '{path}'"))
+                })?;
             if recovery_count
                 .replace(rec_count)
                 .is_some_and(|count| count != rec_count)
@@ -512,7 +617,7 @@ fn cmd_repair_rev3(paths: &[String]) -> CliResult<()> {
         println!("repaired {}", path.display());
         Ok(())
     })
-    .map_err(|err| format!("failed to repair RAR 3 REV volume set: {err}"))?;
+    .map_err(|err| CliError::general(format!("failed to repair RAR 3 REV volume set: {err}")))?;
     Ok(())
 }
 
@@ -645,7 +750,7 @@ struct AddCommand {
 fn parse_add_command(args: &[String]) -> CliResult<AddCommand> {
     let (password, args) = parse_password(args)?;
     if args.len() < 3 || args[0] != "--format" {
-        return Err(ADD_USAGE.into());
+        return Err(CliError::usage(ADD_USAGE));
     }
     let target = match args[1].as_str() {
         "rar14" => ArchiveVersion::Rar14,
@@ -656,7 +761,7 @@ fn parse_add_command(args: &[String]) -> CliResult<AddCommand> {
         "rar40" => ArchiveVersion::Rar40,
         "rar50" => ArchiveVersion::Rar50,
         "rar70" => ArchiveVersion::Rar70,
-        _ => return Err(ADD_USAGE.into()),
+        _ => return Err(CliError::usage(ADD_USAGE)),
     };
     let mut store = false;
     let mut compression_level = None;
@@ -684,10 +789,14 @@ fn parse_add_command(args: &[String]) -> CliResult<AddCommand> {
                 archive_index += 1;
             }
             "--level" => {
-                let value = args.get(archive_index + 1).ok_or("missing --level value")?;
+                let value = args
+                    .get(archive_index + 1)
+                    .ok_or_else(|| CliError::usage("missing --level value"))?;
                 let level = value.parse::<u8>()?;
                 if level > 5 {
-                    return Err("compression level must be in the range 0..5".into());
+                    return Err(CliError::usage(
+                        "compression level must be in the range 0..5",
+                    ));
                 }
                 compression_level = Some(level);
                 archive_index += 2;
@@ -707,42 +816,42 @@ fn parse_add_command(args: &[String]) -> CliResult<AddCommand> {
             "--comment" => {
                 let value = args
                     .get(archive_index + 1)
-                    .ok_or("missing --comment value")?;
+                    .ok_or_else(|| CliError::usage("missing --comment value"))?;
                 archive_comment = Some(value.as_bytes().to_vec());
                 archive_index += 2;
             }
             "--archive-name" => {
                 let value = args
                     .get(archive_index + 1)
-                    .ok_or("missing --archive-name value")?;
+                    .ok_or_else(|| CliError::usage("missing --archive-name value"))?;
                 archive_name = Some(value.as_bytes().to_vec());
                 archive_index += 2;
             }
             "--file-comment" => {
                 let value = args
                     .get(archive_index + 1)
-                    .ok_or("missing --file-comment value")?;
+                    .ok_or_else(|| CliError::usage("missing --file-comment value"))?;
                 file_comment = Some(value.as_bytes().to_vec());
                 archive_index += 2;
             }
             "--recovery-percent" => {
                 let value = args
                     .get(archive_index + 1)
-                    .ok_or("missing --recovery-percent value")?;
+                    .ok_or_else(|| CliError::usage("missing --recovery-percent value"))?;
                 recovery_percent = Some(value.parse::<u64>()?);
                 archive_index += 2;
             }
             "--volume-size" => {
                 let value = args
                     .get(archive_index + 1)
-                    .ok_or("missing --volume-size value")?;
+                    .ok_or_else(|| CliError::usage("missing --volume-size value"))?;
                 volume_size = Some(parse_size(value)?);
                 archive_index += 2;
             }
             "--delta-filter" => {
                 let value = args
                     .get(archive_index + 1)
-                    .ok_or("missing --delta-filter value")?;
+                    .ok_or_else(|| CliError::usage("missing --delta-filter value"))?;
                 delta_filter = Some(value.parse::<usize>()?);
                 archive_index += 2;
             }
@@ -761,14 +870,14 @@ fn parse_add_command(args: &[String]) -> CliResult<AddCommand> {
             "--rgb-filter" => {
                 let value = args
                     .get(archive_index + 1)
-                    .ok_or("missing --rgb-filter value")?;
+                    .ok_or_else(|| CliError::usage("missing --rgb-filter value"))?;
                 rgb_filter = Some(value.parse::<usize>()?);
                 archive_index += 2;
             }
             "--audio-filter" => {
                 let value = args
                     .get(archive_index + 1)
-                    .ok_or("missing --audio-filter value")?;
+                    .ok_or_else(|| CliError::usage("missing --audio-filter value"))?;
                 audio_filter = Some(value.parse::<usize>()?);
                 archive_index += 2;
             }
@@ -785,29 +894,31 @@ fn parse_add_command(args: &[String]) -> CliResult<AddCommand> {
                 archive_index += 1;
             }
             unknown if unknown.starts_with('-') => {
-                return Err(format!("unknown add option: {unknown}").into());
+                return Err(CliError::usage(format!("unknown add option: {unknown}")));
             }
             _ => break,
         }
     }
     if args.len() <= archive_index {
-        return Err(ADD_USAGE.into());
+        return Err(CliError::usage(ADD_USAGE));
     }
     if let Some(level) = compression_level {
         if store && level != 0 {
-            return Err("--store cannot be combined with --level > 0".into());
+            return Err(CliError::usage(
+                "--store cannot be combined with --level > 0",
+            ));
         }
         if level == 0 {
             store = true;
         }
     }
     if solid && store {
-        return Err("solid output requires compression".into());
+        return Err(CliError::usage("solid output requires compression"));
     }
     let archive_path = PathBuf::from(&args[archive_index]);
     let input_paths = &args[archive_index + 1..];
     if input_paths.is_empty() {
-        return Err("no input files".into());
+        return Err(CliError::usage("no input files"));
     }
     Ok(AddCommand {
         password,
@@ -1675,11 +1786,15 @@ fn parse_password(args: &[String]) -> CliResult<(Option<Vec<u8>>, Vec<String>)> 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--password" | "-p" => {
-                let value = iter.next().ok_or("missing password value")?;
+                let value = iter
+                    .next()
+                    .ok_or_else(|| CliError::usage("missing password value"))?;
                 set_password(&mut password, read_password_value(value)?)?;
             }
             "--password-file" => {
-                let path = iter.next().ok_or("missing --password-file value")?;
+                let path = iter
+                    .next()
+                    .ok_or_else(|| CliError::usage("missing --password-file value"))?;
                 let bytes = fs::read(path)?;
                 set_password(&mut password, trim_password_line(bytes))?;
             }
@@ -1691,7 +1806,7 @@ fn parse_password(args: &[String]) -> CliResult<(Option<Vec<u8>>, Vec<String>)> 
 
 fn set_password(slot: &mut Option<Vec<u8>>, value: Vec<u8>) -> CliResult<()> {
     if slot.is_some() {
-        return Err("password was provided more than once".into());
+        return Err(CliError::usage("password was provided more than once"));
     }
     *slot = Some(value);
     Ok(())
@@ -1716,7 +1831,7 @@ fn trim_password_line(mut bytes: Vec<u8>) -> Vec<u8> {
 fn parse_size(input: &str) -> CliResult<usize> {
     let input = input.trim();
     if input.is_empty() {
-        return Err("size is empty".into());
+        return Err(CliError::usage("size is empty"));
     }
     let (digits, multiplier) = match input.as_bytes().last().copied() {
         Some(b'k' | b'K') => (&input[..input.len() - 1], 1024usize),
@@ -1725,12 +1840,12 @@ fn parse_size(input: &str) -> CliResult<usize> {
         _ => (input, 1usize),
     };
     if digits.is_empty() {
-        return Err(format!("invalid size: {input}").into());
+        return Err(CliError::usage(format!("invalid size: {input}")));
     }
     let value = digits.parse::<usize>()?;
     value
         .checked_mul(multiplier)
-        .ok_or_else(|| format!("size overflows usize: {input}").into())
+        .ok_or_else(|| CliError::usage(format!("size overflows usize: {input}")))
 }
 
 fn read_archive_path_prompting(
@@ -1743,12 +1858,12 @@ fn read_archive_path_prompting(
             if let Some(prompted) = prompt_password_if_tty()? {
                 *password = Some(prompted);
                 ArchiveReader::read_path_with_options(path, read_options(password.as_deref()))
-                    .map_err(|err| read_archive_error(path, err).into())
+                    .map_err(|err| read_archive_cli_error(path, err))
             } else {
-                Err(read_archive_error(path, error).into())
+                Err(read_archive_cli_error(path, error))
             }
         }
-        Err(error) => Err(read_archive_error(path, error).into()),
+        Err(error) => Err(read_archive_cli_error(path, error)),
     }
 }
 
@@ -1808,6 +1923,16 @@ fn error_needs_password(error: &Error) -> bool {
     }
 }
 
+fn error_is_password_class(error: &Error) -> bool {
+    match error {
+        Error::NeedPassword | Error::WrongPasswordOrCorruptData => true,
+        Error::AtArchiveOffset { source, .. } | Error::AtEntry { source, .. } => {
+            error_is_password_class(source)
+        }
+        _ => false,
+    }
+}
+
 fn read_archive_error(path: &str, err: Error) -> String {
     match err {
         Error::Io(error) => format!("failed to read archive '{path}': {}", error.message),
@@ -1818,6 +1943,23 @@ fn read_archive_error(path: &str, err: Error) -> String {
             )
         }
         other => format!("failed to parse archive '{path}': {other}"),
+    }
+}
+
+fn read_archive_cli_error(path: &str, err: Error) -> CliError {
+    let message = read_archive_error(path, err.clone());
+    if error_is_password_class(&err) {
+        CliError::password(message)
+    } else {
+        CliError::general(message)
+    }
+}
+
+fn classify_rars_error(error: Error, message: impl FnOnce(&Error) -> String) -> CliError {
+    if error_is_password_class(&error) {
+        CliError::password(message(&error))
+    } else {
+        CliError::general(message(&error))
     }
 }
 

@@ -1,15 +1,6 @@
 # rars plan
 
-## Batch 14: CLI Safety And Semantics
-
-- Map CLI failures to useful unrar-style exit classes instead of flattening
-  every error to status 1.
-- Tighten CLI extraction safety: remove non-UTF-8 lossy path conversion and
-  close the symlink race in output creation.
-- Split `rars-cli/src/main.rs` into command modules when the CLI is next edited
-  heavily.
-
-## Batch 15: RAR5 Streaming And Recovery
+## RAR5 Streaming And Recovery
 
 - Rework RAR5 large compressed-member extraction: align the streaming
   thresholds, replace string-matched filter fallback with typed codec state,
@@ -18,7 +9,7 @@
 - Document and then implement the streaming sector path needed before RAR5
   large-archive recovery repair is considered production-ready.
 
-## Batch 16: Hardening
+## Hardening
 
 - Add adversarial PPMd fixtures as corpus bugs appear.
 - Harden PPMd hostile-state arithmetic paths (`make_esc_freq`,
@@ -66,6 +57,8 @@
 
 ## Deferred
 
+- Split `rars-cli/src/main.rs` into command modules when the CLI is next edited
+  heavily.
 - Define RAR3 password encoding policy. Avoid silent `from_utf8_lossy`
   derivation; either reject non-UTF-8 passwords clearly or implement the
   intended legacy byte-to-wide mapping.
