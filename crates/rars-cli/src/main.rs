@@ -2040,7 +2040,9 @@ fn output_relative_path(name: &[u8]) -> CliResult<PathBuf> {
     if name.contains(&0) {
         return Err("unsafe archive path contains NUL byte".into());
     }
-    let text = String::from_utf8(name.to_vec())?.replace('\\', "/");
+    let text = String::from_utf8(name.to_vec())
+        .map_err(|_| CliError::general("archive entry name is not UTF-8"))?
+        .replace('\\', "/");
     let bytes = text.as_bytes();
     if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
         return Err(format!("unsafe archive path: {text}").into());
@@ -2210,6 +2212,13 @@ mod tests {
         ] {
             assert!(output_relative_path(name).is_err(), "{name:?}");
         }
+    }
+
+    #[test]
+    fn output_relative_path_reports_non_utf8_archive_names() {
+        let err = output_relative_path(b"legacy-\xff-name.txt").unwrap_err();
+
+        assert_eq!(err.to_string(), "archive entry name is not UTF-8");
     }
 
     #[cfg(unix)]

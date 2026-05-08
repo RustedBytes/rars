@@ -1422,14 +1422,6 @@ fn read_block_header_at(
     }
 
     let header = read_exact_at(file, sfx_offset + offset, header_total)?;
-    let actual = crc32(&header[4..]);
-    if actual != header_crc {
-        return Err(Error::Crc32Mismatch {
-            expected: header_crc,
-            actual,
-        });
-    }
-
     parse_block_header_image(
         header,
         offset,

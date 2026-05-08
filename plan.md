@@ -11,6 +11,24 @@
 
 ## Hardening
 
+- Review #4 batch 6: shared CRC-32:
+  - Consolidate the duplicated CRC-32 table/streaming helpers currently split
+    across format, codec, and legacy crypto modules.
+  - Stop importing RAR5 CRC support from the RAR15-40 module once the shared
+    helper exists.
+- Review #4 batch 7: path/source parser consolidation:
+  - Avoid the facade and family parsers both scanning path-backed archives for
+    the same signature.
+  - Factor the repeated family-local `ArchiveSource` range-reader/copy-range
+    plumbing where it can be shared without flattening wire-format types.
+- Review #4 batch 8: recovery performance:
+  - Amortise RAR5 GF(2^16) table construction across recovery operations.
+  - Avoid cloning the same recovery linear-system equations for every shard
+    word; use a scratch matrix or precomputed inverse.
+- Review #4 batch 9: extraction platform hardening:
+  - Replace the Linux-only numeric `O_NOFOLLOW` extraction guard with a
+    portable Unix approach where available, or document the non-Linux TOCTOU
+    limitation clearly.
 - Add adversarial PPMd fixtures as corpus bugs appear.
 - Harden PPMd hostile-state arithmetic paths (`make_esc_freq`,
   `update_model`) with focused malformed-stream regression tests.
@@ -55,9 +73,9 @@
 
 - Split `rars-cli/src/main.rs` into command modules when the CLI is next edited
   heavily.
-- Define RAR3 password encoding policy. Avoid silent `from_utf8_lossy`
-  derivation; either reject non-UTF-8 passwords clearly or implement the
-  intended legacy byte-to-wide mapping.
+- Define legacy byte-encoding policy for RAR3 passwords and archive names.
+  Avoid silent `from_utf8_lossy` derivation; either reject non-UTF-8 bytes
+  clearly or implement the intended legacy byte-to-wide/code-page mapping.
 - Add a RAR 1.5-4.x writer builder only if another independent option axis
   lands there.
 - Keep `reference-rar70-large-dict.sh` reproducible for external Unpack70

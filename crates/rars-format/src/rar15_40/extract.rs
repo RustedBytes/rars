@@ -540,6 +540,7 @@ pub(super) struct DecryptingReader<R> {
     cipher: SplitCipher,
     encrypted_block: Vec<u8>,
     decrypted: Vec<u8>,
+    read_buffer: Option<Vec<u8>>,
     decrypted_pos: usize,
     eof: bool,
 }
@@ -551,11 +552,14 @@ impl<R: Read> DecryptingReader<R> {
         password: &[u8],
         salt: Option<[u8; 8]>,
     ) -> Result<Self> {
+        let cipher = SplitCipher::new(unp_ver, password, salt)?;
+        let read_buffer = matches!(cipher, SplitCipher::Rar15(_)).then(|| vec![0; 64 * 1024]);
         Ok(Self {
             inner,
-            cipher: SplitCipher::new(unp_ver, password, salt)?,
+            cipher,
             encrypted_block: Vec::new(),
             decrypted: Vec::new(),
+            read_buffer,
             decrypted_pos: 0,
             eof: false,
         })
@@ -570,14 +574,16 @@ impl<R: Read> DecryptingReader<R> {
 
         match &mut self.cipher {
             SplitCipher::Rar15(cipher) => {
-                self.decrypted.resize(64 * 1024, 0);
-                let count = self.inner.read(&mut self.decrypted)?;
+                let read_buffer = self
+                    .read_buffer
+                    .as_mut()
+                    .expect("RAR 1.5 decrypting reader has a reusable buffer");
+                let count = self.inner.read(read_buffer)?;
                 if count == 0 {
                     self.eof = true;
-                    self.decrypted.clear();
                     return Ok(());
                 }
-                self.decrypted.truncate(count);
+                self.decrypted.extend_from_slice(&read_buffer[..count]);
                 cipher.crypt_in_place(&mut self.decrypted);
             }
             SplitCipher::Rar20(_) | SplitCipher::Rar30(_) => self.fill_block_decrypted()?,
