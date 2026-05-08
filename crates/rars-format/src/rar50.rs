@@ -887,7 +887,11 @@ pub fn repair_inline_recovery_bytes(input: &[u8]) -> Result<Vec<u8>> {
     if !input.starts_with(RAR50_SIGNATURE) {
         return Err(Error::UnsupportedSignature);
     }
-    rars_recovery::rar5::repair_inline_recovery_archive(input).map_err(Error::from)
+    let repaired =
+        rars_recovery::rar5::repair_inline_recovery_archive(input).map_err(Error::from)?;
+    let parse_target = if repaired == input { input } else { &repaired };
+    let _ = Archive::parse(parse_target)?;
+    Ok(repaired)
 }
 
 fn parse_main_header_bytes(parsed: &ParsedBlockHeader) -> Result<MainHeader> {

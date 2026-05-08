@@ -317,14 +317,20 @@ impl FileHeader {
         password: Option<&[u8]>,
         writer: &mut dyn Write,
     ) -> Result<()> {
-        let (mut reader, keys) = self.packed_reader_with_password(archive, password)?;
+        let (mut reader, keys) = self
+            .packed_reader_with_password(archive, password)
+            .map_err(|error| self.entry_error("decoding", error))?;
         let mut crc = StreamingCrc32::new();
-        let mut hash = streaming_hash_verifier(self)?;
+        let mut hash =
+            streaming_hash_verifier(self).map_err(|error| self.entry_error("decoding", error))?;
         let mut written = 0u64;
         let mut buf = [0u8; 64 * 1024];
 
         loop {
-            let count = reader.read(&mut buf)?;
+            let count = reader
+                .read(&mut buf)
+                .map_err(Error::from)
+                .map_err(|error| self.entry_error("decoding", error))?;
             if count == 0 {
                 break;
             }
@@ -333,20 +339,26 @@ impl FileHeader {
             let chunk = &buf[..count.min(remaining)];
             written = written
                 .checked_add(chunk.len() as u64)
-                .ok_or(Error::InvalidHeader("RAR 5 stored size overflows"))?;
+                .ok_or(Error::InvalidHeader("RAR 5 stored size overflows"))
+                .map_err(|error| self.entry_error("decoding", error))?;
             crc.update(chunk);
             if let Some((_, hasher)) = &mut hash {
                 hasher.update(chunk);
             }
-            writer.write_all(chunk)?;
+            writer
+                .write_all(chunk)
+                .map_err(Error::from)
+                .map_err(|error| self.entry_error("writing", error))?;
         }
 
         if written != self.unpacked_size {
-            return Err(Error::InvalidHeader(
-                "RAR 5 stored file has mismatched packed and unpacked sizes",
+            return Err(self.entry_error(
+                "decoding",
+                Error::InvalidHeader("RAR 5 stored file has mismatched packed and unpacked sizes"),
             ));
         }
         self.verify_streaming_integrity(crc, hash, keys.as_ref())
+            .map_err(|error| self.entry_error("verifying", error))
     }
 
     fn entry_error(&self, operation: &'static str, error: Error) -> Error {
@@ -426,9 +438,7 @@ impl<'a> DecoderSession<'a> {
         writer: &mut dyn Write,
     ) -> Result<()> {
         if file.is_stored() {
-            return file
-                .write_stored_to(archive, self.password, writer)
-                .map_err(|error| file.entry_error("decoding", error));
+            return file.write_stored_to(archive, self.password, writer);
         }
         if file.should_stream_decode() {
             return self.stream_file_to(archive, file, writer);
