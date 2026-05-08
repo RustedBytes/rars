@@ -541,6 +541,7 @@ impl FileHeader {
             Error::UnsupportedSignature
             | Error::UnsupportedVersion(_)
             | Error::UnsupportedFeature { .. }
+            | Error::UnsupportedFamilyFeature { .. }
             | Error::UnsupportedCompression { .. }
             | Error::UnsupportedEncryption { .. }
             | Error::TooShort

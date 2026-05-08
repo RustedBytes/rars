@@ -1,24 +1,48 @@
 # rars plan
 
-## Active Tasks
+## Batch 12: Codec Correctness
+
+- Fix RARVM arithmetic corner cases: `Sbb` borrow flag handling and width-sized
+  `Shl`/`Shr` shifts.
+
+## Batch 13: Writer Oracle Coverage
+
+- Add byte-for-byte CLI round-trip assertions for writer tests, not only
+  `rars test` CRC checks against self-written archives.
+- Add WinRAR 2.90 PPMd writer coverage if the external harness produces a
+  failing archive.
+
+## Batch 14: CLI Safety And Semantics
+
+- Map CLI failures to useful unrar-style exit classes instead of flattening
+  every error to status 1.
+- Tighten CLI extraction safety: remove non-UTF-8 lossy path conversion and
+  close the symlink race in output creation.
+- Split `rars-cli/src/main.rs` into command modules when the CLI is next edited
+  heavily.
+
+## Batch 15: RAR5 Streaming And Recovery
 
 - Rework RAR5 large compressed-member extraction: align the streaming
   thresholds, replace string-matched filter fallback with typed codec state,
   avoid double-decoding large members, and keep the external large fixture as
   coverage for the genuine streaming path.
-- Add adversarial PPMd fixtures as corpus bugs appear.
-- Add real RAR-created RAR5 filter fixtures for E8, E8E9, Delta, and ARM
-  reader coverage.
-- Keep `reference-rar70-large-dict.sh` reproducible for external Unpack70
-  large-dictionary checks. The generated sparse fixture stays outside the repo.
-- Keep the libarchive mixed encrypted fixture as a partial oracle for the
-  RAR 3.93-validated `b.txt` member.
-- Split `rars-cli/src/main.rs` into command modules when the CLI is next edited
-  heavily.
-- Add a RAR 1.5-4.x writer builder only if another independent option axis
-  lands there.
+- Document and then implement the streaming sector path needed before RAR5
+  large-archive recovery repair is considered production-ready.
 
-## Optimization
+## Batch 16: Hardening
+
+- Add adversarial PPMd fixtures as corpus bugs appear.
+- Harden PPMd hostile-state arithmetic paths (`make_esc_freq`,
+  `update_model`) with focused malformed-stream regression tests.
+- Tighten RAR5 REV metadata parsing so table reads use checked slice helpers
+  and forward-compatible trailing bytes are accepted deliberately.
+- Reduce remaining whole-member codec buffers for encrypted RAR15/RAR20/RAR29
+  entries and compressed split-volume decrypt-before-chain paths.
+- Add fuzz targets for `Archive::parse`, `Unpack29::decode_member`, PPMd decode,
+  and RARVM program parsing/execution.
+
+## Compression Work
 
 - Revisit RAR 1.4 old-distance token emission with DOS RAR 1.402 oracle
   coverage. The writer currently avoids that compatibility-sensitive
@@ -34,19 +58,8 @@
   and PPMd tuning.
 - Improve RAR5/RAR7 compressed-writer policy beyond the deterministic method-1
   bounded hash-chain baseline: audio/filter placement and match selection.
-
-## Hardening
-
-- Harden PPMd hostile-state arithmetic paths (`make_esc_freq`,
-  `update_model`) with focused malformed-stream regression tests.
-- Tighten RAR5 REV metadata parsing so table reads use checked slice helpers
-  and forward-compatible trailing bytes are accepted deliberately.
-- Document and then implement the streaming sector path needed before RAR5
-  large-archive recovery repair is considered production-ready.
-- Reduce remaining whole-member codec buffers for encrypted RAR15/RAR20/RAR29
-  entries and compressed split-volume decrypt-before-chain paths.
-- Add fuzz targets for `Archive::parse`, `Unpack29::decode_member`, PPMd decode,
-  and RARVM program parsing/execution.
+- Add real RAR-created RAR5 filter fixtures for E8, E8E9, Delta, and ARM
+  reader coverage.
 
 ## Optional Oracles
 
@@ -60,6 +73,15 @@
 
 ## Deferred
 
+- Define RAR3 password encoding policy. Avoid silent `from_utf8_lossy`
+  derivation; either reject non-UTF-8 passwords clearly or implement the
+  intended legacy byte-to-wide mapping.
+- Add a RAR 1.5-4.x writer builder only if another independent option axis
+  lands there.
+- Keep `reference-rar70-large-dict.sh` reproducible for external Unpack70
+  large-dictionary checks. The generated sparse fixture stays outside the repo.
+- Keep the libarchive mixed encrypted fixture as a partial oracle for the
+  RAR 3.93-validated `b.txt` member.
 - Full cryptographic AV verification for RAR 1.4/2.x.
 - AV writing.
 - SFX writer/stub generation.

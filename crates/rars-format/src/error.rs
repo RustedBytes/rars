@@ -1,4 +1,4 @@
-use crate::version::ArchiveVersion;
+use crate::version::{ArchiveFamily, ArchiveVersion};
 use std::sync::Arc;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -42,6 +42,10 @@ pub enum Error {
     UnsupportedVersion(ArchiveVersion),
     UnsupportedFeature {
         version: ArchiveVersion,
+        feature: &'static str,
+    },
+    UnsupportedFamilyFeature {
+        family: ArchiveFamily,
         feature: &'static str,
     },
     UnsupportedCompression {
@@ -96,6 +100,9 @@ impl std::fmt::Display for Error {
             Self::UnsupportedVersion(version) => write!(f, "unsupported version: {version:?}"),
             Self::UnsupportedFeature { version, feature } => {
                 write!(f, "feature {feature} is not supported by {version:?}")
+            }
+            Self::UnsupportedFamilyFeature { family, feature } => {
+                write!(f, "feature {feature} is not supported by {family:?}")
             }
             Self::UnsupportedCompression {
                 family,

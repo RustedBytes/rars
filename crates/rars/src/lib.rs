@@ -232,14 +232,16 @@ impl Archive {
         }
     }
 
-    /// Repairs archive data using the archive's embedded recovery records.
+    /// Returns full repaired archive bytes using the archive's embedded
+    /// recovery records.
     pub fn repair_recovery(&self) -> Result<Vec<u8>> {
         let mut repaired = Vec::new();
         self.repair_recovery_to(&mut repaired)?;
         Ok(repaired)
     }
 
-    /// Streams repaired archive data to `writer` using embedded recovery records.
+    /// Streams full repaired archive bytes to `writer` using embedded recovery
+    /// records.
     pub fn repair_recovery_to(&self, writer: &mut dyn Write) -> Result<()> {
         match self {
             Self::Rar15To40(archive) => {
@@ -247,8 +249,8 @@ impl Archive {
                 Ok(())
             }
             Self::Rar50Plus(archive) => archive.repair_recovery_to(writer),
-            Self::Rar13(_) => Err(Error::UnsupportedFeature {
-                version: ArchiveVersion::Rar14,
+            Self::Rar13(_) => Err(Error::UnsupportedFamilyFeature {
+                family: ArchiveFamily::Rar13,
                 feature: "recovery repair for RAR 1.3/1.4 archives",
             }),
         }
@@ -2785,6 +2787,33 @@ mod tests {
         assert_eq!(
             collect_extract(&repaired_archive, None).unwrap()[0].data,
             payload
+        );
+    }
+
+    #[test]
+    fn archive_facade_reports_rar13_family_for_unsupported_recovery_repair() {
+        let bytes = rar13::write_stored_archive(
+            &[rar13::StoredEntry {
+                name: b"old.txt",
+                data: b"old rar payload",
+                file_time: 0,
+                file_attr: 0x20,
+                password: None,
+                file_comment: None,
+            }],
+            rar13_options(ArchiveVersion::Rar13),
+        )
+        .unwrap();
+        let archive = ArchiveReader::read(&bytes).unwrap();
+        let mut repaired = Vec::new();
+        let err = archive.repair_recovery_to(&mut repaired).unwrap_err();
+
+        assert_eq!(
+            err,
+            Error::UnsupportedFamilyFeature {
+                family: ArchiveFamily::Rar13,
+                feature: "recovery repair for RAR 1.3/1.4 archives"
+            }
         );
     }
 
