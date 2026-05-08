@@ -2,15 +2,6 @@
 
 ## Active Tasks
 
-- Review pass 3, batch 5: RAR5 extraction/parser correctness.
-  - Add a corrupt encrypted-padding regression and validate discarded RAR5
-    decrypted padding bytes.
-  - Move RAR5 streaming repeated-byte CRC/hash accounting so it only advances
-    after bytes are successfully written to the caller sink.
-  - Make REV5 metadata parsing use slice reads and tolerate trailing
-    forward-compatible metadata bytes.
-  - Validate minimum sizes for legacy AV/SIGN blocks even when their header
-    CRCs are intentionally not trusted.
 - Review pass 3, batch 6: codec hardening and state hygiene.
   - Reduce the RAR29 filtered-range O(N^2) filter clone pattern.
   - Add an explicit non-solid reset API or guard for reusable `Unpack29`

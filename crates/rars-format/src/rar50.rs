@@ -723,18 +723,17 @@ impl Rev5VolumeMeta {
         let mut data_volumes = Vec::with_capacity(data_count as usize);
         let mut pos = 11;
         for _ in 0..data_count {
-            let file_size = u64::from_le_bytes([
-                body[pos],
-                body[pos + 1],
-                body[pos + 2],
-                body[pos + 3],
-                body[pos + 4],
-                body[pos + 5],
-                body[pos + 6],
-                body[pos + 7],
-            ]);
+            let row = body.get(pos..pos + 12).ok_or(Error::InvalidHeader(
+                "RAR 5 REV metadata table size is invalid",
+            ))?;
+            let file_size =
+                u64::from_le_bytes(row[..8].try_into().map_err(|_| {
+                    Error::InvalidHeader("RAR 5 REV metadata table size is invalid")
+                })?);
             let crc =
-                u32::from_le_bytes([body[pos + 8], body[pos + 9], body[pos + 10], body[pos + 11]]);
+                u32::from_le_bytes(row[8..12].try_into().map_err(|_| {
+                    Error::InvalidHeader("RAR 5 REV metadata table size is invalid")
+                })?);
             data_volumes.push(Rev5DataVolume {
                 file_size,
                 crc32: crc,

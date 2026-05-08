@@ -227,6 +227,11 @@ impl FileHeader {
                         "RAR 5 encrypted stored file is shorter than unpacked size",
                     ));
                 }
+                if packed[unpacked_size..].iter().any(|&byte| byte != 0) {
+                    return Err(Error::InvalidHeader(
+                        "RAR 5 encrypted stored file has non-zero padding",
+                    ));
+                }
                 return Ok(packed[..unpacked_size].to_vec());
             }
             if packed.len() as u64 != self.unpacked_size {
@@ -356,20 +361,19 @@ fn write_repeated_chunk(
     byte: u8,
     mut len: usize,
 ) -> std::io::Result<()> {
-    if byte == 0 {
-        crc.update_zeroes(len as u64);
-    }
     let buffer = [byte; 64 * 1024];
     while len > 0 {
         let take = len.min(buffer.len());
         let chunk = &buffer[..take];
-        if byte != 0 {
+        writer.write_all(chunk)?;
+        if byte == 0 {
+            crc.update_zeroes(take as u64);
+        } else {
             crc.update(chunk);
         }
         if let Some((_, hasher)) = hash.as_mut() {
             hasher.update(chunk);
         }
-        writer.write_all(chunk)?;
         len -= take;
     }
     Ok(())
@@ -1085,6 +1089,48 @@ mod tests {
         skipped.update_zeroes(100_000);
 
         assert_eq!(skipped.finish(), bytewise.finish());
+    }
+
+    #[test]
+    fn repeated_chunk_does_not_advance_crc_after_sink_error() {
+        struct FailingWriter;
+
+        impl Write for FailingWriter {
+            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("sink failed"))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut writer = FailingWriter;
+        let mut crc = StreamingCrc32::new();
+        let expected = StreamingCrc32::new().finish();
+
+        assert!(write_repeated_chunk(&mut writer, &mut crc, &mut None, 0, 1024).is_err());
+        assert_eq!(crc.finish(), expected);
+    }
+
+    #[test]
+    fn encrypted_stored_decode_rejects_nonzero_discarded_padding() {
+        let mut file = plain_file(b"secret.txt", b"secret", None);
+        file.encrypted = true;
+        file.unpacked_size = 6;
+        let mut decoder = Unpack50Decoder::new();
+
+        assert_eq!(
+            file.decode_packed_with_decoder(b"secret\0\0", &mut decoder)
+                .unwrap(),
+            b"secret"
+        );
+        assert!(matches!(
+            file.decode_packed_with_decoder(b"secret\0\x01", &mut decoder),
+            Err(Error::InvalidHeader(
+                "RAR 5 encrypted stored file has non-zero padding"
+            ))
+        ));
     }
 
     #[test]
