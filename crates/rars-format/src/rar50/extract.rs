@@ -336,7 +336,14 @@ impl FileHeader {
             }
             let remaining =
                 usize::try_from(self.unpacked_size.saturating_sub(written)).unwrap_or(usize::MAX);
-            let chunk = &buf[..count.min(remaining)];
+            let chunk_len = count.min(remaining);
+            let chunk = &buf[..chunk_len];
+            if self.encrypted && buf[chunk_len..count].iter().any(|&byte| byte != 0) {
+                return Err(self.entry_error(
+                    "decoding",
+                    Error::InvalidHeader("RAR 5 encrypted stored file has non-zero padding"),
+                ));
+            }
             written = written
                 .checked_add(chunk.len() as u64)
                 .ok_or(Error::InvalidHeader("RAR 5 stored size overflows"))
@@ -718,7 +725,13 @@ impl PendingSplitRefs {
             let chunk = if final_file.encrypted {
                 let remaining = usize::try_from(final_file.unpacked_size.saturating_sub(written))
                     .unwrap_or(usize::MAX);
-                &buf[..count.min(remaining)]
+                let chunk_len = count.min(remaining);
+                if buf[chunk_len..count].iter().any(|&byte| byte != 0) {
+                    return Err(Error::InvalidHeader(
+                        "RAR 5 encrypted stored split file has non-zero padding",
+                    ));
+                }
+                &buf[..chunk_len]
             } else {
                 &buf[..count]
             };

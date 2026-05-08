@@ -681,10 +681,14 @@ fn parse_rar3_old_style_rev_name(path: &Path) -> Option<(usize, usize, usize)> {
 fn infer_part_index(path: &Path, data_count: u16) -> Option<usize> {
     let name = path.file_name()?.to_string_lossy();
     let index = if let Some(part_pos) = name.find(".part") {
-        let digits: String = name[part_pos + ".part".len()..]
-            .chars()
-            .take_while(|ch| ch.is_ascii_digit())
-            .collect();
+        let suffix = &name[part_pos + ".part".len()..];
+        if suffix.len() <= 4 || !suffix[suffix.len() - 4..].eq_ignore_ascii_case(".rar") {
+            return None;
+        }
+        let digits = &suffix[..suffix.len() - 4];
+        if digits.is_empty() || !digits.chars().all(|ch| ch.is_ascii_digit()) {
+            return None;
+        }
         digits.parse::<usize>().ok()?.checked_sub(1)?
     } else {
         let ext = path.extension()?.to_str()?;
@@ -2134,6 +2138,8 @@ mod tests {
     fn infer_part_index_accepts_new_and_old_numbered_volume_names() {
         assert_eq!(infer_part_index(Path::new("archive.part1.rar"), 4), Some(0));
         assert_eq!(infer_part_index(Path::new("archive.part4.rar"), 4), Some(3));
+        assert_eq!(infer_part_index(Path::new("archive.part1foo.rar"), 4), None);
+        assert_eq!(infer_part_index(Path::new("archive.part1"), 4), None);
         assert_eq!(infer_part_index(Path::new("archive.rar"), 4), Some(0));
         assert_eq!(infer_part_index(Path::new("archive.r00"), 4), Some(1));
         assert_eq!(infer_part_index(Path::new("archive.r02"), 4), Some(3));

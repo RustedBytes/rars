@@ -11,6 +11,22 @@
 
 ## Hardening
 
+- Review #4 batch 2: polish:
+  - Preserve `source()` chains for recovery and crypto errors.
+  - Decide and document or improve non-Linux `O_NOFOLLOW` extraction hardening.
+  - Add comments for intentional SHA1 fast-path limits, RAR5 LOCATOR trailing
+    bytes, and split-volume state invariants.
+- Review #4 batch 3: shared utilities:
+  - Extract the shared x86 filter-range scanner used by RAR29 and RAR5 writers.
+  - Consolidate duplicated `read_exact_at`, endian-read, and `align16` helpers
+    within `rars-format`.
+- Review #4 batch 4: fixture/oracle checks:
+  - Verify RAR2 `PROTECT_HEAD` parity behaviour when the protected range
+    overlaps the recovery block before changing repair logic.
+  - Confirm old-numbered volume extensions beyond `.rNN` before adding CLI
+    chaining support.
+  - Pin or document RAR29 zero-offset match handling before changing
+    `copy_match`.
 - Add adversarial PPMd fixtures as corpus bugs appear.
 - Harden PPMd hostile-state arithmetic paths (`make_esc_freq`,
   `update_model`) with focused malformed-stream regression tests.

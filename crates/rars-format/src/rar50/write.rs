@@ -794,34 +794,45 @@ enum ResolvedRar50WriteMember<'a> {
 
 fn emit_resolved_writer_plan(plan: ResolvedRar50WritePlan<'_>) -> Result<Vec<u8>> {
     if plan.quick_open {
-        let mut quick_open_offset = 0;
-        for _ in 0..4 {
-            let (out, next_quick_open_offset, _) =
-                emit_resolved_writer_plan_pass(&plan, Some(quick_open_offset), None)?;
-            if next_quick_open_offset == Some(quick_open_offset) {
-                return Ok(out);
-            }
-            // Invariant: a quick-open pass always reports the offset it emitted.
-            quick_open_offset = next_quick_open_offset.expect("quick-open offset is set");
-        }
-        return emit_resolved_writer_plan_pass(&plan, Some(quick_open_offset), None)
-            .map(|(out, _, _)| out);
+        return resolve_writer_plan_offset(
+            |quick_open_offset| {
+                emit_resolved_writer_plan_pass(&plan, Some(quick_open_offset), None)
+                    .map(|(out, next_quick_open_offset, _)| (out, next_quick_open_offset))
+            },
+            "RAR 5 quick-open pass did not report an offset",
+            "RAR 5 quick-open offset did not converge",
+        );
     }
     if plan.recovery_percent.is_some() {
-        let mut recovery_offset = 0;
-        for _ in 0..4 {
-            let (out, _, next_recovery_offset) =
-                emit_resolved_writer_plan_pass(&plan, None, Some(recovery_offset))?;
-            if next_recovery_offset == Some(recovery_offset) {
-                return Ok(out);
-            }
-            // Invariant: a recovery pass always reports the RR service offset it emitted.
-            recovery_offset = next_recovery_offset.expect("recovery offset is set");
-        }
-        return emit_resolved_writer_plan_pass(&plan, None, Some(recovery_offset))
-            .map(|(out, _, _)| out);
+        return resolve_writer_plan_offset(
+            |recovery_offset| {
+                emit_resolved_writer_plan_pass(&plan, None, Some(recovery_offset))
+                    .map(|(out, _, next_recovery_offset)| (out, next_recovery_offset))
+            },
+            "RAR 5 recovery pass did not report an offset",
+            "RAR 5 recovery offset did not converge",
+        );
     }
     emit_resolved_writer_plan_pass(&plan, None, None).map(|(out, _, _)| out)
+}
+
+fn resolve_writer_plan_offset<F>(
+    mut pass: F,
+    missing_offset_error: &'static str,
+    convergence_error: &'static str,
+) -> Result<Vec<u8>>
+where
+    F: FnMut(u64) -> Result<(Vec<u8>, Option<u64>)>,
+{
+    let mut offset = 0;
+    for _ in 0..4 {
+        let (out, next_offset) = pass(offset)?;
+        if next_offset == Some(offset) {
+            return Ok(out);
+        }
+        offset = next_offset.ok_or(Error::InvalidHeader(missing_offset_error))?;
+    }
+    Err(Error::InvalidHeader(convergence_error))
 }
 
 fn emit_resolved_writer_plan_pass(
@@ -3068,6 +3079,39 @@ mod tests {
                 is_directory: meta.is_directory,
             })
             .collect())
+    }
+
+    #[test]
+    fn writer_plan_offset_resolution_errors_if_offset_never_converges() {
+        let mut offsets = Vec::new();
+        let result = resolve_writer_plan_offset(
+            |offset| {
+                offsets.push(offset);
+                Ok((Vec::new(), Some(offset + 1)))
+            },
+            "missing offset",
+            "did not converge",
+        );
+
+        assert!(matches!(
+            result,
+            Err(Error::InvalidHeader("did not converge"))
+        ));
+        assert_eq!(offsets, [0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn writer_plan_offset_resolution_rejects_missing_reported_offset() {
+        let result = resolve_writer_plan_offset(
+            |_| Ok((Vec::new(), None)),
+            "missing offset",
+            "did not converge",
+        );
+
+        assert!(matches!(
+            result,
+            Err(Error::InvalidHeader("missing offset"))
+        ));
     }
 
     #[test]
