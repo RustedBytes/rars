@@ -1,8 +1,17 @@
 use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
 use aes::Aes128;
 use sha1::{Digest, Sha1 as FastSha1};
+use std::str;
 
 const HASH_ROUNDS: u32 = 0x40000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Error {
+    NonUtf8Password,
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Clone)]
 pub struct Rar30Cipher {
@@ -11,12 +20,12 @@ pub struct Rar30Cipher {
 }
 
 impl Rar30Cipher {
-    pub fn new(password: &[u8], salt: Option<[u8; 8]>) -> Self {
-        let (key, iv) = derive_key_iv(password, salt);
-        Self {
+    pub fn new(password: &[u8], salt: Option<[u8; 8]>) -> Result<Self> {
+        let (key, iv) = derive_key_iv(password, salt)?;
+        Ok(Self {
             cipher: Aes128::new(&key.into()),
             iv,
-        }
+        })
     }
 
     pub fn decrypt_in_place(&mut self, data: &mut [u8]) {
@@ -49,9 +58,9 @@ impl Rar30Cipher {
     }
 }
 
-fn derive_key_iv(password: &[u8], salt: Option<[u8; 8]>) -> ([u8; 16], [u8; 16]) {
+fn derive_key_iv(password: &[u8], salt: Option<[u8; 8]>) -> Result<([u8; 16], [u8; 16])> {
     let mut raw = Vec::with_capacity(password.len() * 2 + 8);
-    let password = String::from_utf8_lossy(password);
+    let password = str::from_utf8(password).map_err(|_| Error::NonUtf8Password)?;
     for code_unit in password.encode_utf16() {
         raw.extend_from_slice(&code_unit.to_le_bytes());
     }
@@ -60,10 +69,10 @@ fn derive_key_iv(password: &[u8], salt: Option<[u8; 8]>) -> ([u8; 16], [u8; 16])
     }
 
     if raw.len() < 64 {
-        return derive_key_iv_fast(&raw);
+        return Ok(derive_key_iv_fast(&raw));
     }
 
-    derive_key_iv_slow(&mut raw)
+    Ok(derive_key_iv_slow(&mut raw))
 }
 
 fn derive_key_iv_slow(raw: &mut [u8]) -> ([u8; 16], [u8; 16]) {
@@ -258,7 +267,7 @@ mod tests {
 
     fn raw_kdf_material(password: &[u8], salt: Option<[u8; 8]>) -> Vec<u8> {
         let mut raw = Vec::with_capacity(password.len() * 2 + 8);
-        let password = String::from_utf8_lossy(password);
+        let password = str::from_utf8(password).unwrap();
         for code_unit in password.encode_utf16() {
             raw.extend_from_slice(&code_unit.to_le_bytes());
         }
@@ -274,7 +283,9 @@ mod tests {
         let mut data = *b"0123456789abcdefRAR AES CBC data";
         let plain = data;
 
-        Rar30Cipher::new(b"password", salt).encrypt_in_place(&mut data);
+        Rar30Cipher::new(b"password", salt)
+            .unwrap()
+            .encrypt_in_place(&mut data);
         assert_eq!(
             data,
             [
@@ -284,7 +295,9 @@ mod tests {
             ]
         );
 
-        Rar30Cipher::new(b"password", salt).decrypt_in_place(&mut data);
+        Rar30Cipher::new(b"password", salt)
+            .unwrap()
+            .decrypt_in_place(&mut data);
         assert_eq!(data, plain);
     }
 
@@ -298,11 +311,23 @@ mod tests {
         let mut data = *b"0123456789abcdefRAR AES CBC data";
         let plain = data;
 
-        Rar30Cipher::new(password, salt).encrypt_in_place(&mut data);
+        Rar30Cipher::new(password, salt)
+            .unwrap()
+            .encrypt_in_place(&mut data);
         assert_ne!(data, plain);
 
-        Rar30Cipher::new(password, salt).decrypt_in_place(&mut data);
+        Rar30Cipher::new(password, salt)
+            .unwrap()
+            .decrypt_in_place(&mut data);
         assert_eq!(data, plain);
+    }
+
+    #[test]
+    fn rejects_non_utf8_passwords() {
+        assert!(matches!(
+            Rar30Cipher::new(b"\xffpassword", None),
+            Err(Error::NonUtf8Password)
+        ));
     }
 
     #[test]

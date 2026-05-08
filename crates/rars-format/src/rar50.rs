@@ -1650,6 +1650,9 @@ fn read_vint_at(input: &[u8], offset: usize, end: usize) -> Result<(u64, usize)>
             return Err(Error::TooShort);
         }
         let byte = *input.get(pos).ok_or(Error::TooShort)?;
+        if shift == 63 && byte & 0x7e != 0 {
+            return Err(Error::InvalidHeader("RAR 5 vint overflows u64"));
+        }
         value = value
             .checked_add(((byte & 0x7f) as u64) << shift)
             .ok_or(Error::InvalidHeader("RAR 5 vint overflows u64"))?;
@@ -1734,6 +1737,18 @@ mod tests {
         assert_eq!(read_vint_at(&[0x01], 0, 0), Err(Error::TooShort));
         assert_eq!(read_vint_at(&[0x81, 0x01], 0, 1), Err(Error::TooShort));
         assert_eq!(read_vint_at(&[0x81, 0x01], 0, 2).unwrap(), (129, 2));
+    }
+
+    #[test]
+    fn read_vint_at_rejects_values_wider_than_u64() {
+        let max = [0xff; 9].into_iter().chain([0x01]).collect::<Vec<_>>();
+        assert_eq!(read_vint_at(&max, 0, max.len()).unwrap(), (u64::MAX, 10));
+
+        let overflow = [0xff; 9].into_iter().chain([0x02]).collect::<Vec<_>>();
+        assert_eq!(
+            read_vint_at(&overflow, 0, overflow.len()),
+            Err(Error::InvalidHeader("RAR 5 vint overflows u64"))
+        );
     }
 
     #[test]

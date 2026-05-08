@@ -303,7 +303,7 @@ pub fn repair_inline_recovery_archive(input: &[u8]) -> Result<Vec<u8>> {
     }
     let repaired_prefix = repair_inline_recovery_prefix(&input[..protected_size], &recovery_data)?;
     if repaired_prefix == input[..protected_size] {
-        return Err(Error::BadRecoveryChunk);
+        return Ok(input.to_vec());
     }
     let mut repaired = input.to_vec();
     repaired[..protected_size].copy_from_slice(&repaired_prefix);
@@ -1029,6 +1029,20 @@ mod tests {
         damaged[256..320].fill(0x5a);
 
         let repaired = repair_inline_recovery_archive(&damaged).unwrap();
+
+        assert_eq!(repaired, archive);
+    }
+
+    #[test]
+    fn rar5_inline_recovery_archive_accepts_healthy_archive() {
+        let prefix: Vec<u8> = (0..32_000).map(|index| (index * 17) as u8).collect();
+        let recovery_data = build_structural_inline_recovery_data(&prefix, 20).unwrap();
+        let mut archive = prefix.clone();
+        archive.extend_from_slice(b"service header bytes before chunks");
+        archive.extend_from_slice(&recovery_data);
+        archive.extend_from_slice(b"end bytes");
+
+        let repaired = repair_inline_recovery_archive(&archive).unwrap();
 
         assert_eq!(repaired, archive);
     }

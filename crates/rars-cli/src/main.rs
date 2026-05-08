@@ -13,14 +13,14 @@ use rars::{
 };
 use std::env;
 use std::fs;
-use std::io::{IsTerminal, Write};
+use std::io::IsTerminal;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 type CliResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 const ADD_USAGE: &str =
-    "usage: rars a [--password <password>|--password-file <path>] --format <rar14|rar15|rar20|rar29|rar30|rar40|rar50|rar70> [--store] [--solid] [--encrypt-headers] [--quick-open] [--comment <text>] [--archive-name <name>] [--file-comment <text>] [--recovery-percent <1..100>] [--volume-size <bytes>] [--ppmd|--auto-filter|--delta-filter <channels>|--e8-filter|--e8e9-filter|--itanium-filter|--rgb-filter <width>|--audio-filter <channels>|--arm-filter] <archive> <files...>";
+    "usage: rars a [--password <password>|--password-file <path>] --format <rar14|rar15|rar20|rar29|rar30|rar40|rar50|rar70> [--store] [--solid] [--encrypt-headers] [--quick-open] [--comment <text>] [--archive-name <name>] [--file-comment <text>] [--recovery-percent <1..100>] [--volume-size <bytes|k|m|g>] [--ppmd|--auto-filter|--delta-filter <channels>|--e8-filter|--e8e9-filter|--itanium-filter|--rgb-filter <width>|--audio-filter <channels>|--arm-filter] <archive> <files...>";
 const DOS_DIRECTORY_ATTR: u8 = 0x10;
 const RAR50_SIGNATURE: &[u8] = b"Rar!\x1a\x07\x01\x00";
 const RAR50_STRUCTURAL_RR_WARNING: &str =
@@ -679,7 +679,7 @@ fn parse_add_command(args: &[String]) -> CliResult<AddCommand> {
                 let value = args
                     .get(archive_index + 1)
                     .ok_or("missing --volume-size value")?;
-                volume_size = Some(value.parse::<usize>()?);
+                volume_size = Some(parse_size(value)?);
                 archive_index += 2;
             }
             "--delta-filter" => {
@@ -1644,6 +1644,26 @@ fn trim_password_line(mut bytes: Vec<u8>) -> Vec<u8> {
     bytes
 }
 
+fn parse_size(input: &str) -> CliResult<usize> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err("size is empty".into());
+    }
+    let (digits, multiplier) = match input.as_bytes().last().copied() {
+        Some(b'k' | b'K') => (&input[..input.len() - 1], 1024usize),
+        Some(b'm' | b'M') => (&input[..input.len() - 1], 1024usize * 1024),
+        Some(b'g' | b'G') => (&input[..input.len() - 1], 1024usize * 1024 * 1024),
+        _ => (input, 1usize),
+    };
+    if digits.is_empty() {
+        return Err(format!("invalid size: {input}").into());
+    }
+    let value = digits.parse::<usize>()?;
+    value
+        .checked_mul(multiplier)
+        .ok_or_else(|| format!("size overflows usize: {input}").into())
+}
+
 fn read_archive_path_prompting(
     path: &str,
     password: &mut Option<Vec<u8>>,
@@ -1698,14 +1718,15 @@ fn ensure_password_for_extract(
 }
 
 fn prompt_password_if_tty() -> CliResult<Option<Vec<u8>>> {
-    if !std::io::stdin().is_terminal() {
+    if !should_prompt_password(std::io::stdin().is_terminal()) {
         return Ok(None);
     }
-    eprint!("password: ");
-    std::io::stderr().flush()?;
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line)?;
+    let line = rpassword::prompt_password("password: ")?;
     Ok(Some(trim_password_line(line.into_bytes())))
+}
+
+fn should_prompt_password(stdin_is_terminal: bool) -> bool {
+    stdin_is_terminal
 }
 
 fn error_needs_password(error: &Error) -> bool {
@@ -1872,7 +1893,7 @@ fn usage() {
 mod tests {
     use super::{
         checked_output_path, error_needs_password, infer_part_index, output_relative_path,
-        rar50_volume_part_path, redirection_warning,
+        parse_size, rar50_volume_part_path, redirection_warning, should_prompt_password,
     };
     use rars::Error;
     use std::path::{Path, PathBuf};
@@ -1885,6 +1906,22 @@ mod tests {
         assert_eq!(infer_part_index(Path::new("archive.r00"), 4), Some(1));
         assert_eq!(infer_part_index(Path::new("archive.r02"), 4), Some(3));
         assert_eq!(infer_part_index(Path::new("archive.r03"), 4), None);
+    }
+
+    #[test]
+    fn parse_size_accepts_binary_suffixes() {
+        assert_eq!(parse_size("10").unwrap(), 10);
+        assert_eq!(parse_size("10k").unwrap(), 10 * 1024);
+        assert_eq!(parse_size("10M").unwrap(), 10 * 1024 * 1024);
+        assert_eq!(parse_size("2g").unwrap(), 2 * 1024 * 1024 * 1024);
+        assert!(parse_size("m").is_err());
+        assert!(parse_size("").is_err());
+    }
+
+    #[test]
+    fn password_prompt_is_gated_on_terminal_stdin() {
+        assert!(!should_prompt_password(false));
+        assert!(should_prompt_password(true));
     }
 
     #[test]

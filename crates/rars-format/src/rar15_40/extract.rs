@@ -517,7 +517,9 @@ impl SplitCipher {
             return Ok(Self::Rar20(Box::new(Rar20Cipher::new(password))));
         }
         if unp_ver >= 29 {
-            return Ok(Self::Rar30(Box::new(Rar30Cipher::new(password, salt))));
+            return Ok(Self::Rar30(Box::new(
+                Rar30Cipher::new(password, salt).map_err(super::map_rar30_crypto_error)?,
+            )));
         }
         Err(Error::UnsupportedEncryption {
             family: "RAR 1.5-4.x split volume",
@@ -703,7 +705,9 @@ mod tests {
         let salt = Some([7u8; 8]);
         let plain = *b"0123456789abcdefRAR3 block two!!";
         let mut encrypted = plain;
-        Rar30Cipher::new(b"pw", salt).encrypt_in_place(&mut encrypted);
+        Rar30Cipher::new(b"pw", salt)
+            .unwrap()
+            .encrypt_in_place(&mut encrypted);
         let mut reader = DecryptingReader::new(Cursor::new(encrypted), 29, b"pw", salt).unwrap();
         let mut out = Vec::new();
         reader.read_to_end(&mut out).unwrap();

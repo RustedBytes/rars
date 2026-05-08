@@ -470,7 +470,7 @@ impl Vm {
             Opcode::Cmp => {
                 let a = self.read_operand(op(0)?, byte_mode);
                 let b = self.read_operand(op(1)?, byte_mode);
-                self.set_sub_flags(a, b, byte_mode);
+                self.set_sub_flags(a, b, 0, byte_mode);
             }
             Opcode::Add => {
                 let a = self.read_operand(op(0)?, byte_mode);
@@ -484,7 +484,7 @@ impl Vm {
                 let b = self.read_operand(op(1)?, byte_mode);
                 let result = self.mask_width(a.wrapping_sub(b), byte_mode);
                 self.write_operand(op(0)?, result, byte_mode)?;
-                self.set_sub_flags(a, b, byte_mode);
+                self.set_sub_flags(a, b, 0, byte_mode);
             }
             Opcode::Jz => return Ok(self.conditional_jump(op(0)?, self.flags & FLAG_Z != 0)),
             Opcode::Jnz => return Ok(self.conditional_jump(op(0)?, self.flags & FLAG_Z == 0)),
@@ -618,7 +618,7 @@ impl Vm {
                 if instruction.opcode == Opcode::Adc {
                     self.set_add_flags(a, b, carry, result, byte_mode);
                 } else {
-                    self.set_sub_flags(a, b.wrapping_add(carry), byte_mode);
+                    self.set_sub_flags(a, b, carry, byte_mode);
                 }
             }
             Opcode::Print => {}
@@ -724,8 +724,20 @@ impl Vm {
         let count = count.min(width);
         let value = self.read_operand(dst, byte_mode);
         let result = match opcode {
-            Opcode::Shl => value.wrapping_shl(count),
-            Opcode::Shr => value.wrapping_shr(count),
+            Opcode::Shl => {
+                if count == width {
+                    0
+                } else {
+                    value.wrapping_shl(count)
+                }
+            }
+            Opcode::Shr => {
+                if count == width {
+                    0
+                } else {
+                    value.wrapping_shr(count)
+                }
+            }
             Opcode::Sar => {
                 if byte_mode {
                     if count >= 8 {
@@ -766,12 +778,12 @@ impl Vm {
         self.set_zsc(result, sum > mask, byte_mode);
     }
 
-    fn set_sub_flags(&mut self, a: u32, b: u32, byte_mode: bool) {
-        let mask = self.value_mask(byte_mode);
-        let a = a & mask;
-        let b = b & mask;
-        let result = self.mask_width(a.wrapping_sub(b), byte_mode);
-        self.set_zsc(result, a < b, byte_mode);
+    fn set_sub_flags(&mut self, a: u32, b: u32, borrow: u32, byte_mode: bool) {
+        let mask = self.value_mask(byte_mode) as u64;
+        let a = a as u64 & mask;
+        let subtrahend = (b as u64 & mask) + u64::from(borrow);
+        let result = self.mask_width((a as u32).wrapping_sub(subtrahend as u32), byte_mode);
+        self.set_zsc(result, a < subtrahend, byte_mode);
     }
 
     fn set_zs(&mut self, result: u32, byte_mode: bool) {
@@ -1354,6 +1366,95 @@ mod tests {
 
         assert_eq!(result.regs[0], 0xff);
         assert_eq!(result.regs[1], 0);
+    }
+
+    #[test]
+    fn full_width_shl_and_shr_clear_destination() {
+        let result = execute_instructions(vec![
+            instr(
+                Opcode::Mov,
+                false,
+                vec![Operand::Register(0), Operand::Immediate(0x1234_5678)],
+            ),
+            instr(
+                Opcode::Shl,
+                false,
+                vec![Operand::Register(0), Operand::Immediate(32)],
+            ),
+            instr(
+                Opcode::Mov,
+                false,
+                vec![Operand::Register(1), Operand::Immediate(0x8765_4321)],
+            ),
+            instr(
+                Opcode::Shr,
+                false,
+                vec![Operand::Register(1), Operand::Immediate(32)],
+            ),
+            instr(
+                Opcode::Mov,
+                false,
+                vec![Operand::Register(2), Operand::Immediate(0xff)],
+            ),
+            instr(
+                Opcode::Shl,
+                true,
+                vec![Operand::Register(2), Operand::Immediate(8)],
+            ),
+            instr(
+                Opcode::Mov,
+                false,
+                vec![Operand::Register(3), Operand::Immediate(0xff)],
+            ),
+            instr(
+                Opcode::Shr,
+                true,
+                vec![Operand::Register(3), Operand::Immediate(8)],
+            ),
+            instr(Opcode::Ret, false, Vec::new()),
+        ]);
+
+        assert_eq!(result.regs[0], 0);
+        assert_eq!(result.regs[1], 0);
+        assert_eq!(result.regs[2] & 0xff, 0);
+        assert_eq!(result.regs[3] & 0xff, 0);
+    }
+
+    #[test]
+    fn sbb_sets_borrow_flag_when_subtrahend_plus_carry_wraps_byte_width() {
+        let result = execute_instructions(vec![
+            instr(
+                Opcode::Cmp,
+                true,
+                vec![Operand::Immediate(0), Operand::Immediate(1)],
+            ),
+            instr(
+                Opcode::Mov,
+                false,
+                vec![Operand::Register(0), Operand::Immediate(0)],
+            ),
+            instr(
+                Opcode::Sbb,
+                true,
+                vec![Operand::Register(0), Operand::Immediate(0xff)],
+            ),
+            instr(Opcode::Jb, false, vec![Operand::Immediate(6)]),
+            instr(
+                Opcode::Mov,
+                false,
+                vec![Operand::Register(1), Operand::Immediate(0xdead)],
+            ),
+            instr(Opcode::Ret, false, Vec::new()),
+            instr(
+                Opcode::Mov,
+                false,
+                vec![Operand::Register(1), Operand::Immediate(0xbeef)],
+            ),
+            instr(Opcode::Ret, false, Vec::new()),
+        ]);
+
+        assert_eq!(result.regs[0] & 0xff, 0);
+        assert_eq!(result.regs[1], 0xbeef);
     }
 
     #[test]

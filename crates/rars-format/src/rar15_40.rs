@@ -8,7 +8,7 @@ use rars_codec::rar20::Unpack20;
 use rars_codec::rar29::Unpack29;
 use rars_crypto::rar15::Rar15Cipher;
 use rars_crypto::rar20::Rar20Cipher;
-use rars_crypto::rar30::Rar30Cipher;
+use rars_crypto::rar30::{Error as Rar30Error, Rar30Cipher};
 use std::fs::File;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
@@ -1591,15 +1591,24 @@ struct EncryptedHeaderCipherCache {
 }
 
 impl EncryptedHeaderCipherCache {
-    fn cipher(&mut self, password: &[u8], salt: [u8; 8]) -> Rar30Cipher {
+    fn cipher(&mut self, password: &[u8], salt: [u8; 8]) -> Result<Rar30Cipher> {
         if self.salt != Some(salt) {
             self.salt = Some(salt);
-            self.cipher = Some(Rar30Cipher::new(password, Some(salt)));
+            self.cipher =
+                Some(Rar30Cipher::new(password, Some(salt)).map_err(map_rar30_crypto_error)?);
         }
-        self.cipher
+        Ok(self
+            .cipher
             .as_ref()
             .expect("RAR 3 encrypted header cipher cache initialized")
-            .clone()
+            .clone())
+    }
+}
+
+fn map_rar30_crypto_error(error: Rar30Error) -> Error {
+    match error {
+        Rar30Error::NonUtf8Password => Error::InvalidHeader("RAR 3.x password is not UTF-8"),
+        _ => Error::InvalidHeader("RAR 3.x crypto error"),
     }
 }
 
@@ -1613,7 +1622,7 @@ fn decrypt_encrypted_header_at(
     let first_ciphertext = archive
         .get(offset + 8..offset + 24)
         .ok_or(Error::TooShort)?;
-    let mut cipher = cipher_cache.cipher(password, salt);
+    let mut cipher = cipher_cache.cipher(password, salt)?;
     let mut first_block = [0u8; 16];
     first_block.copy_from_slice(first_ciphertext);
     cipher.decrypt_in_place(&mut first_block);
@@ -1668,7 +1677,7 @@ fn read_encrypted_header_at(
     }
     let first = read_exact_at(file, absolute, 24)?;
     let salt = read_header_salt(&first, 0)?;
-    let mut cipher = cipher_cache.cipher(password, salt);
+    let mut cipher = cipher_cache.cipher(password, salt)?;
     let mut first_block = [0u8; 16];
     first_block.copy_from_slice(&first[8..24]);
     cipher.decrypt_in_place(&mut first_block);

@@ -842,7 +842,9 @@ fn encrypt_split_packed_data(
             let salt = random_rar30_salt()?;
             let padded_len = align16(data.len())?;
             data.resize(padded_len, 0);
-            Rar30Cipher::new(password, Some(salt)).encrypt_in_place(data);
+            Rar30Cipher::new(password, Some(salt))
+                .map_err(super::map_rar30_crypto_error)?
+                .encrypt_in_place(data);
             Ok(Some(salt))
         }
         _ => Err(Error::UnsupportedVersion(target)),
@@ -910,7 +912,9 @@ fn encrypt_packed_data_for_writer(
                         "RAR 3.x encrypted data size overflows",
                     ))?;
             data.resize(padded_len, 0);
-            Rar30Cipher::new(password, Some(salt)).encrypt_in_place(data);
+            Rar30Cipher::new(password, Some(salt))
+                .map_err(super::map_rar30_crypto_error)?
+                .encrypt_in_place(data);
             Ok(Some(salt))
         }
         _ => Err(Error::UnsupportedFeature {
@@ -1171,7 +1175,9 @@ fn write_encrypted_header_and_data(
     let mut encrypted_header = Vec::with_capacity(encrypted_size);
     encrypted_header.extend_from_slice(header);
     encrypted_header.resize(encrypted_size, 0);
-    Rar30Cipher::new(password, Some(salt)).encrypt_in_place(&mut encrypted_header);
+    Rar30Cipher::new(password, Some(salt))
+        .map_err(super::map_rar30_crypto_error)?
+        .encrypt_in_place(&mut encrypted_header);
     out.extend_from_slice(&salt);
     out.extend_from_slice(&encrypted_header);
     out.extend_from_slice(data);

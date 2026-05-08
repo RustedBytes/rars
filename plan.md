@@ -2,6 +2,38 @@
 
 ## Active Tasks
 
+- Review pass 3, batch 2: hostile-input parser and crypto hardening.
+  - Validate RAR30/RAR50 cipher input alignment consistently instead of
+    dropping partial blocks.
+  - Make RAR50 password checks constant-time across CRC/HMAC comparison.
+  - Harden RAR5 REV metadata parsing: safe table reads, tolerate trailing
+    forward-compatible data, and reject truncated tables.
+  - Add minimum-size validation for legacy AV/SIGN blocks even when their
+    header CRC is skipped.
+  - Add defensive PPMd checks around masked-state escape frequencies and
+    `update_model` arithmetic.
+  - Use wrapping ARM filter address arithmetic and add boundary tests.
+- Review pass 3, batch 3: API semantics and CLI contracts.
+  - Resolve `Archive::repair_recovery_to` semantics so RAR2/RAR3 and RAR5
+    return the same kind of repaired data, with tests.
+  - Map CLI failures to useful exit codes instead of flattening everything to
+    1.
+  - Reject non-UTF-8 extraction names before filesystem path conversion, or
+    redesign extraction path handling around `OsStr`.
+  - Tighten output creation against symlink races where the platform supports
+    it.
+  - Detect ambiguous `rars x archive1 archive2` usage instead of treating the
+    final archive path as an output directory.
+- Review pass 3, batch 4: streaming/buffering and structural cleanup.
+  - Reconcile RAR5 streaming thresholds and remove or document the large-member
+    double-decode preflight.
+  - Add real >512 MiB streaming coverage using the external sparse fixture
+    harness, not an in-repo fixture.
+  - Replace string-matched RAR5 streaming filter errors with a typed codec
+    sentinel.
+  - Deduplicate RAR50 crypto-error mapping and CRC32 helpers.
+  - Add byte-content assertions to representative CLI writer round trips and
+    consolidate the repeated `creates_rar*_can_be_tested` helpers.
 - Add adversarial PPMd fixtures as corpus bugs appear.
 - Add real RAR-created RAR5 filter fixtures for E8, E8E9, Delta, and ARM
   reader coverage.
