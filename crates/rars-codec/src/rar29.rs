@@ -653,10 +653,11 @@ fn itanium_encode(data: &mut [u8], file_offset: u32) {
     if data.len() <= 21 {
         return;
     }
-    let mut file_offset = file_offset >> 4;
-    let data_size = ((data.len() as u32 - 21 + 15) >> 4) + file_offset;
-    let mut pos = 0usize;
-    while file_offset != data_size {
+    let base_offset = file_offset >> 4;
+    let block_count = (data.len() - 21).div_ceil(16);
+    for block in 0..block_count {
+        let pos = block * 16;
+        let file_offset = base_offset.wrapping_add(block as u32);
         let mut mask = (0x334b_0000u32 >> (data[pos] & 0x1e)) & 3;
         if mask != 0 {
             mask += 1;
@@ -672,8 +673,6 @@ fn itanium_encode(data: &mut [u8], file_offset: u32) {
                 mask += 1;
             }
         }
-        pos += 16;
-        file_offset += 1;
     }
 }
 
@@ -2155,10 +2154,11 @@ fn itanium_decode(data: &mut [u8], file_offset: u32) {
     if data.len() <= 21 {
         return;
     }
-    let mut file_offset = file_offset >> 4;
-    let data_size = ((data.len() as u32 - 21 + 15) >> 4) + file_offset;
-    let mut pos = 0usize;
-    while file_offset != data_size {
+    let base_offset = file_offset >> 4;
+    let block_count = (data.len() - 21).div_ceil(16);
+    for block in 0..block_count {
+        let pos = block * 16;
+        let file_offset = base_offset.wrapping_add(block as u32);
         let mut mask = (0x334b_0000u32 >> (data[pos] & 0x1e)) & 3;
         if mask != 0 {
             mask += 1;
@@ -2174,8 +2174,6 @@ fn itanium_decode(data: &mut [u8], file_offset: u32) {
                 mask += 1;
             }
         }
-        pos += 16;
-        file_offset += 1;
     }
 }
 
@@ -2308,10 +2306,11 @@ mod tests {
     use std::ops::Range;
 
     use super::{
-        encode_ppmd_tokens, encode_tokens, unpack29_decode, unpack29_encode_literals,
-        unpack29_encode_ppmd, unpack29_encode_ppmd_literals, unpack29_encode_ppmd_with_filter,
-        BitWriter, EncodeToken, Error, Huffman, PpmdEncodeToken, Rar29FilterKind, Rar29FilterSpec,
-        Result, StandardFilter, Unpack29, Unpack29Encoder, VmFilter, VmProgram, VmProgramKind,
+        encode_ppmd_tokens, encode_tokens, itanium_decode, itanium_encode, unpack29_decode,
+        unpack29_encode_literals, unpack29_encode_ppmd, unpack29_encode_ppmd_literals,
+        unpack29_encode_ppmd_with_filter, BitWriter, EncodeToken, Error, Huffman, PpmdEncodeToken,
+        Rar29FilterKind, Rar29FilterSpec, Result, StandardFilter, Unpack29, Unpack29Encoder,
+        VmFilter, VmProgram, VmProgramKind,
     };
 
     const COMPRESSED_TEXT: &[u8] = &[
@@ -2820,6 +2819,22 @@ mod tests {
             decoder.parse_vm_code(0, reused_program.finish()),
             Err(Error::InvalidData("RAR 2.9 VM filter limit exceeded"))
         );
+    }
+
+    #[test]
+    fn itanium_filter_round_trips_with_high_file_offset() {
+        let mut data = vec![0u8; 64];
+        for (index, byte) in data.iter_mut().enumerate() {
+            *byte = index as u8;
+        }
+        data[0] = 0;
+        data[7] = 5 << 3;
+        let original = data.clone();
+
+        itanium_encode(&mut data, u32::MAX);
+        itanium_decode(&mut data, u32::MAX);
+
+        assert_eq!(data, original);
     }
 
     fn expected_text() -> Vec<u8> {

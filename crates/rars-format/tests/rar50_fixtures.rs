@@ -2136,6 +2136,24 @@ fn writes_encrypted_stored_rar50_archive_that_reader_extracts_with_password() {
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].name, b"secret.txt");
     assert_eq!(extracted[0].data, entries[0].data);
+    assert!(matches!(
+        file.verify_crc32(&extracted[0].data),
+        Err(Error::InvalidHeader(
+            "RAR 5 encrypted CRC32 verification needs encryption keys"
+        ))
+    ));
+    assert!(matches!(
+        file.verify_integrity(&extracted[0].data),
+        Err(Error::InvalidHeader(
+            "RAR 5 encrypted CRC32 verification needs encryption keys"
+        ))
+    ));
+    assert!(matches!(
+        file.verify_hash(&extracted[0].data),
+        Err(Error::InvalidHeader(
+            "RAR 5 encrypted hash verification needs encryption keys"
+        ))
+    ));
 }
 
 #[test]

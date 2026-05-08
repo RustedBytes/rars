@@ -433,7 +433,7 @@ impl Vm {
         let mut output_size = self.read_u32(GLOBAL_BASE + 0x1c) as usize & MEMORY_MASK as usize;
         if output_pos
             .checked_add(output_size)
-            .is_none_or(|end| end >= MEMORY_SIZE)
+            .is_none_or(|end| end > MEMORY_SIZE)
         {
             output_pos = 0;
             output_size = 0;
@@ -718,7 +718,7 @@ impl Vm {
 
     fn shift(&mut self, opcode: Opcode, dst: &Operand, count: u32, byte_mode: bool) -> Result<()> {
         if count == 0 {
-            return Err(Error::InvalidData("RARVM shift count is zero"));
+            return Ok(());
         }
         let width = if byte_mode { 8 } else { 32 };
         let count = count.min(width);
@@ -1354,6 +1354,81 @@ mod tests {
 
         assert_eq!(result.regs[0], 0xff);
         assert_eq!(result.regs[1], 0);
+    }
+
+    #[test]
+    fn zero_count_shifts_are_noops() {
+        let result = execute_instructions(vec![
+            instr(
+                Opcode::Mov,
+                false,
+                vec![Operand::Register(0), Operand::Immediate(0x1234_5678)],
+            ),
+            instr(
+                Opcode::Shl,
+                false,
+                vec![Operand::Register(0), Operand::Immediate(0)],
+            ),
+            instr(
+                Opcode::Shr,
+                false,
+                vec![Operand::Register(0), Operand::Immediate(0)],
+            ),
+            instr(
+                Opcode::Sar,
+                false,
+                vec![Operand::Register(0), Operand::Immediate(0)],
+            ),
+            instr(Opcode::Ret, false, Vec::new()),
+        ]);
+
+        assert_eq!(result.regs[0], 0x1234_5678);
+    }
+
+    #[test]
+    fn output_range_accepts_exclusive_memory_end() {
+        let program = Program {
+            static_data: Vec::new(),
+            instructions: vec![
+                instr(
+                    Opcode::Mov,
+                    false,
+                    vec![
+                        Operand::Absolute((GLOBAL_BASE + 0x20) as u32),
+                        Operand::Immediate((MEMORY_SIZE - 1) as u32),
+                    ],
+                ),
+                instr(
+                    Opcode::Mov,
+                    false,
+                    vec![
+                        Operand::Absolute((GLOBAL_BASE + 0x1c) as u32),
+                        Operand::Immediate(1),
+                    ],
+                ),
+                instr(
+                    Opcode::Mov,
+                    true,
+                    vec![
+                        Operand::Absolute((MEMORY_SIZE - 1) as u32),
+                        Operand::Immediate(0x5a),
+                    ],
+                ),
+                instr(Opcode::Ret, false, Vec::new()),
+            ],
+        };
+
+        let result = program
+            .execute(Invocation {
+                input: &[0],
+                regs: [0; 7],
+                global_data: &[],
+                file_offset: 0,
+                exec_count: 0,
+            })
+            .unwrap();
+
+        assert_eq!(result.output, [0x5a]);
     }
 
     #[test]

@@ -2,17 +2,6 @@
 
 ## Active Tasks
 
-- Review pass 2, batch 1:
-  - Guard PPMd range decoding against `total == 0`; add a malformed-stream
-    regression.
-  - Fix RARVM output range validation so an exclusive end at `MEMORY_SIZE` is
-    accepted; add a boundary regression.
-  - Verify RARVM zero-count shifts against the spec and fix the VM if they are
-    no-ops; add a regression either way.
-  - Bound Itanium filter loops by data position as well as encoded file offset;
-    add a termination regression.
-  - Make RAR5 `FileHeader::verify_crc32` reject encrypted entries without MAC
-    keys, or route encrypted integrity checks through the keyed verifier.
 - Review pass 2, batch 2:
   - Protect CLI extraction from pre-existing symlinks inside the output
     directory.

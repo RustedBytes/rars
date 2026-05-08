@@ -313,6 +313,11 @@ impl FileHeader {
         let Some(expected) = self.data_crc32 else {
             return Ok(());
         };
+        if self.uses_hash_mac() {
+            return Err(Error::InvalidHeader(
+                "RAR 5 encrypted CRC32 verification needs encryption keys",
+            ));
+        }
         let actual = crc32(data);
         if actual == expected {
             Ok(())
@@ -325,6 +330,11 @@ impl FileHeader {
         let Some(hash) = &self.hash else {
             return Ok(());
         };
+        if self.uses_hash_mac() {
+            return Err(Error::InvalidHeader(
+                "RAR 5 encrypted hash verification needs encryption keys",
+            ));
+        }
         match hash.hash_type {
             0 if hash.data.len() == 32 => {
                 let actual = blake2sp::hash(data);
@@ -347,6 +357,12 @@ impl FileHeader {
     pub fn verify_integrity(&self, data: &[u8]) -> Result<()> {
         self.verify_crc32(data)?;
         self.verify_hash(data)
+    }
+
+    fn uses_hash_mac(&self) -> bool {
+        self.encryption
+            .as_ref()
+            .is_some_and(|encryption| encryption.flags & 0x0002 != 0)
     }
 
     pub fn recovery_record(&self) -> Result<Option<RecoveryRecord>> {

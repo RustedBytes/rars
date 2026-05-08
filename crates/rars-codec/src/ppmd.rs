@@ -184,7 +184,7 @@ impl PpmdDecoder {
             if summ_freq > self.range.range {
                 return Err(Error::InvalidData("RAR PPMd range is invalid"));
             }
-            let mut count = self.range.get_threshold(summ_freq);
+            let mut count = self.range.get_threshold(summ_freq)?;
             let mut hi_cnt = 0u32;
             let mut found = None;
             for (index, state) in self.contexts[min].states.iter().enumerate() {
@@ -270,7 +270,7 @@ impl PpmdDecoder {
             if freq_sum > self.range.range {
                 return Err(Error::InvalidData("RAR PPMd escape range is invalid"));
             }
-            let mut count = self.range.get_threshold(freq_sum);
+            let mut count = self.range.get_threshold(freq_sum)?;
             if count < hi_cnt {
                 let mut start = 0u32;
                 for (index, state) in self.contexts[mc].states.iter().enumerate() {
@@ -939,9 +939,12 @@ impl RangeDecoder {
         Ok(())
     }
 
-    fn get_threshold(&mut self, total: u32) -> u32 {
+    fn get_threshold(&mut self, total: u32) -> Result<u32> {
+        if total == 0 {
+            return Err(Error::InvalidData("RAR PPMd frequency sum is zero"));
+        }
         self.range /= total;
-        self.code.wrapping_sub(self.low) / self.range
+        Ok(self.code.wrapping_sub(self.low) / self.range)
     }
 
     fn decode(&mut self, start: u32, size: u32) {
@@ -1106,5 +1109,19 @@ mod tests {
             PpmdEncoder::new(65, 2),
             Err(Error::InvalidData("RAR PPMd order is invalid"))
         ));
+    }
+
+    #[test]
+    fn range_decoder_rejects_zero_total_without_panic() {
+        let mut decoder = RangeDecoder::new();
+        let mut input = Bytes {
+            input: &[0, 0, 0, 0],
+        };
+        decoder.init(&mut input).unwrap();
+
+        assert_eq!(
+            decoder.get_threshold(0),
+            Err(Error::InvalidData("RAR PPMd frequency sum is zero"))
+        );
     }
 }

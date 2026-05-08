@@ -156,12 +156,6 @@ impl FileHeader {
         Ok(())
     }
 
-    fn uses_hash_mac(&self) -> bool {
-        self.encryption
-            .as_ref()
-            .is_some_and(|encryption| encryption.flags & 0x0002 != 0)
-    }
-
     pub fn metadata(&self) -> ExtractedEntryMeta {
         ExtractedEntryMeta {
             name: self.name.clone(),
