@@ -831,7 +831,8 @@ fn creates_rar20_compressed_archive_that_can_be_tested() {
     let dir = scratch("create-rar20-compressed");
     let source = dir.join("hello.txt");
     let archive = dir.join("created20.rar");
-    fs::write(&source, b"hello from rar20 cli hello from rar20 cli\n").unwrap();
+    let payload = b"hello from rar20 cli hello from rar20 cli\n".repeat(32);
+    fs::write(&source, &payload).unwrap();
 
     let create = rars()
         .args(["a", "--format", "rar20"])
@@ -847,12 +848,7 @@ fn creates_rar20_compressed_archive_that_can_be_tested() {
     assert!(info_stdout.contains("method=0x33"));
     assert!(info_stdout.contains("ver=20"));
 
-    assert_archive_tests_and_extracts_file(
-        &archive,
-        None,
-        "hello.txt",
-        b"hello from rar20 cli hello from rar20 cli\n",
-    );
+    assert_archive_tests_and_extracts_file(&archive, None, "hello.txt", &payload);
 }
 
 #[test]

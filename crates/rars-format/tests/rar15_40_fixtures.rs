@@ -1819,7 +1819,10 @@ fn writes_literal_compressed_rar20_archive_that_reader_extracts() {
 
     assert_eq!(files.len(), 4);
     assert!(files.iter().all(|file| file.unp_ver == 20));
-    assert!(files.iter().all(|file| file.method == 0x33));
+    assert_eq!(files[0].method, 0x30);
+    assert_eq!(files[1].method, 0x30);
+    assert_eq!(files[2].method, 0x33);
+    assert_eq!(files[3].method, 0x33);
     assert_eq!(files[0].file_crc, crc32(entries[0].data));
     assert_eq!(files[1].file_crc, crc32(entries[1].data));
     assert_eq!(files[2].file_crc, crc32(entries[2].data));
