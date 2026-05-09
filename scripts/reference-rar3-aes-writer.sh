@@ -14,7 +14,6 @@ require_command() {
 require_command cargo
 require_command python3
 require_command wine
-require_command winepath
 
 if [[ -z "${RARS_WINRAR420_PREFIX:-}" ]]; then
   cat >&2 <<'EOF'
@@ -28,8 +27,18 @@ EOF
 fi
 
 winrar420_prefix="$RARS_WINRAR420_PREFIX"
+rar420="${RARS_RAR420:-$winrar420_prefix/drive_c/Program Files (x86)/WinRAR/Rar.exe}"
 unrar420="${RARS_UNRAR420:-$winrar420_prefix/drive_c/Program Files (x86)/WinRAR/UnRAR.exe}"
 
+if [[ ! -f "$rar420" ]]; then
+  cat >&2 <<EOF
+missing reference tool: $rar420
+
+Set RARS_RAR420 to the RAR 4.20 executable if it is not in the
+standard Wine install path.
+EOF
+    exit 1
+fi
 if [[ ! -f "$unrar420" ]]; then
   cat >&2 <<EOF
 missing reference tool: $unrar420
@@ -48,7 +57,9 @@ filtered_payload="$tmpdir/filtered-payload.bin"
 volume_payload="$tmpdir/volume-payload.bin"
 solid_one="$tmpdir/solid-one.txt"
 solid_two="$tmpdir/solid-two.txt"
+long_password_payload="$tmpdir/long-password-payload.txt"
 printf 'RAR3 AES generated writer reference payload\n%.0s' {1..10} >"$payload"
+printf 'RAR3 AES long password reference payload\n%.0s' {1..4} >"$long_password_payload"
 python3 - "$filtered_payload" <<'PY'
 from pathlib import Path
 import sys
@@ -95,8 +106,13 @@ run_rars_add --password pass --format rar40 --solid --encrypt-headers \
 run_unrar() {
   local archive=$1
   local wine_archive
-  wine_archive="$(env WINEPREFIX="$winrar420_prefix" winepath -w "$archive")"
+  wine_archive="$(wine_z_path "$archive")"
   env WINEPREFIX="$winrar420_prefix" wine "$unrar420" t -ppass "$wine_archive"
+}
+
+wine_z_path() {
+  local path=$1
+  printf 'Z:%s' "${path//\//\\}"
 }
 
 for archive in \
@@ -117,5 +133,38 @@ do
   run_unrar "$archive"
 done
 
+long_password='this-password-is-deliberately-long-enough-to-exceed-64-bytes-utf16'
+
+run_winrar_add() {
+  local mode=$1
+  local archive=$2
+  local input=$3
+  local wine_archive wine_input
+  wine_archive="$(wine_z_path "$archive")"
+  wine_input="$(wine_z_path "$input")"
+  case "$mode" in
+    file)
+      env WINEPREFIX="$winrar420_prefix" wine "$rar420" a -ep -m0 "-p$long_password" "$wine_archive" "$wine_input"
+      ;;
+    header)
+      env WINEPREFIX="$winrar420_prefix" wine "$rar420" a -ep -m0 "-hp$long_password" "$wine_archive" "$wine_input"
+      ;;
+    *)
+      echo "unknown WinRAR add mode: $mode" >&2
+      exit 1
+      ;;
+  esac
+}
+
+run_rars_test() {
+  cargo run -p rars-cli --quiet -- test --password "$long_password" "$1"
+}
+
+run_winrar_add file "$tmpdir/winrar420-long-password-file.rar" "$long_password_payload"
+run_winrar_add header "$tmpdir/winrar420-long-password-header.rar" "$long_password_payload"
+run_rars_test "$tmpdir/winrar420-long-password-file.rar"
+run_rars_test "$tmpdir/winrar420-long-password-header.rar"
+
 echo
 echo "RAR3/RAR4 AES generated writer reference checks passed."
+echo "RAR3/RAR4 AES long-password reader reference checks passed."

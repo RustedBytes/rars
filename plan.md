@@ -6,11 +6,7 @@
   range extends past the recovery block. Add an oracle fixture if possible;
   either repair those overlap sectors correctly or document the unsupported
   layout explicitly.
-- Pin an exact RAR3 AES KDF vector for long password material that forces the
-  custom SHA-1 block path, not just round-trip encryption/decryption.
 - Add adversarial PPMd fixtures as corpus bugs appear.
-- Harden PPMd hostile-state arithmetic paths (`make_esc_freq`,
-  `update_model`) with focused malformed-stream regression tests.
 - Add fuzz targets for `Archive::parse`, `Unpack29::decode_member`, PPMd decode,
   and RARVM program parsing/execution.
 

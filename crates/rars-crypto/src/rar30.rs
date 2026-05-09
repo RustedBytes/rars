@@ -77,9 +77,9 @@ fn derive_key_iv(password: &[u8], salt: Option<[u8; 8]>) -> Result<([u8; 16], [u
         raw.extend_from_slice(&salt);
     }
 
-    // RAR 3.x hashes byte-reversed full SHA-1 blocks. The stock SHA-1 fast
-    // path is equivalent only while the password+salt material never fills a
-    // 64-byte block, so keep this threshold strict.
+    // RAR 3.x mutates password/salt bytes only when the repeated KDF input
+    // crosses complete SHA-1 blocks. The stock SHA-1 path is equivalent while
+    // the password+salt material never fills a 64-byte block.
     if raw.len() < 64 {
         return Ok(derive_key_iv_fast(&raw));
     }
@@ -88,27 +88,57 @@ fn derive_key_iv(password: &[u8], salt: Option<[u8; 8]>) -> Result<([u8; 16], [u
 }
 
 fn derive_key_iv_slow(raw: &mut [u8]) -> ([u8; 16], [u8; 16]) {
-    let mut sha1 = Sha1::new();
+    let raw_size = raw.len();
+    let mut raw = raw.to_vec();
+    raw.resize(raw_size + 64, 0);
+    let mut sha1 = FastSha1::new();
     let mut iv = [0; 16];
+    let mut pos = 0u32;
     for i in 0..HASH_ROUNDS {
-        sha1.update_rar29(raw);
-        sha1.update(&[
+        sha1.update(&raw[..raw_size]);
+        let end_pos = (pos + raw_size as u32) & !(64 - 1);
+        if end_pos > pos + 64 {
+            let mut cur_pos = (pos & !(64 - 1)) + 64;
+            while cur_pos != end_pos {
+                let offset = (cur_pos - pos) as usize;
+                update_password_data_sha1(&mut raw[offset..offset + 64]);
+                cur_pos += 64;
+            }
+        }
+        pos = pos.wrapping_add(raw_size as u32);
+
+        sha1.update([
             (i & 0xff) as u8,
             ((i >> 8) & 0xff) as u8,
             ((i >> 16) & 0xff) as u8,
         ]);
+        pos = pos.wrapping_add(3);
         if i % (HASH_ROUNDS / 16) == 0 {
-            let digest = sha1.clone().finish_words();
-            iv[(i / (HASH_ROUNDS / 16)) as usize] = digest[4] as u8;
+            let digest = sha1.clone().finalize();
+            iv[(i / (HASH_ROUNDS / 16)) as usize] = digest[19];
         }
     }
 
-    let digest = sha1.finish_words();
+    let digest = sha1.finalize();
     let mut key = [0; 16];
-    for (i, word) in digest[..4].iter().enumerate() {
-        key[i * 4..i * 4 + 4].copy_from_slice(&word.to_le_bytes());
+    for (word_index, chunk) in digest[..16].chunks_exact(4).enumerate() {
+        key[word_index * 4..word_index * 4 + 4]
+            .copy_from_slice(&[chunk[3], chunk[2], chunk[1], chunk[0]]);
     }
     (key, iv)
+}
+
+fn update_password_data_sha1(data: &mut [u8]) {
+    let mut w = [0u32; 80];
+    for (i, chunk) in data.chunks_exact(4).take(16).enumerate() {
+        w[i] = u32::from_be_bytes(chunk.try_into().expect("SHA-1 word size"));
+    }
+    for i in 16..80 {
+        w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
+    }
+    for (i, word) in w[64..80].iter().enumerate() {
+        data[i * 4..i * 4 + 4].copy_from_slice(&word.to_le_bytes());
+    }
 }
 
 fn derive_key_iv_fast(raw: &[u8]) -> ([u8; 16], [u8; 16]) {
@@ -134,143 +164,6 @@ fn derive_key_iv_fast(raw: &[u8]) -> ([u8; 16], [u8; 16]) {
             .copy_from_slice(&[chunk[3], chunk[2], chunk[1], chunk[0]]);
     }
     (key, iv)
-}
-
-#[derive(Clone)]
-struct Sha1 {
-    state: [u32; 5],
-    len: u64,
-    buffer: [u8; 64],
-    buffer_len: usize,
-}
-
-impl Sha1 {
-    fn new() -> Self {
-        Self {
-            state: [
-                0x6745_2301,
-                0xefcd_ab89,
-                0x98ba_dcfe,
-                0x1032_5476,
-                0xc3d2_e1f0,
-            ],
-            len: 0,
-            buffer: [0; 64],
-            buffer_len: 0,
-        }
-    }
-
-    fn update(&mut self, data: &[u8]) {
-        let mut data = data;
-        self.len += data.len() as u64;
-
-        if self.buffer_len != 0 {
-            let take = (64 - self.buffer_len).min(data.len());
-            self.buffer[self.buffer_len..self.buffer_len + take].copy_from_slice(&data[..take]);
-            self.buffer_len += take;
-            data = &data[take..];
-            if self.buffer_len == 64 {
-                sha1_transform(&mut self.state, &self.buffer, None);
-                self.buffer_len = 0;
-            }
-        }
-
-        while data.len() >= 64 {
-            sha1_transform(&mut self.state, &data[..64], None);
-            data = &data[64..];
-        }
-
-        if !data.is_empty() {
-            self.buffer[..data.len()].copy_from_slice(data);
-            self.buffer_len = data.len();
-        }
-    }
-
-    fn update_rar29(&mut self, data: &mut [u8]) {
-        self.len += data.len() as u64;
-        let mut offset = 0;
-
-        if self.buffer_len != 0 {
-            let take = (64 - self.buffer_len).min(data.len());
-            self.buffer[self.buffer_len..self.buffer_len + take].copy_from_slice(&data[..take]);
-            self.buffer_len += take;
-            offset += take;
-            if self.buffer_len == 64 {
-                sha1_transform(&mut self.state, &self.buffer, None);
-                self.buffer_len = 0;
-            }
-        }
-
-        while offset + 64 <= data.len() {
-            let block = &mut data[offset..offset + 64];
-            let mut input = [0; 64];
-            input.copy_from_slice(block);
-            sha1_transform(&mut self.state, &input, Some(block));
-            offset += 64;
-        }
-
-        let remaining = data.len() - offset;
-        if remaining != 0 {
-            self.buffer[..remaining].copy_from_slice(&data[offset..]);
-            self.buffer_len = remaining;
-        }
-    }
-
-    fn finish_words(mut self) -> [u32; 5] {
-        let bit_len = self.len * 8;
-        self.update(&[0x80]);
-        if self.buffer_len > 56 {
-            self.buffer[self.buffer_len..].fill(0);
-            sha1_transform(&mut self.state, &self.buffer, None);
-            self.buffer_len = 0;
-        }
-        self.buffer[self.buffer_len..56].fill(0);
-        self.buffer[56..64].copy_from_slice(&bit_len.to_be_bytes());
-        sha1_transform(&mut self.state, &self.buffer, None);
-        self.state
-    }
-}
-
-fn sha1_transform(state: &mut [u32; 5], block: &[u8], writeback: Option<&mut [u8]>) {
-    let mut w = [0u32; 80];
-    for (i, chunk) in block.chunks_exact(4).take(16).enumerate() {
-        w[i] = u32::from_be_bytes(chunk.try_into().expect("SHA-1 word size"));
-    }
-    if let Some(writeback) = writeback {
-        for (i, word) in w[..16].iter().enumerate() {
-            writeback[i * 4..i * 4 + 4].copy_from_slice(&word.to_le_bytes());
-        }
-    }
-    for i in 16..80 {
-        w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
-    }
-
-    let [mut a, mut b, mut c, mut d, mut e] = *state;
-    for (i, word) in w.iter().enumerate() {
-        let (f, k) = match i {
-            0..=19 => ((b & c) | ((!b) & d), 0x5a82_7999),
-            20..=39 => (b ^ c ^ d, 0x6ed9_eba1),
-            40..=59 => ((b & c) | (b & d) | (c & d), 0x8f1b_bcdc),
-            _ => (b ^ c ^ d, 0xca62_c1d6),
-        };
-        let temp = a
-            .rotate_left(5)
-            .wrapping_add(f)
-            .wrapping_add(e)
-            .wrapping_add(k)
-            .wrapping_add(*word);
-        e = d;
-        d = c;
-        c = b.rotate_left(30);
-        b = a;
-        a = temp;
-    }
-
-    state[0] = state[0].wrapping_add(a);
-    state[1] = state[1].wrapping_add(b);
-    state[2] = state[2].wrapping_add(c);
-    state[3] = state[3].wrapping_add(d);
-    state[4] = state[4].wrapping_add(e);
 }
 
 #[cfg(test)]
@@ -318,7 +211,7 @@ mod tests {
     #[test]
     fn rar30_aes_round_trips_with_long_password_slow_path() {
         // Password long enough that utf-16(password) + 8-byte salt >= 64,
-        // forcing derive_key_iv to use the custom Sha1 with update_rar29
+        // forcing derive_key_iv to use the RAR3 password-buffer mutation path
         // instead of derive_key_iv_fast.
         let password = b"this-password-is-deliberately-long-enough-to-exceed-64-bytes-utf16";
         let salt = Some(*b"longsalt");
@@ -332,9 +225,9 @@ mod tests {
         assert_eq!(
             data,
             [
-                0x2a, 0x5f, 0x79, 0x11, 0x7e, 0x71, 0xe9, 0x62, 0xe6, 0x38, 0xe1, 0xdc, 0x11, 0xd2,
-                0x78, 0x8f, 0x98, 0x15, 0x96, 0x08, 0x62, 0x7a, 0x1e, 0xf4, 0xa3, 0x99, 0x9c, 0xba,
-                0x78, 0x45, 0xc2, 0xfd,
+                0xb9, 0xa7, 0xac, 0x4b, 0x81, 0x0a, 0x5c, 0xf1, 0x6e, 0xd4, 0x5a, 0x4c, 0xbc, 0x1e,
+                0x2e, 0xef, 0x53, 0x7b, 0x89, 0x63, 0x7a, 0xc5, 0x7a, 0x1e, 0xfc, 0x43, 0x3c, 0x18,
+                0xea, 0xfd, 0x54, 0xed,
             ]
         );
 
