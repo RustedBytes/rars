@@ -11,6 +11,14 @@
 
 ## Hardening
 
+- Verify RAR 2.x `PROTECT_HEAD` parity semantics when the declared protected
+  range extends past the recovery block. Add an oracle fixture if possible;
+  either repair those overlap sectors correctly or document the unsupported
+  layout explicitly.
+- Simplify RAR5 file-backed header parsing so plaintext and encrypted header
+  paths do not duplicate the same CRC32 validation before `parse_block_header_image`.
+- Pin an exact RAR3 AES KDF vector for long password material that forces the
+  custom SHA-1 block path, not just round-trip encryption/decryption.
 - Add adversarial PPMd fixtures as corpus bugs appear.
 - Harden PPMd hostile-state arithmetic paths (`make_esc_freq`,
   `update_model`) with focused malformed-stream regression tests.
@@ -33,9 +41,15 @@
 - Improve RAR29/RAR30/RAR40 max-level policy after `--level` is wired:
   filter-block boundary tuning, match-finder quality, lazy parsing, and PPMd
   tuning against WinRAR 2.90/3.x/4.x oracles.
+- Improve RAR50/RAR70 level policy beyond wire-level method stamping:
+  match-finder effort, incompressible-member store fallback, and filter
+  selection should be tuned against WinRAR 6.x/7.x oracles.
 - Add RAR7-specific writer policy once fixtures/oracles identify useful
   version-7-only behaviour. RAR70 currently uses the RAR5 writer shape and
   emits byte-identical archives for the benchmark corpus.
+- Add an explicit dictionary-size writer option and CLI knob once oracle data
+  shows which legacy targets should default above the current per-target
+  mapping.
 - Refine non-zero `--level` mappings for RAR13/RAR15/RAR20 after the bench
   harness reports which policy differences matter.
 - Add real RAR-created RAR5 filter fixtures for E8, E8E9, Delta, and ARM

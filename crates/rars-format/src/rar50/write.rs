@@ -377,6 +377,7 @@ impl<'a> Rar50Writer<'a> {
             });
         }
         let algorithm_version = rar50_algorithm_version(self.options.target)?;
+        let compression_method = compression_method_for_level(self.options.compression_level)?;
         let encode_options = encode_options_for_level(self.options.compression_level)?;
 
         let mut resolved_members = Vec::with_capacity(self.members.len());
@@ -481,6 +482,10 @@ impl<'a> Rar50Writer<'a> {
                         unreachable!("mixed member kinds are rejected above")
                     };
                     validate_compressed_entry(&entry)?;
+                    if compression_method == 0 {
+                        resolved_members.push(ResolvedRar50WriteMember::StoredCompressed(entry));
+                        continue;
+                    }
                     let packed = if let Some(encoder) = solid_encoder.as_mut() {
                         encoder
                             .encode_member(entry.data, algorithm_version)
@@ -505,6 +510,7 @@ impl<'a> Rar50Writer<'a> {
                             entry,
                             packed,
                             algorithm_version,
+                            compression_method,
                             solid_continuation: self.options.features.solid && index != 0,
                         });
                     }
@@ -660,6 +666,16 @@ impl<'a> Rar50Writer<'a> {
                         unreachable!("mixed member kinds are rejected above")
                     };
                     validate_encrypted_compressed_entry(&entry)?;
+                    if compression_method == 0 {
+                        let encrypted = encrypted_stored_payload(entry.data, entry.password)?;
+                        resolved_members.push(
+                            ResolvedRar50WriteMember::EncryptedStoredCompressed {
+                                entry,
+                                encrypted,
+                            },
+                        );
+                        continue;
+                    }
                     let packed = if let Some(encoder) = solid_encoder.as_mut() {
                         encoder
                             .encode_member(entry.data, algorithm_version)
@@ -687,6 +703,7 @@ impl<'a> Rar50Writer<'a> {
                             entry,
                             encrypted,
                             algorithm_version,
+                            compression_method,
                             solid_continuation: self.options.features.solid && index != 0,
                         });
                     }
@@ -764,6 +781,7 @@ enum ResolvedRar50WriteMember<'a> {
         entry: CompressedEntry<'a>,
         packed: Vec<u8>,
         algorithm_version: u8,
+        compression_method: u8,
         solid_continuation: bool,
     },
     EncryptedStored {
@@ -782,6 +800,7 @@ enum ResolvedRar50WriteMember<'a> {
         entry: EncryptedCompressedEntry<'a>,
         encrypted: EncryptedStoredPayload,
         algorithm_version: u8,
+        compression_method: u8,
         solid_continuation: bool,
     },
 }
@@ -893,12 +912,14 @@ fn emit_resolved_writer_plan_pass(
                 entry,
                 packed,
                 algorithm_version,
+                compression_method,
                 solid_continuation,
             } => write_compressed_entry_payload(
                 &mut out,
                 entry,
                 packed,
                 *algorithm_version,
+                *compression_method,
                 *solid_continuation,
             )?,
             ResolvedRar50WriteMember::EncryptedStored { entry, encrypted } => {
@@ -946,6 +967,7 @@ fn emit_resolved_writer_plan_pass(
                 entry,
                 encrypted,
                 algorithm_version,
+                compression_method,
                 solid_continuation,
             } => write_encrypted_compressed_entry_fragment_with_header_keys(
                 &mut out,
@@ -954,6 +976,7 @@ fn emit_resolved_writer_plan_pass(
                     data: &encrypted.data,
                     encrypted,
                     algorithm_version: *algorithm_version,
+                    compression_method: *compression_method,
                     solid_continuation: *solid_continuation,
                     split_before: false,
                     split_after: false,
@@ -1104,11 +1127,8 @@ fn write_compressed_volume_set_impl(
         ));
     }
 
-    let algorithm_version = match options.target {
-        crate::ArchiveVersion::Rar50 => 0,
-        crate::ArchiveVersion::Rar70 => 1,
-        _ => return Err(Error::UnsupportedVersion(options.target)),
-    };
+    let algorithm_version = rar50_algorithm_version(options.target)?;
+    let compression_method = compression_method_for_level(options.compression_level)?;
     let encode_options = encode_options_for_level(options.compression_level)?;
 
     let mut encoder = options
@@ -1118,6 +1138,10 @@ fn write_compressed_volume_set_impl(
     let mut members = Vec::with_capacity(entries.len());
     for (index, entry) in entries.iter().enumerate() {
         validate_compressed_entry(entry)?;
+        if compression_method == 0 {
+            members.push(CompressedVolumeMember::Stored { entry_index: index });
+            continue;
+        }
         let packed = if let Some(encoder) = encoder.as_mut() {
             encoder
                 .encode_member(entry.data, algorithm_version)
@@ -1137,6 +1161,7 @@ fn write_compressed_volume_set_impl(
             members.push(CompressedVolumeMember::Compressed {
                 entry_index: index,
                 packed,
+                compression_method,
                 solid_continuation: options.features.solid && index != 0,
             });
         }
@@ -1170,6 +1195,7 @@ fn write_compressed_volume_set_impl(
             CompressedVolumeMember::Compressed {
                 entry_index,
                 packed,
+                compression_method,
                 solid_continuation,
             } => {
                 writer.write_member(
@@ -1177,12 +1203,15 @@ fn write_compressed_volume_set_impl(
                     |out, start, end, split_before, split_after| {
                         write_compressed_entry_fragment(
                             out,
-                            &entries[*entry_index],
-                            &packed[start..end],
-                            algorithm_version,
-                            *solid_continuation,
-                            split_before,
-                            split_after,
+                            CompressedFragment {
+                                entry: &entries[*entry_index],
+                                data: &packed[start..end],
+                                algorithm_version,
+                                compression_method: *compression_method,
+                                solid_continuation: *solid_continuation,
+                                split_before,
+                                split_after,
+                            },
                         )
                     },
                 )?;
@@ -1296,11 +1325,8 @@ fn write_encrypted_compressed_volume_set_impl(
         ));
     }
 
-    let algorithm_version = match options.target {
-        crate::ArchiveVersion::Rar50 => 0,
-        crate::ArchiveVersion::Rar70 => 1,
-        _ => return Err(Error::UnsupportedVersion(options.target)),
-    };
+    let algorithm_version = rar50_algorithm_version(options.target)?;
+    let compression_method = compression_method_for_level(options.compression_level)?;
     let encode_options = encode_options_for_level(options.compression_level)?;
 
     let mut solid_encoder = options
@@ -1310,6 +1336,14 @@ fn write_encrypted_compressed_volume_set_impl(
     let mut members = Vec::with_capacity(entries.len());
     for (index, entry) in entries.iter().enumerate() {
         validate_encrypted_compressed_entry(entry)?;
+        if compression_method == 0 {
+            let encrypted = encrypted_stored_payload(entry.data, entry.password)?;
+            members.push(EncryptedCompressedVolumeMember::Stored {
+                entry_index: index,
+                encrypted,
+            });
+            continue;
+        }
         let packed = if let Some(encoder) = solid_encoder.as_mut() {
             encoder
                 .encode_member(entry.data, algorithm_version)
@@ -1334,6 +1368,7 @@ fn write_encrypted_compressed_volume_set_impl(
             members.push(EncryptedCompressedVolumeMember::Compressed {
                 entry_index: index,
                 encrypted,
+                compression_method,
                 solid_continuation: options.features.solid && index != 0,
             });
         }
@@ -1377,6 +1412,7 @@ fn write_encrypted_compressed_volume_set_impl(
             EncryptedCompressedVolumeMember::Compressed {
                 entry_index,
                 encrypted,
+                compression_method,
                 solid_continuation,
             } => {
                 writer.write_member(
@@ -1389,6 +1425,7 @@ fn write_encrypted_compressed_volume_set_impl(
                                 data: &encrypted.data[start..end],
                                 encrypted,
                                 algorithm_version,
+                                compression_method: *compression_method,
                                 solid_continuation: *solid_continuation,
                                 split_before,
                                 split_after,
@@ -1500,15 +1537,32 @@ fn encode_options_for_level(level: Option<u8>) -> Result<EncodeOptions> {
 }
 
 fn validate_compression_level(options: WriterOptions) -> Result<()> {
+    compression_method_for_level(options.compression_level)?;
     encode_options_for_level(options.compression_level).map(|_| ())
 }
 
 fn rar50_algorithm_version(target: crate::ArchiveVersion) -> Result<u8> {
     match target {
         crate::ArchiveVersion::Rar50 => Ok(0),
-        crate::ArchiveVersion::Rar70 => Ok(1),
+        crate::ArchiveVersion::Rar70 => Ok(0),
         _ => Err(Error::UnsupportedVersion(target)),
     }
+}
+
+fn compression_method_for_level(level: Option<u8>) -> Result<u8> {
+    match level {
+        None => Ok(1),
+        Some(level @ 0..=5) => Ok(level),
+        Some(_) => Err(Error::InvalidHeader(
+            "RAR 5 compression level must be in the range 0..5",
+        )),
+    }
+}
+
+fn compression_info(algorithm_version: u8, method: u8, solid_continuation: bool) -> u64 {
+    u64::from(algorithm_version)
+        | (u64::from(method) << 7)
+        | solid_compression_flag(solid_continuation)
 }
 
 fn encode_member_with_auto_size_filter(
@@ -1589,6 +1643,7 @@ enum CompressedVolumeMember {
     Compressed {
         entry_index: usize,
         packed: Vec<u8>,
+        compression_method: u8,
         solid_continuation: bool,
     },
 }
@@ -1601,6 +1656,7 @@ enum EncryptedCompressedVolumeMember {
     Compressed {
         entry_index: usize,
         encrypted: EncryptedStoredPayload,
+        compression_method: u8,
         solid_continuation: bool,
     },
 }
@@ -2128,12 +2184,13 @@ fn write_compressed_entry_payload(
     entry: &CompressedEntry<'_>,
     packed: &[u8],
     algorithm_version: u8,
+    compression_method: u8,
     solid_continuation: bool,
 ) -> Result<()> {
     let mut extra = Vec::new();
     write_hash_record(&mut extra, entry.data);
     let compression_info =
-        u64::from(algorithm_version) | (1 << 7) | solid_compression_flag(solid_continuation);
+        compression_info(algorithm_version, compression_method, solid_continuation);
     let specific = file_specific(
         entry.name,
         entry.data.len() as u64,
@@ -2154,21 +2211,36 @@ fn write_compressed_entry_payload(
     )
 }
 
-fn write_compressed_entry_fragment(
-    out: &mut Vec<u8>,
-    entry: &CompressedEntry<'_>,
-    data: &[u8],
+struct CompressedFragment<'a, 'b> {
+    entry: &'a CompressedEntry<'b>,
+    data: &'a [u8],
     algorithm_version: u8,
+    compression_method: u8,
     solid_continuation: bool,
     split_before: bool,
     split_after: bool,
+}
+
+fn write_compressed_entry_fragment(
+    out: &mut Vec<u8>,
+    fragment: CompressedFragment<'_, '_>,
 ) -> Result<()> {
+    let CompressedFragment {
+        entry,
+        data,
+        algorithm_version,
+        compression_method,
+        solid_continuation,
+        split_before,
+        split_after,
+    } = fragment;
+
     let mut extra = Vec::new();
     if !split_after {
         write_hash_record(&mut extra, entry.data);
     }
     let compression_info =
-        u64::from(algorithm_version) | (1 << 7) | solid_compression_flag(solid_continuation);
+        compression_info(algorithm_version, compression_method, solid_continuation);
     let specific = file_specific(
         entry.name,
         entry.data.len() as u64,
@@ -2374,6 +2446,7 @@ struct EncryptedCompressedFragment<'a, 'b> {
     data: &'a [u8],
     encrypted: &'a EncryptedStoredPayload,
     algorithm_version: u8,
+    compression_method: u8,
     solid_continuation: bool,
     split_before: bool,
     split_after: bool,
@@ -2389,6 +2462,7 @@ fn write_encrypted_compressed_entry_fragment_with_header_keys(
         data,
         encrypted,
         algorithm_version,
+        compression_method,
         solid_continuation,
         split_before,
         split_after,
@@ -2406,7 +2480,7 @@ fn write_encrypted_compressed_entry_fragment_with_header_keys(
     }
 
     let compression_info =
-        u64::from(algorithm_version) | (1 << 7) | solid_compression_flag(solid_continuation);
+        compression_info(algorithm_version, compression_method, solid_continuation);
     let specific = file_specific(
         entry.name,
         entry.data.len() as u64,

@@ -1026,7 +1026,8 @@ fn accepts_rar50_compression_level() {
     let dir = scratch("accept-rar50-level");
     let source = dir.join("source.txt");
     let archive = dir.join("level.rar");
-    fs::write(&source, b"rar50 level accepted by cli\n").unwrap();
+    let payload = b"rar50 level accepted by cli\n".repeat(64);
+    fs::write(&source, &payload).unwrap();
 
     let create = rars()
         .args(["a", "--format", "rar50", "--level", "5"])
@@ -1036,12 +1037,10 @@ fn accepts_rar50_compression_level() {
         .unwrap();
 
     assert!(create.status.success(), "stderr: {}", stderr(&create));
-    assert_archive_tests_and_extracts_file(
-        &archive,
-        None,
-        "source.txt",
-        b"rar50 level accepted by cli\n",
-    );
+    let info = rars().arg("info").arg(&archive).output().unwrap();
+    assert!(info.status.success(), "stderr: {}", stderr(&info));
+    assert!(stdout(&info).contains("method=5"));
+    assert_archive_tests_and_extracts_file(&archive, None, "source.txt", &payload);
 }
 
 #[test]

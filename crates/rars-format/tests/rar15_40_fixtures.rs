@@ -2512,7 +2512,7 @@ fn rar29_family_writer_levels_increase_lz_match_effort() {
         let level_one_file = level_one_archive.files().next().unwrap();
         let level_three_file = level_three_archive.files().next().unwrap();
 
-        assert_eq!(level_one_file.method, 0x33, "{target:?} level 1");
+        assert_eq!(level_one_file.method, 0x31, "{target:?} level 1");
         assert_eq!(level_three_file.method, 0x33, "{target:?} level 3");
         assert!(
             level_three_file.pack_size < level_one_file.pack_size,
@@ -2527,6 +2527,131 @@ fn rar29_family_writer_levels_increase_lz_match_effort() {
             payload
         );
     }
+}
+
+#[test]
+fn rar29_family_writer_stamps_oracle_dict_bits_by_target() {
+    let entries = [StoredEntry {
+        name: b"stored-dict.txt",
+        data: b"stored dict stamp payload\n",
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+
+    for (target, expected_dict_flags) in [
+        (ArchiveVersion::Rar29, 0x0080),
+        (ArchiveVersion::Rar30, 0x0020),
+        (ArchiveVersion::Rar40, 0x0020),
+    ] {
+        let bytes = write_stored_archive(
+            &entries,
+            WriterOptions::new(target, FeatureSet::store_only()).with_compression_level(0),
+        )
+        .unwrap();
+        let archive = Archive::parse(&bytes).unwrap();
+        let file = archive.files().next().unwrap();
+
+        assert_eq!(file.method, 0x30, "{target:?}");
+        assert_eq!(file.block.flags & 0x00e0, expected_dict_flags, "{target:?}");
+        assert_eq!(collect_extract(&archive).unwrap()[0].data, entries[0].data);
+    }
+}
+
+#[test]
+fn rar29_family_compressed_writer_level_zero_stores_member() {
+    let payload = b"level zero should store even through compressed writer\n".repeat(8);
+    let entries = [FileEntry {
+        name: b"level-zero.txt",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+
+    for target in [
+        ArchiveVersion::Rar29,
+        ArchiveVersion::Rar30,
+        ArchiveVersion::Rar40,
+    ] {
+        let bytes = write_compressed_archive(
+            &entries,
+            WriterOptions::new(target, FeatureSet::store_only()).with_compression_level(0),
+        )
+        .unwrap();
+        let archive = Archive::parse(&bytes).unwrap();
+        let file = archive.files().next().unwrap();
+
+        assert_eq!(file.method, 0x30, "{target:?}");
+        assert_eq!(file.pack_size, payload.len() as u64, "{target:?}");
+        assert_eq!(collect_extract(&archive).unwrap()[0].data, payload);
+    }
+}
+
+#[test]
+fn rar29_family_writer_stamps_requested_lz_method_levels() {
+    let payload = b"level method stamp payload alpha beta gamma delta\n".repeat(128);
+    let entries = [FileEntry {
+        name: b"method-level.txt",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+
+    for target in [
+        ArchiveVersion::Rar29,
+        ArchiveVersion::Rar30,
+        ArchiveVersion::Rar40,
+    ] {
+        for level in 1..=5 {
+            let bytes = write_compressed_archive(
+                &entries,
+                WriterOptions::new(target, FeatureSet::store_only()).with_compression_level(level),
+            )
+            .unwrap();
+            let archive = Archive::parse(&bytes).unwrap();
+            let file = archive.files().next().unwrap();
+
+            assert_eq!(file.method, 0x30 + level, "{target:?} level {level}");
+            assert_eq!(collect_extract(&archive).unwrap()[0].data, payload);
+        }
+    }
+}
+
+#[test]
+fn rar29_family_writer_stores_small_incompressible_member_when_smaller() {
+    let data: Vec<_> = (0..41u8)
+        .map(|index| index.wrapping_mul(37).wrapping_add(11))
+        .collect();
+    let entries = [FileEntry {
+        name: b"fgrep",
+        data: &data,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+
+    let bytes = write_compressed_archive(
+        &entries,
+        WriterOptions::new(ArchiveVersion::Rar40, FeatureSet::store_only())
+            .with_compression_level(5),
+    )
+    .unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let file = archive.files().next().unwrap();
+
+    assert_eq!(file.method, 0x30);
+    assert_eq!(file.pack_size, data.len() as u64);
+    assert_eq!(collect_extract(&archive).unwrap()[0].data, data);
 }
 
 #[test]

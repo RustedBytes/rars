@@ -850,6 +850,31 @@ fn compressed_rar50_writer_stores_member_when_lz_payload_would_grow() {
 }
 
 #[test]
+fn compressed_rar50_writer_level_zero_stores_member() {
+    let data = b"level zero stores through compressed writer\n".repeat(64);
+    for target in [ArchiveVersion::Rar50, ArchiveVersion::Rar70] {
+        let entries = [rar50::CompressedEntry {
+            name: b"level-zero.txt",
+            data: &data,
+            mtime: Some(0x5a21_00a2),
+            attributes: 0x20,
+            host_os: 3,
+        }];
+        let bytes = write_compressed_archive(
+            &entries,
+            rar50::WriterOptions::new(target, FeatureSet::store_only()).with_compression_level(0),
+        )
+        .unwrap();
+
+        let archive = Archive::parse(&bytes).unwrap();
+        let file = archive.files().next().unwrap();
+        assert!(file.is_stored(), "{target:?}");
+        assert_eq!(file.packed_size(), data.len() as u64);
+        assert_eq!(collect_extract(&archive).unwrap()[0].data, data);
+    }
+}
+
+#[test]
 fn compressed_rar50_writer_uses_compression_level_for_match_effort() {
     let data = level_sensitive_payload();
     for target in [ArchiveVersion::Rar50, ArchiveVersion::Rar70] {
@@ -881,6 +906,35 @@ fn compressed_rar50_writer_uses_compression_level_for_match_effort() {
         );
         assert_eq!(collect_extract(&low_archive).unwrap()[0].data, data);
         assert_eq!(collect_extract(&high_archive).unwrap()[0].data, data);
+    }
+}
+
+#[test]
+fn compressed_rar50_writer_stamps_requested_method_levels() {
+    let data = level_sensitive_payload();
+    for target in [ArchiveVersion::Rar50, ArchiveVersion::Rar70] {
+        for level in 1..=5 {
+            let entries = [rar50::CompressedEntry {
+                name: b"level-method.bin",
+                data: &data,
+                mtime: Some(0x5a21_00a4),
+                attributes: 0x20,
+                host_os: 3,
+            }];
+            let bytes = write_compressed_archive(
+                &entries,
+                rar50::WriterOptions::new(target, FeatureSet::store_only())
+                    .with_compression_level(level),
+            )
+            .unwrap();
+
+            let archive = Archive::parse(&bytes).unwrap();
+            let file = archive.files().next().unwrap();
+            let info = file.decoded_compression_info().unwrap();
+            assert_eq!(info.algorithm_version, 0, "{target:?} level {level}");
+            assert_eq!(info.method, level, "{target:?} level {level}");
+            assert_eq!(collect_extract(&archive).unwrap()[0].data, data);
+        }
     }
 }
 
