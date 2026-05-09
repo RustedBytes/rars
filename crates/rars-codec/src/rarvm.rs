@@ -110,7 +110,6 @@ impl Program {
                 .checked_add(1)
                 .ok_or(Error::InvalidData("RARVM static data size overflows"))?
                 as usize;
-            static_data.reserve(size);
             for _ in 0..size {
                 static_data.push(bits.read_bits(8)? as u8);
             }
@@ -1624,6 +1623,12 @@ mod tests {
         assert_eq!(result.output, [1, 2, 3]);
         assert_eq!(result.globals.len(), 68);
         assert_eq!(&result.globals[64..], b"stat");
+    }
+
+    #[test]
+    fn parse_rejects_huge_static_data_size_without_preallocating() {
+        let err = Program::parse(&[0xff, 0xff, 0xff, 0xff, 0, 0]).unwrap_err();
+        assert_eq!(err, Error::NeedMoreInput);
     }
 
     fn instr(opcode: Opcode, byte_mode: bool, operands: Vec<Operand>) -> Instruction {

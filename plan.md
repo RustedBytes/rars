@@ -6,8 +6,6 @@
   either repair those overlap sectors correctly or document the unsupported
   layout explicitly.
 - Add adversarial PPMd fixtures as corpus bugs appear.
-- Add fuzz targets for `Archive::parse`, `Unpack29::decode_member`, PPMd decode,
-  and RARVM program parsing/execution.
 
 ## Compression Work
 

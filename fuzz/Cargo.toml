@@ -1,0 +1,43 @@
+[package]
+name = "rars-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+rars = { path = "../crates/rars" }
+rars-codec = { path = "../crates/rars-codec" }
+
+[[bin]]
+name = "archive_parse"
+path = "fuzz_targets/archive_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "unpack29_decode"
+path = "fuzz_targets/unpack29_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ppmd_decode"
+path = "fuzz_targets/ppmd_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rarvm_parse_execute"
+path = "fuzz_targets/rarvm_parse_execute.rs"
+test = false
+doc = false
+bench = false
