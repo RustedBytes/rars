@@ -969,4 +969,441 @@ mod tests {
             Err(Error::InvalidHeader(_))
         ));
     }
+
+    #[test]
+    fn codec_state_new_for_chooses_codec_by_unpack_version() {
+        let mut f = file(b"a", 0);
+        f.unp_ver = 15;
+        assert!(matches!(
+            CodecState::new_for(&f).unwrap(),
+            CodecState::Unpack15(_)
+        ));
+        f.unp_ver = 20;
+        assert!(matches!(
+            CodecState::new_for(&f).unwrap(),
+            CodecState::Unpack20(_)
+        ));
+        f.unp_ver = 26;
+        assert!(matches!(
+            CodecState::new_for(&f).unwrap(),
+            CodecState::Unpack20(_)
+        ));
+        f.unp_ver = 29;
+        assert!(matches!(
+            CodecState::new_for(&f).unwrap(),
+            CodecState::Unpack29(_)
+        ));
+        f.unp_ver = 36;
+        assert!(matches!(
+            CodecState::new_for(&f).unwrap(),
+            CodecState::Unpack29(_)
+        ));
+        f.unp_ver = 14;
+        f.method = 0x35;
+        assert!(matches!(
+            CodecState::new_for(&f),
+            Err(Error::UnsupportedCompression {
+                unpack_version: 14,
+                method: 0x35,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn codec_state_supports_matches_codec_to_file_version() {
+        let mut f = file(b"a", 0);
+
+        f.unp_ver = 15;
+        let unpack15 = CodecState::new_for(&f).unwrap();
+        assert!(unpack15.supports(&f));
+        f.unp_ver = 20;
+        assert!(!unpack15.supports(&f));
+        f.unp_ver = 29;
+        assert!(!unpack15.supports(&f));
+
+        f.unp_ver = 20;
+        let unpack20 = CodecState::new_for(&f).unwrap();
+        assert!(unpack20.supports(&f));
+        f.unp_ver = 26;
+        assert!(unpack20.supports(&f));
+        f.unp_ver = 15;
+        assert!(!unpack20.supports(&f));
+        f.unp_ver = 29;
+        assert!(!unpack20.supports(&f));
+
+        f.unp_ver = 29;
+        let unpack29 = CodecState::new_for(&f).unwrap();
+        assert!(unpack29.supports(&f));
+        f.unp_ver = 36;
+        assert!(unpack29.supports(&f));
+        f.unp_ver = 20;
+        assert!(!unpack29.supports(&f));
+    }
+
+    #[test]
+    fn split_cipher_new_rejects_unsupported_unpack_version() {
+        for ver in [14u8, 16, 19, 25, 27, 28] {
+            assert!(
+                matches!(
+                    SplitCipher::new(ver, b"pw", None),
+                    Err(Error::UnsupportedEncryption { unpack_version, .. }) if unpack_version == ver
+                ),
+                "unp_ver {ver} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn decrypting_reader_new_rejects_unsupported_unpack_version() {
+        let result = DecryptingReader::new(Cursor::new(Vec::<u8>::new()), 25, b"pw", None);
+        assert!(matches!(
+            result,
+            Err(Error::UnsupportedEncryption {
+                unpack_version: 25,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn decrypting_reader_rejects_non_block_aligned_rar20_payload() {
+        let mut payload = vec![0u8; 23];
+        Rar20Cipher::new(b"pw")
+            .encrypt_in_place(&mut payload[..16])
+            .unwrap();
+        let mut reader = DecryptingReader::new(Cursor::new(payload), 20, b"pw", None).unwrap();
+        let mut buf = [0u8; 64];
+        let err = loop {
+            match reader.read(&mut buf) {
+                Ok(0) => panic!("expected non-block-aligned data error"),
+                Ok(_) => continue,
+                Err(err) => break err,
+            }
+        };
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn pending_split_refs_packed_size_rejects_missing_volume_or_file() {
+        let f = file(b"a.txt", FHD_SPLIT_AFTER);
+        let pending = PendingSplitRefs::new(&f, 9, 0);
+        let no_volumes: Vec<Archive> = Vec::new();
+        assert!(matches!(
+            pending.packed_size(&no_volumes),
+            Err(Error::InvalidHeader(_))
+        ));
+
+        let mut pending = PendingSplitRefs::new(&f, 0, 7);
+        pending.fragments[0] = (0, 7);
+        let one_volume = vec![archive_with(vec![Block::File(f)])];
+        assert!(matches!(
+            pending.packed_size(&one_volume),
+            Err(Error::InvalidHeader(_))
+        ));
+    }
+
+    #[test]
+    fn pending_split_refs_fragment_reader_rejects_missing_volume_or_file() {
+        let f = file(b"a.txt", FHD_SPLIT_AFTER);
+        let pending = PendingSplitRefs::new(&f, 9, 0);
+        let no_volumes: Vec<Archive> = Vec::new();
+        assert!(matches!(
+            pending.fragment_reader(&no_volumes, None),
+            Err(Error::InvalidHeader(_))
+        ));
+
+        let mut pending = PendingSplitRefs::new(&f, 0, 7);
+        pending.fragments[0] = (0, 7);
+        let one_volume = vec![archive_with(vec![Block::File(f)])];
+        assert!(matches!(
+            pending.fragment_reader(&one_volume, None),
+            Err(Error::InvalidHeader(_))
+        ));
+    }
+
+    #[test]
+    fn pending_split_refs_fragment_reader_demands_password_for_encrypted() {
+        let mut first = file(b"a.txt", FHD_PASSWORD | FHD_SPLIT_AFTER);
+        first.unp_ver = 20;
+        first.packed_range = 0..0;
+        let pending = PendingSplitRefs::new(&first, 0, 0);
+        let volumes = vec![archive_with_source(vec![Block::File(first)], Vec::new())];
+        assert!(matches!(
+            pending.fragment_reader(&volumes, None),
+            Err(Error::NeedPassword)
+        ));
+    }
+
+    #[test]
+    fn pending_split_refs_fragment_reader_chains_unencrypted_volumes() {
+        let plain: &[u8] = b"hello, this string is split across two volumes!";
+        let split = 11usize;
+
+        let mut first = file(b"a.txt", FHD_SPLIT_AFTER);
+        first.pack_size = split as u64;
+        first.packed_range = 0..split;
+        let mut second = file(b"a.txt", FHD_SPLIT_BEFORE);
+        second.pack_size = (plain.len() - split) as u64;
+        second.packed_range = 0..(plain.len() - split);
+
+        let mut pending = PendingSplitRefs::new(&first, 0, 0);
+        pending.append(&second, 1, 0);
+        let volumes = vec![
+            archive_with_source(vec![Block::File(first)], plain[..split].to_vec()),
+            archive_with_source(vec![Block::File(second)], plain[split..].to_vec()),
+        ];
+
+        let reader = pending.fragment_reader(&volumes, None).unwrap();
+        let out = read_in_small_chunks(reader);
+        assert_eq!(out, plain);
+    }
+
+    #[test]
+    fn pending_split_refs_packed_size_sums_fragment_pack_sizes() {
+        let mut first = file(b"a.txt", FHD_SPLIT_AFTER);
+        first.pack_size = 7;
+        let mut second = file(b"a.txt", FHD_SPLIT_BEFORE);
+        second.pack_size = 5;
+
+        let mut pending = PendingSplitRefs::new(&first, 0, 0);
+        pending.append(&second, 1, 0);
+        let volumes = vec![
+            archive_with(vec![Block::File(first)]),
+            archive_with(vec![Block::File(second)]),
+        ];
+        assert_eq!(pending.packed_size(&volumes).unwrap(), 12);
+    }
+
+    #[derive(Default, Clone)]
+    struct Capture {
+        bytes: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
+        opened: std::rc::Rc<std::cell::RefCell<Vec<ExtractedEntryMeta>>>,
+    }
+
+    struct CaptureWriter(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+
+    impl Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Capture {
+        fn opener(&self) -> impl FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>> + '_ {
+            let bytes = self.bytes.clone();
+            let opened = self.opened.clone();
+            move |meta| {
+                opened.borrow_mut().push(meta.clone());
+                Ok(Box::new(CaptureWriter(bytes.clone())))
+            }
+        }
+    }
+
+    #[test]
+    fn extract_volumes_to_invokes_open_for_directory_entries() {
+        let dir = file(b"d", FHD_DIRECTORY_MASK);
+        let volumes = vec![archive_with(vec![Block::File(dir)])];
+
+        let capture = Capture::default();
+        extract_volumes_to(
+            &volumes,
+            crate::ArchiveReadOptions::default(),
+            capture.opener(),
+        )
+        .unwrap();
+
+        let opened = capture.opened.borrow();
+        assert_eq!(opened.len(), 1);
+        assert_eq!(opened[0].name, b"d");
+        assert!(opened[0].is_directory);
+        assert!(capture.bytes.borrow().is_empty());
+    }
+
+    #[test]
+    fn extract_volumes_to_writes_stored_file_payload_and_verifies_crc() {
+        let payload = b"hello stored payload!".to_vec();
+        let mut entry = file(b"hello.txt", 0);
+        entry.unp_ver = 20;
+        entry.pack_size = payload.len() as u64;
+        entry.unp_size = payload.len() as u64;
+        entry.packed_range = 0..payload.len();
+        entry.file_crc = super::super::crc32(&payload);
+
+        let volumes = vec![archive_with_source(
+            vec![Block::File(entry)],
+            payload.clone(),
+        )];
+
+        let capture = Capture::default();
+        extract_volumes_to(
+            &volumes,
+            crate::ArchiveReadOptions::default(),
+            capture.opener(),
+        )
+        .unwrap();
+
+        assert_eq!(capture.bytes.borrow().as_slice(), payload.as_slice());
+        let opened = capture.opened.borrow();
+        assert_eq!(opened.len(), 1);
+        assert_eq!(opened[0].name, b"hello.txt");
+        assert!(!opened[0].is_directory);
+    }
+
+    #[test]
+    fn extract_volumes_to_reports_stored_crc_mismatch_with_entry_context() {
+        let payload = b"crc mismatch payload".to_vec();
+        let mut entry = file(b"bad.txt", 0);
+        entry.unp_ver = 20;
+        entry.pack_size = payload.len() as u64;
+        entry.unp_size = payload.len() as u64;
+        entry.packed_range = 0..payload.len();
+        entry.file_crc = super::super::crc32(&payload).wrapping_add(1);
+
+        let volumes = vec![archive_with_source(
+            vec![Block::File(entry)],
+            payload.clone(),
+        )];
+
+        let capture = Capture::default();
+        let err = extract_volumes_to(
+            &volumes,
+            crate::ArchiveReadOptions::default(),
+            capture.opener(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::AtEntry { .. }),
+            "expected Error::AtEntry, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn extract_volumes_to_writes_split_stored_file_across_volumes() {
+        let payload = b"this stored payload spans two volumes".to_vec();
+        let split = 13usize;
+
+        let mut first = file(b"split.txt", FHD_SPLIT_AFTER);
+        first.unp_ver = 20;
+        first.pack_size = split as u64;
+        first.unp_size = payload.len() as u64;
+        first.packed_range = 0..split;
+        first.file_crc = super::super::crc32(&payload);
+
+        let mut second = file(b"split.txt", FHD_SPLIT_BEFORE);
+        second.unp_ver = 20;
+        second.pack_size = (payload.len() - split) as u64;
+        second.unp_size = payload.len() as u64;
+        second.packed_range = 0..(payload.len() - split);
+        second.file_crc = super::super::crc32(&payload);
+
+        let volumes = vec![
+            archive_with_source(vec![Block::File(first)], payload[..split].to_vec()),
+            archive_with_source(vec![Block::File(second)], payload[split..].to_vec()),
+        ];
+
+        let capture = Capture::default();
+        extract_volumes_to(
+            &volumes,
+            crate::ArchiveReadOptions::default(),
+            capture.opener(),
+        )
+        .unwrap();
+
+        assert_eq!(capture.bytes.borrow().as_slice(), payload.as_slice());
+        let opened = capture.opened.borrow();
+        assert_eq!(opened.len(), 1);
+        assert_eq!(opened[0].name, b"split.txt");
+    }
+
+    #[test]
+    fn extract_volumes_to_rejects_split_stored_size_mismatch() {
+        let payload = b"split stored mismatch".to_vec();
+        let split = 10usize;
+        let truncated = payload.len() - 3;
+
+        let mut first = file(b"a.txt", FHD_SPLIT_AFTER);
+        first.unp_ver = 20;
+        first.pack_size = split as u64;
+        first.unp_size = payload.len() as u64;
+        first.packed_range = 0..split;
+
+        let mut second = file(b"a.txt", FHD_SPLIT_BEFORE);
+        second.unp_ver = 20;
+        second.pack_size = (truncated - split) as u64;
+        second.unp_size = payload.len() as u64;
+        second.packed_range = 0..(truncated - split);
+
+        let volumes = vec![
+            archive_with_source(vec![Block::File(first)], payload[..split].to_vec()),
+            archive_with_source(
+                vec![Block::File(second)],
+                payload[split..truncated].to_vec(),
+            ),
+        ];
+
+        let capture = Capture::default();
+        let err = extract_volumes_to(
+            &volumes,
+            crate::ArchiveReadOptions::default(),
+            capture.opener(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidHeader(_)),
+            "expected Error::InvalidHeader, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn decoder_session_codec_for_resets_when_unpack_version_changes() {
+        let mut session = DecoderSession::new(true);
+        let mut f = file(b"a", 0);
+        f.unp_ver = 20;
+        assert!(matches!(
+            session.codec_for(&f).unwrap(),
+            CodecState::Unpack20(_)
+        ));
+        let mut g = file(b"b", 0);
+        g.unp_ver = 29;
+        assert!(matches!(
+            session.codec_for(&g).unwrap(),
+            CodecState::Unpack29(_)
+        ));
+        let mut h = file(b"c", 0);
+        h.unp_ver = 15;
+        assert!(matches!(
+            session.codec_for(&h).unwrap(),
+            CodecState::Unpack15(_)
+        ));
+    }
+
+    #[test]
+    fn decoder_session_codec_for_propagates_unsupported_compression() {
+        let mut session = DecoderSession::new(false);
+        let mut f = file(b"a", 0);
+        f.unp_ver = 14;
+        assert!(matches!(
+            session.codec_for(&f),
+            Err(Error::UnsupportedCompression {
+                unpack_version: 14,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn decoder_session_codec_for_reuses_codec_in_solid_mode() {
+        let mut session = DecoderSession::new(true);
+        let mut f = file(b"a", 0);
+        f.unp_ver = 29;
+        let first = session.codec_for(&f).unwrap() as *const CodecState;
+        let second = session.codec_for(&f).unwrap() as *const CodecState;
+        assert_eq!(first, second);
+    }
 }
