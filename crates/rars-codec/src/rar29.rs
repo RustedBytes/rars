@@ -296,13 +296,20 @@ fn rar29_delta_messages() -> DeltaErrorMessages {
 #[non_exhaustive]
 pub struct EncodeOptions {
     pub max_match_candidates: usize,
+    pub lazy_matching: bool,
 }
 
 impl EncodeOptions {
     pub const fn new(max_match_candidates: usize) -> Self {
         Self {
             max_match_candidates,
+            lazy_matching: false,
         }
+    }
+
+    pub const fn with_lazy_matching(mut self, enabled: bool) -> Self {
+        self.lazy_matching = enabled;
+        self
     }
 }
 
@@ -745,6 +752,12 @@ fn encode_tokens(input: &[u8], history: &[u8], options: EncodeOptions) -> Vec<En
     let end = combined.len();
     while pos < end {
         if let Some((length, offset)) = best_match(&combined, pos, end, &buckets, options) {
+            if should_lazy_emit_literal(&combined, pos, end, &buckets, options, length) {
+                tokens.push(EncodeToken::Literal(combined[pos]));
+                insert_match_position(&combined, pos, &mut buckets);
+                pos += 1;
+                continue;
+            }
             tokens.push(EncodeToken::Match { length, offset });
             for history_pos in pos..pos + length {
                 insert_match_position(&combined, history_pos, &mut buckets);
@@ -757,6 +770,21 @@ fn encode_tokens(input: &[u8], history: &[u8], options: EncodeOptions) -> Vec<En
         }
     }
     tokens
+}
+
+fn should_lazy_emit_literal(
+    input: &[u8],
+    pos: usize,
+    end: usize,
+    buckets: &[Vec<usize>],
+    options: EncodeOptions,
+    current_length: usize,
+) -> bool {
+    if !options.lazy_matching || pos + 1 >= end {
+        return false;
+    }
+    best_match(input, pos + 1, end, buckets, options)
+        .is_some_and(|(next_length, _)| next_length > current_length + 1)
 }
 
 fn encode_ppmd_tokens(input: &[u8], lz_escapes: bool) -> Vec<PpmdEncodeToken> {
@@ -2406,6 +2434,7 @@ mod tests {
         unpack29_encode_ppmd_literals, unpack29_encode_ppmd_with_filter, BitWriter, EncodeOptions,
         EncodeToken, Error, Huffman, PpmdEncodeToken, Rar29FilterKind, Rar29FilterSpec, Result,
         StandardFilter, Unpack29, Unpack29Encoder, VmFilter, VmProgram, VmProgramKind,
+        MAX_MATCH_CANDIDATES,
     };
 
     const COMPRESSED_TEXT: &[u8] = &[
@@ -2436,6 +2465,30 @@ mod tests {
         let input = b"literal-only RAR 2.9 baseline\nwith repeated text literal-only\n";
         let packed = unpack29_encode_literals(input).unwrap();
 
+        assert_eq!(unpack29_decode(&packed, input.len()).unwrap(), input);
+    }
+
+    #[test]
+    fn lazy_lz_parser_defers_short_match_for_longer_next_match() {
+        let input = b"abcdXbcdYYYYYYYYYYYYabcdYYYYYYYYYYYY";
+        let greedy = encode_tokens(input, &[], EncodeOptions::new(MAX_MATCH_CANDIDATES));
+        let lazy = encode_tokens(
+            input,
+            &[],
+            EncodeOptions::new(MAX_MATCH_CANDIDATES).with_lazy_matching(true),
+        );
+        let packed = Unpack29Encoder::with_options(
+            EncodeOptions::new(MAX_MATCH_CANDIDATES).with_lazy_matching(true),
+        )
+        .encode_member(input)
+        .unwrap();
+
+        assert!(greedy
+            .iter()
+            .any(|token| matches!(token, EncodeToken::Match { length: 4, .. })));
+        assert!(lazy
+            .iter()
+            .any(|token| matches!(token, EncodeToken::Match { length, .. } if *length > 8)));
         assert_eq!(unpack29_decode(&packed, input.len()).unwrap(), input);
     }
 

@@ -1837,6 +1837,67 @@ fn writes_literal_compressed_rar20_archive_that_reader_extracts() {
 }
 
 #[test]
+fn rar20_writer_stamps_requested_method_levels() {
+    let payload = b"rar20 level method payload alpha beta gamma\n".repeat(64);
+    let entries = [FileEntry {
+        name: b"rar20-level.txt",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+
+    for level in 1..=5 {
+        let bytes = write_compressed_archive(
+            &entries,
+            WriterOptions::new(ArchiveVersion::Rar20, FeatureSet::store_only())
+                .with_compression_level(level),
+        )
+        .unwrap();
+        let archive = Archive::parse(&bytes).unwrap();
+        let file = archive.files().next().unwrap();
+
+        assert_eq!(file.method, 0x30 + level);
+        assert_eq!(file.block.flags & 0x00e0, 0);
+        assert_eq!(collect_extract(&archive).unwrap()[0].data, payload);
+    }
+}
+
+#[test]
+fn rar20_writer_stores_member_when_lz_payload_would_grow() {
+    let payload = (0..41u16)
+        .map(|index| {
+            let value = index.wrapping_mul(73).wrapping_add(index >> 3);
+            value as u8
+        })
+        .collect::<Vec<_>>();
+    let entries = [FileEntry {
+        name: b"rar20-randomish.bin",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+
+    let bytes = write_compressed_archive(
+        &entries,
+        WriterOptions::new(ArchiveVersion::Rar20, FeatureSet::store_only())
+            .with_compression_level(5),
+    )
+    .unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let file = archive.files().next().unwrap();
+
+    assert_eq!(file.method, 0x30);
+    assert_eq!(file.pack_size, payload.len() as u64);
+    assert_eq!(collect_extract(&archive).unwrap()[0].data, payload);
+}
+
+#[test]
 fn writes_encrypted_rar20_archives_that_reader_extracts_with_password() {
     let mut features = FeatureSet::store_only();
     features.file_encryption = true;
@@ -2688,6 +2749,52 @@ fn rar29_family_writer_level_three_uses_lz_and_level_five_uses_auto_policy() {
         assert!(auto_file.pack_size < lz_file.pack_size, "{target:?}");
         assert_eq!(collect_extract(&lz_archive).unwrap()[0].data, payload);
         assert_eq!(collect_extract(&auto_archive).unwrap()[0].data, payload);
+    }
+}
+
+#[test]
+fn rar29_family_level_four_enables_lazy_lz_matching() {
+    let payload = b"abcdXbcdYYYYYYYYYYYYabcdYYYYYYYYYYYY".repeat(64);
+    let entries = [FileEntry {
+        name: b"lazy-lz.txt",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+
+    for target in [
+        ArchiveVersion::Rar29,
+        ArchiveVersion::Rar30,
+        ArchiveVersion::Rar40,
+    ] {
+        let level_three = write_compressed_archive(
+            &entries,
+            WriterOptions::new(target, FeatureSet::store_only()).with_compression_level(3),
+        )
+        .unwrap();
+        let level_four = write_compressed_archive(
+            &entries,
+            WriterOptions::new(target, FeatureSet::store_only()).with_compression_level(4),
+        )
+        .unwrap();
+        let level_three_archive = Archive::parse(&level_three).unwrap();
+        let level_four_archive = Archive::parse(&level_four).unwrap();
+        let level_three_file = level_three_archive.files().next().unwrap();
+        let level_four_file = level_four_archive.files().next().unwrap();
+
+        assert_eq!(level_three_file.method, 0x33, "{target:?}");
+        assert_eq!(level_four_file.method, 0x34, "{target:?}");
+        assert!(
+            level_four_file.pack_size <= level_three_file.pack_size,
+            "{target:?}"
+        );
+        assert_eq!(
+            collect_extract(&level_four_archive).unwrap()[0].data,
+            payload
+        );
     }
 }
 

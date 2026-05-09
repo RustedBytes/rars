@@ -39,8 +39,8 @@
   old-distance, short-distance, or audio writer tokens. The current writer
   deliberately emits only literals and fresh LZ matches.
 - Improve RAR29/RAR30/RAR40 max-level policy after `--level` is wired:
-  filter-block boundary tuning, match-finder quality, lazy parsing, and PPMd
-  tuning against WinRAR 2.90/3.x/4.x oracles.
+  filter-block boundary tuning, match-finder quality, and PPMd tuning against
+  WinRAR 2.90/3.x/4.x oracles.
 - Improve RAR50/RAR70 level policy beyond wire-level method stamping:
   match-finder effort, incompressible-member store fallback, and filter
   selection should be tuned against WinRAR 6.x/7.x oracles.
@@ -50,7 +50,7 @@
 - Add an explicit dictionary-size writer option and CLI knob once oracle data
   shows which legacy targets should default above the current per-target
   mapping.
-- Refine non-zero `--level` mappings for RAR13/RAR15/RAR20 after the bench
+- Refine non-zero `--level` mappings for RAR13/RAR15 after the bench
   harness reports which policy differences matter.
 - Add real RAR-created RAR5 filter fixtures for E8, E8E9, Delta, and ARM
   reader coverage.

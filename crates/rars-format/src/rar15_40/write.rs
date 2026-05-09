@@ -660,21 +660,21 @@ fn validate_compression_level(options: WriterOptions) -> Result<()> {
 }
 
 fn rar29_encode_options_for_level(level: Option<u8>) -> Result<Rar29EncodeOptions> {
+    let level = level.unwrap_or(5);
     let candidates = match level {
-        None => RAR29_MAX_MATCH_CANDIDATES_DEFAULT,
-        Some(0) => 0,
-        Some(1) => 8,
-        Some(2) => 32,
-        Some(3) => 96,
-        Some(4) => RAR29_MAX_MATCH_CANDIDATES_DEFAULT,
-        Some(5) => 512,
-        Some(_) => {
+        0 => 0,
+        1 => 8,
+        2 => 32,
+        3 => 96,
+        4 => RAR29_MAX_MATCH_CANDIDATES_DEFAULT,
+        5 => 512,
+        _ => {
             return Err(Error::InvalidHeader(
                 "RAR compression level must be in the range 0..5",
             ))
         }
     };
-    Ok(Rar29EncodeOptions::new(candidates))
+    Ok(Rar29EncodeOptions::new(candidates).with_lazy_matching(level >= 4))
 }
 
 fn compression_method_for_level(options: WriterOptions) -> Result<u8> {
@@ -691,7 +691,10 @@ fn compression_method_for_level(options: WriterOptions) -> Result<u8> {
     }
     if matches!(
         options.target,
-        ArchiveVersion::Rar29 | ArchiveVersion::Rar30 | ArchiveVersion::Rar40
+        ArchiveVersion::Rar20
+            | ArchiveVersion::Rar29
+            | ArchiveVersion::Rar30
+            | ArchiveVersion::Rar40
     ) {
         return Ok(0x30 + level);
     }
@@ -809,7 +812,10 @@ fn should_store_fallback(
     if !solid
         && matches!(
             target,
-            ArchiveVersion::Rar29 | ArchiveVersion::Rar30 | ArchiveVersion::Rar40
+            ArchiveVersion::Rar20
+                | ArchiveVersion::Rar29
+                | ArchiveVersion::Rar30
+                | ArchiveVersion::Rar40
         )
     {
         return true;
