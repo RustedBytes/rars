@@ -191,6 +191,7 @@ pub struct WriterOptions {
     pub target: ArchiveVersion,
     pub features: FeatureSet,
     pub compression_level: Option<u8>,
+    pub dictionary_size: Option<usize>,
 }
 
 impl WriterOptions {
@@ -199,11 +200,17 @@ impl WriterOptions {
             target,
             features,
             compression_level: None,
+            dictionary_size: None,
         }
     }
 
     pub const fn with_compression_level(mut self, level: u8) -> Self {
         self.compression_level = Some(level);
+        self
+    }
+
+    pub const fn with_dictionary_size(mut self, size: usize) -> Self {
+        self.dictionary_size = Some(size);
         self
     }
 }
@@ -214,6 +221,7 @@ impl Default for WriterOptions {
             target: ArchiveVersion::Rar15,
             features: FeatureSet::store_only(),
             compression_level: None,
+            dictionary_size: None,
         }
     }
 }
@@ -2551,6 +2559,7 @@ mod tests {
                 target: ArchiveVersion::Rar20,
                 features,
                 compression_level: None,
+                dictionary_size: None,
             },
         )
         .unwrap();

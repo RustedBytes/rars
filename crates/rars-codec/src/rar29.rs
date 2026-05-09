@@ -51,7 +51,7 @@ const MAX_ENCODER_MATCH_OFFSET: usize = 1024 * 1024;
 const MAX_ENCODER_MATCH_LENGTH: usize = 258;
 const MATCH_HASH_BUCKETS: usize = 4096;
 const MAX_MATCH_CANDIDATES: usize = 256;
-const MAX_PPMD_MATCH_LENGTH: usize = 287;
+const MAX_PPMD_MATCH_LENGTH: usize = 255;
 const MIN_PPMD_MATCH_LENGTH: usize = 32;
 const MAX_PPMD_REPEAT_LENGTH: usize = 259;
 
@@ -262,14 +262,21 @@ fn encode_ppmd_member(
     lz_escapes: bool,
     initial_filter: Option<&[u8]>,
 ) -> Result<Vec<u8>> {
-    const PPMD_ORDER: usize = 4;
-    const PPMD_DICTIONARY_MB: u8 = 16;
+    encode_ppmd_block(input, lz_escapes, initial_filter)
+}
+
+fn encode_ppmd_block(
+    input: &[u8],
+    lz_escapes: bool,
+    initial_filter: Option<&[u8]>,
+) -> Result<Vec<u8>> {
+    const PPMD_ORDER: usize = 8;
+    const PPMD_DICTIONARY_MB: u8 = 25;
     const PPMD_ESC: u8 = 2;
 
     let mut out = Vec::new();
-    out.push(0x80 | 0x40 | 0x20 | ((PPMD_ORDER as u8) - 1));
+    out.push(0x80 | 0x20 | ((PPMD_ORDER as u8) - 1));
     out.push(PPMD_DICTIONARY_MB - 1);
-    out.push(PPMD_ESC);
     let mut encoder = PpmdEncoder::new(PPMD_ORDER, PPMD_ESC, usize::from(PPMD_DICTIONARY_MB))?;
     if let Some(record) = initial_filter {
         encoder.encode_vm_filter_record(record)?;
@@ -3138,11 +3145,11 @@ mod tests {
     }
 
     #[test]
-    fn ppmd_encoder_advertises_16mb_model_for_external_decoders() {
+    fn ppmd_encoder_advertises_period_compatible_model_for_external_decoders() {
         let packed = unpack29_encode_ppmd(b"rar29 ppmd dictionary header").unwrap();
 
-        assert_eq!(packed[0] & 0xe0, 0xe0);
-        assert_eq!(packed[1], 15);
+        assert_eq!(packed[0], 0xa7);
+        assert_eq!(packed[1], 24);
     }
 
     #[test]
@@ -3177,6 +3184,23 @@ mod tests {
             .iter()
             .any(|token| matches!(token, PpmdEncodeToken::Match { offset, length } if *offset > 1 && *length >= 32)));
         assert_eq!(unpack29_decode(&packed, input.len()).unwrap(), input);
+    }
+
+    #[test]
+    fn ppmd_distance_match_lengths_stay_period_decoder_compatible() {
+        let phrase = b"<html><body>RAR PPMd LZSS conversion phrase</body></html>\n";
+        let mut input = Vec::new();
+        for _ in 0..200 {
+            input.extend_from_slice(phrase);
+        }
+        let tokens = encode_ppmd_tokens(&input, true);
+
+        assert!(tokens.iter().any(
+            |token| matches!(token, PpmdEncodeToken::Match { offset, length } if *offset > 1 && *length >= 32)
+        ));
+        assert!(!tokens
+            .iter()
+            .any(|token| matches!(token, PpmdEncodeToken::Match { length, .. } if *length > 255)));
     }
 
     #[test]

@@ -991,10 +991,6 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
         archive_path,
         input_paths,
     } = parse_add_command(args)?;
-    if dictionary_size.is_some() && !matches!(target, ArchiveVersion::Rar50 | ArchiveVersion::Rar70)
-    {
-        return Err("--dict-size is currently available only for RAR 5/7 writers".into());
-    }
     let input_paths = input_paths.as_slice();
     let compress = !store;
 
@@ -1081,7 +1077,11 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
             return Err("unsupported option combination: RAR 2.9 compression policy cannot currently be combined with archive or file comments".into());
         }
     }
-    match AddWritePlan::for_target(target)? {
+    let write_plan = AddWritePlan::for_target(target)?;
+    if dictionary_size.is_some() && matches!(write_plan, AddWritePlan::Rar13) {
+        return Err("--dict-size is available only for RAR 1.5+ writers".into());
+    }
+    match write_plan {
         AddWritePlan::Rar50Plus => {
             if ppmd {
                 return Err("--ppmd is only available for RAR 2.9/3.x/4.x writers".into());
@@ -1469,6 +1469,9 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
             let mut options = Rar15WriterOptions::new(target, features);
             if let Some(level) = compression_level {
                 options = options.with_compression_level(level);
+            }
+            if let Some(dictionary_size) = dictionary_size {
+                options = options.with_dictionary_size(dictionary_size);
             }
             if let Some(volume_size) = volume_size {
                 // Invariant: parse_add_command rejects add commands without inputs.

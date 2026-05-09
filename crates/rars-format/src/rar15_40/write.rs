@@ -4,9 +4,8 @@ use crate::x86_filter_scan::auto_x86_filter_ranges;
 use rars_codec::rar13::{unpack15_encode, Unpack15Encoder};
 use rars_codec::rar20::{unpack20_encode_literals, Unpack20Encoder};
 use rars_codec::rar29::{
-    unpack29_encode_literals, unpack29_encode_literals_with_options, unpack29_encode_ppmd_literals,
-    unpack29_encode_ppmd_literals_with_filter, EncodeOptions as Rar29EncodeOptions,
-    Unpack29Encoder,
+    unpack29_encode_literals, unpack29_encode_literals_with_options, unpack29_encode_ppmd,
+    unpack29_encode_ppmd_with_filter, EncodeOptions as Rar29EncodeOptions, Unpack29Encoder,
 };
 pub use rars_codec::rar29::{Rar29FilterKind as FilterKind, Rar29FilterSpec as FilterSpec};
 
@@ -48,7 +47,7 @@ pub fn write_stored_archive_with_comment(
     );
     write_archive_comment(&mut out, archive_comment, options.target)?;
     for entry in entries {
-        write_stored_entry(&mut out, entry, options.target)?;
+        write_stored_entry(&mut out, entry, options)?;
     }
     Ok(out)
 }
@@ -79,11 +78,7 @@ pub fn write_compressed_archive_with_comment(
     }
     write_main_header(&mut out, main_flags);
     write_archive_comment(&mut out, archive_comment, options.target)?;
-    let mut solid_encoder = SolidEncoder::for_target(
-        options.target,
-        options.features.solid,
-        options.compression_level,
-    )?;
+    let mut solid_encoder = SolidEncoder::for_target(options, options.features.solid)?;
     let mut solid_run_has_member = false;
     for entry in entries {
         let payload = encode_or_store_payload(entry.data, options, &mut solid_encoder)?;
@@ -95,6 +90,7 @@ pub fn write_compressed_archive_with_comment(
             &payload.data,
             payload.method,
             options.target,
+            dictionary_flags_for_options(options)?,
             solid_continuation,
         )?;
         if options.features.solid {
@@ -120,8 +116,7 @@ pub fn write_rar29_compressed_archive_with_filter_policy(
     policy: FilterPolicy,
 ) -> Result<Vec<u8>> {
     validate_rar29_filter_policy(&policy)?;
-    let encode_options =
-        rar29_encode_options_for_level_and_target(options.compression_level, options.target)?;
+    let encode_options = rar29_encode_options_for_options(options)?;
     let lz_method = compression_method_for_level(options)?;
     write_rar29_filtered_archive(entries, options, |entry| {
         encode_rar29_policy_filtered_payload(entry.data, &policy, encode_options, lz_method)
@@ -148,12 +143,11 @@ fn encode_rar29_policy_filtered_payload(
             method: lz_method,
         }),
         FilterPolicy::Ppmd => Ok(EncodedPayload {
-            data: unpack29_encode_ppmd_literals(data).map_err(Error::from)?,
+            data: unpack29_encode_ppmd(data).map_err(Error::from)?,
             method: 0x35,
         }),
         FilterPolicy::PpmdFiltered(filter) => Ok(EncodedPayload {
-            data: unpack29_encode_ppmd_literals_with_filter(data, filter.clone())
-                .map_err(Error::from)?,
+            data: unpack29_encode_ppmd_with_filter(data, filter.clone()).map_err(Error::from)?,
             method: 0x35,
         }),
     }
@@ -241,9 +235,9 @@ fn encode_rar29_auto_filtered_member(
             method: 0x30,
         });
     }
-    if is_large_text_ppmd_candidate(data) {
+    if include_ppmd && is_large_text_ppmd_candidate(data) {
         return Ok(EncodedPayload {
-            data: unpack29_encode_ppmd_literals(data).map_err(Error::from)?,
+            data: unpack29_encode_ppmd(data).map_err(Error::from)?,
             method: 0x35,
         });
     }
@@ -254,7 +248,7 @@ fn encode_rar29_auto_filtered_member(
     let mut candidates = Vec::new();
     if include_ppmd && is_auto_ppmd_candidate(data) {
         candidates.push(EncodedPayload {
-            data: unpack29_encode_ppmd_literals(data).map_err(Error::from)?,
+            data: unpack29_encode_ppmd(data).map_err(Error::from)?,
             method: 0x35,
         });
     }
@@ -467,7 +461,7 @@ fn write_rar29_filtered_archive(
                 entry,
                 &payload.data,
                 payload.method,
-                options.target,
+                options,
                 solid_continuation,
                 password,
             )?;
@@ -478,6 +472,7 @@ fn write_rar29_filtered_archive(
                 &payload.data,
                 payload.method,
                 options.target,
+                dictionary_flags_for_options(options)?,
                 solid_continuation,
             )?;
         }
@@ -497,7 +492,7 @@ fn write_header_encrypted_stored_archive(
     out.extend_from_slice(RAR15_SIGNATURE);
     write_main_header(&mut out, MHD_PASSWORD);
     for entry in entries {
-        write_header_encrypted_stored_entry(&mut out, entry, options.target, password)?;
+        write_header_encrypted_stored_entry(&mut out, entry, options, password)?;
     }
     Ok(out)
 }
@@ -518,11 +513,7 @@ fn write_header_encrypted_compressed_archive(
     out.extend_from_slice(RAR15_SIGNATURE);
     let main_flags = MHD_PASSWORD | if options.features.solid { MHD_SOLID } else { 0 };
     write_main_header(&mut out, main_flags);
-    let mut solid_encoder = SolidEncoder::for_target(
-        options.target,
-        options.features.solid,
-        options.compression_level,
-    )?;
+    let mut solid_encoder = SolidEncoder::for_target(options, options.features.solid)?;
     let mut solid_run_has_member = false;
     for entry in entries {
         let payload = encode_or_store_payload(entry.data, options, &mut solid_encoder)?;
@@ -533,7 +524,7 @@ fn write_header_encrypted_compressed_archive(
             entry,
             &payload.data,
             payload.method,
-            options.target,
+            options,
             solid_continuation,
             password,
         )?;
@@ -567,6 +558,7 @@ pub fn write_stored_volumes(
             host_os: entry.host_os,
             target: options.target,
             method: 0x30,
+            dictionary_flags: dictionary_flags_for_options(options)?,
             base_flags: writer_file_flags(entry.password, None, false),
             main_flags: 0,
             password: entry.password,
@@ -583,6 +575,7 @@ pub fn write_stored_volumes(
         host_os: entry.host_os,
         target: options.target,
         method: 0x30,
+        dictionary_flags: dictionary_flags_for_options(options)?,
         base_flags: writer_file_flags(entry.password, None, false),
         main_flags: 0,
         password: entry.password,
@@ -616,6 +609,7 @@ pub fn write_compressed_volumes(
             host_os: entry.host_os,
             target: options.target,
             method: payload.method,
+            dictionary_flags: dictionary_flags_for_options(options)?,
             base_flags: writer_file_flags(entry.password, None, false),
             main_flags: if options.features.solid { MHD_SOLID } else { 0 },
             password: entry.password,
@@ -632,6 +626,7 @@ pub fn write_compressed_volumes(
         host_os: entry.host_os,
         target: options.target,
         method: payload.method,
+        dictionary_flags: dictionary_flags_for_options(options)?,
         base_flags: writer_file_flags(entry.password, None, false),
         main_flags: if options.features.solid { MHD_SOLID } else { 0 },
         password: entry.password,
@@ -780,6 +775,7 @@ fn validate_compression_level(options: WriterOptions) -> Result<()> {
             "RAR compression level must be in the range 0..5",
         ));
     }
+    let _ = dictionary_flags_for_options(options)?;
     Ok(())
 }
 
@@ -803,12 +799,9 @@ fn rar29_encode_options_for_level(level: Option<u8>) -> Result<Rar29EncodeOption
         .with_lazy_lookahead(if level >= 5 { 4 } else { 1 }))
 }
 
-fn rar29_encode_options_for_level_and_target(
-    level: Option<u8>,
-    target: ArchiveVersion,
-) -> Result<Rar29EncodeOptions> {
-    Ok(rar29_encode_options_for_level(level)?
-        .with_max_match_distance(rar29_default_dictionary_size(target)))
+fn rar29_encode_options_for_options(options: WriterOptions) -> Result<Rar29EncodeOptions> {
+    Ok(rar29_encode_options_for_level(options.compression_level)?
+        .with_max_match_distance(dictionary_size_for_options(options)?))
 }
 
 fn rar29_default_dictionary_size(target: ArchiveVersion) -> usize {
@@ -817,6 +810,34 @@ fn rar29_default_dictionary_size(target: ArchiveVersion) -> usize {
         ArchiveVersion::Rar30 | ArchiveVersion::Rar40 => 128 * 1024,
         _ => 64 * 1024,
     }
+}
+
+fn dictionary_size_for_options(options: WriterOptions) -> Result<usize> {
+    options
+        .dictionary_size
+        .map(Ok)
+        .unwrap_or_else(|| Ok(rar29_default_dictionary_size(options.target)))
+}
+
+fn dictionary_flags_for_options(options: WriterOptions) -> Result<u16> {
+    dictionary_flags_for_size(dictionary_size_for_options(options)?)
+}
+
+fn dictionary_flags_for_size(size: usize) -> Result<u16> {
+    let bits =
+        match size {
+            0x1_0000 => 0,
+            0x2_0000 => 1,
+            0x4_0000 => 2,
+            0x8_0000 => 3,
+            0x10_0000 => 4,
+            0x20_0000 => 5,
+            0x40_0000 => 6,
+            _ => return Err(Error::InvalidHeader(
+                "RAR 1.5-4.x dictionary size must be one of 64K, 128K, 256K, 512K, 1M, 2M, or 4M",
+            )),
+        };
+    Ok((bits as u16) << 5)
 }
 
 fn compression_method_for_level(options: WriterOptions) -> Result<u8> {
@@ -850,22 +871,16 @@ enum SolidEncoder {
 }
 
 impl SolidEncoder {
-    fn for_target(
-        target: ArchiveVersion,
-        solid: bool,
-        compression_level: Option<u8>,
-    ) -> Result<Option<Self>> {
+    fn for_target(options: WriterOptions, solid: bool) -> Result<Option<Self>> {
         if !solid {
             return Ok(None);
         }
-        let encoder = match target {
+        let encoder = match options.target {
             ArchiveVersion::Rar15 => Self::Rar15(Box::new(Unpack15Encoder::new())),
             ArchiveVersion::Rar20 => Self::Rar20(Unpack20Encoder::new()),
-            ArchiveVersion::Rar29 | ArchiveVersion::Rar30 | ArchiveVersion::Rar40 => {
-                Self::Rar29(Unpack29Encoder::with_options(
-                    rar29_encode_options_for_level_and_target(compression_level, target)?,
-                ))
-            }
+            ArchiveVersion::Rar29 | ArchiveVersion::Rar30 | ArchiveVersion::Rar40 => Self::Rar29(
+                Unpack29Encoder::with_options(rar29_encode_options_for_options(options)?),
+            ),
             _ => return Ok(None),
         };
         Ok(Some(encoder))
@@ -896,8 +911,7 @@ fn encode_or_store_payload(
             ArchiveVersion::Rar29 | ArchiveVersion::Rar30 | ArchiveVersion::Rar40
         )
     {
-        let encode_options =
-            rar29_encode_options_for_level_and_target(options.compression_level, options.target)?;
+        let encode_options = rar29_encode_options_for_options(options)?;
         let lz_method = compression_method_for_level(options)?;
         if matches!(options.compression_level, Some(1..=4)) {
             return encode_rar29_auto_filtered_member(data, encode_options, lz_method, false);
@@ -907,7 +921,7 @@ fn encode_or_store_payload(
     let compressed = encode_compressed_payload(data, target, solid_encoder.as_mut())?;
     if should_store_fallback(target, solid, data.len(), compressed.len()) {
         if solid {
-            *solid_encoder = SolidEncoder::for_target(target, true, options.compression_level)?;
+            *solid_encoder = SolidEncoder::for_target(options, true)?;
         }
         return Ok(EncodedPayload {
             data: data.to_vec(),
@@ -1224,6 +1238,7 @@ fn write_newsub_archive_comment(out: &mut Vec<u8>, comment: Option<&[u8]>) -> Re
             host_os: 3,
             target: ArchiveVersion::Rar30,
             method: 0x33,
+            dictionary_flags: dictionary_flags_for_target(ArchiveVersion::Rar30),
             flags: 0,
             salt: None,
             extra: &[],
@@ -1234,8 +1249,9 @@ fn write_newsub_archive_comment(out: &mut Vec<u8>, comment: Option<&[u8]>) -> Re
 fn write_stored_entry(
     out: &mut Vec<u8>,
     entry: &StoredEntry<'_>,
-    target: ArchiveVersion,
+    options: WriterOptions,
 ) -> Result<()> {
+    let target = options.target;
     validate_stored_entry(entry)?;
     validate_writer_password(target, entry.password)?;
     let mut packed = entry.data.to_vec();
@@ -1258,6 +1274,7 @@ fn write_stored_entry(
             host_os: entry.host_os,
             target,
             method: 0x30,
+            dictionary_flags: dictionary_flags_for_options(options)?,
             flags,
             salt,
             extra: &file_comment,
@@ -1271,6 +1288,7 @@ fn write_compressed_entry(
     packed: &[u8],
     method: u8,
     target: ArchiveVersion,
+    dictionary_flags: u16,
     solid_continuation: bool,
 ) -> Result<()> {
     validate_file_entry(entry.name, entry.data)?;
@@ -1295,6 +1313,7 @@ fn write_compressed_entry(
             host_os: entry.host_os,
             target,
             method,
+            dictionary_flags,
             flags,
             salt,
             extra: &file_comment,
@@ -1305,9 +1324,10 @@ fn write_compressed_entry(
 fn write_header_encrypted_stored_entry(
     out: &mut Vec<u8>,
     entry: &StoredEntry<'_>,
-    target: ArchiveVersion,
+    options: WriterOptions,
     header_password: &[u8],
 ) -> Result<()> {
+    let target = options.target;
     validate_stored_entry(entry)?;
     validate_writer_password(target, entry.password)?;
     let mut packed = entry.data.to_vec();
@@ -1331,6 +1351,7 @@ fn write_header_encrypted_stored_entry(
             host_os: entry.host_os,
             target,
             method: 0x30,
+            dictionary_flags: dictionary_flags_for_options(options)?,
             flags,
             salt,
             extra: &file_comment,
@@ -1344,10 +1365,11 @@ fn write_header_encrypted_compressed_entry(
     entry: &FileEntry<'_>,
     packed: &[u8],
     method: u8,
-    target: ArchiveVersion,
+    options: WriterOptions,
     solid_continuation: bool,
     header_password: &[u8],
 ) -> Result<()> {
+    let target = options.target;
     validate_file_entry(entry.name, entry.data)?;
     validate_writer_password(target, entry.password)?;
     let mut packed = packed.to_vec();
@@ -1371,6 +1393,7 @@ fn write_header_encrypted_compressed_entry(
             host_os: entry.host_os,
             target,
             method,
+            dictionary_flags: dictionary_flags_for_options(options)?,
             flags,
             salt,
             extra: &file_comment,
@@ -1451,6 +1474,7 @@ struct FileRecord<'a> {
     host_os: u8,
     target: ArchiveVersion,
     method: u8,
+    dictionary_flags: u16,
     flags: u16,
     salt: Option<[u8; 8]>,
     extra: &'a [u8],
@@ -1464,7 +1488,7 @@ fn write_file_header_and_data(out: &mut Vec<u8>, record: FileRecord<'_>) -> Resu
 
 fn write_file_header(out: &mut Vec<u8>, record: &FileRecord<'_>) -> Result<()> {
     let start = out.len();
-    let flags = record.flags | dictionary_flags_for_target(record.target);
+    let flags = record.flags | record.dictionary_flags;
     let packed_size = u32::try_from(record.packed.len())
         .map_err(|_| Error::InvalidHeader("RAR 1.5 packed size overflows u32"))?;
     let unpacked_size = u32::try_from(record.unpacked_size)
@@ -1505,11 +1529,7 @@ fn write_file_header(out: &mut Vec<u8>, record: &FileRecord<'_>) -> Result<()> {
 }
 
 fn dictionary_flags_for_target(target: ArchiveVersion) -> u16 {
-    match target {
-        ArchiveVersion::Rar29 => 0x0080,
-        ArchiveVersion::Rar30 | ArchiveVersion::Rar40 => 0x0020,
-        _ => 0,
-    }
+    ((rar29_default_dictionary_size(target).trailing_zeros() - 16) as u16) << 5
 }
 
 struct SplitVolumeRecord<'a> {
@@ -1521,6 +1541,7 @@ struct SplitVolumeRecord<'a> {
     host_os: u8,
     target: ArchiveVersion,
     method: u8,
+    dictionary_flags: u16,
     base_flags: u16,
     main_flags: u16,
     password: Option<&'a [u8]>,
@@ -1592,6 +1613,7 @@ fn write_split_volumes(entry: SplitVolumeRecord<'_>) -> Result<Vec<Vec<u8>>> {
                 host_os: entry.host_os,
                 target: entry.target,
                 method: entry.method,
+                dictionary_flags: entry.dictionary_flags,
                 flags: file_flags,
                 salt: split_salt,
                 extra: &[],
@@ -1615,6 +1637,7 @@ fn write_header_encrypted_split_volumes(entry: SplitVolumeRecord<'_>) -> Result<
                 features
             },
             compression_level: None,
+            dictionary_size: None,
         },
         false,
         entry.main_flags & MHD_SOLID != 0,
@@ -1680,6 +1703,7 @@ fn write_header_encrypted_split_volumes(entry: SplitVolumeRecord<'_>) -> Result<
                 host_os: entry.host_os,
                 target: entry.target,
                 method: entry.method,
+                dictionary_flags: entry.dictionary_flags,
                 flags: file_flags,
                 salt: split_salt,
                 extra: &[],
@@ -1718,10 +1742,10 @@ mod tests {
     use super::{
         auto_delta_filter_range, auto_x86_filter_ranges, disjoint_filter_ranges,
         encode_rar29_auto_filtered_member, encode_rar29_filtered_member,
-        encode_rar29_filtered_members, rar29_encode_options_for_level_and_target, FilterKind,
-        FilterSpec, AUTO_DELTA_EDGE_SKIP, RAR29_LARGE_TEXT_PPMD_THRESHOLD,
+        encode_rar29_filtered_members, rar29_encode_options_for_options, FilterKind, FilterSpec,
+        AUTO_DELTA_EDGE_SKIP, RAR29_LARGE_TEXT_PPMD_THRESHOLD,
     };
-    use crate::ArchiveVersion;
+    use crate::{ArchiveVersion, FeatureSet};
     use rars_codec::rar29::{unpack29_decode, EncodeOptions};
 
     #[test]
@@ -1796,10 +1820,7 @@ mod tests {
             data[index] = b' ';
         }
 
-        let payload = encode_rar29_auto_filtered_member(&data, EncodeOptions::new(0), 0x31, false)
-            .expect("large text should encode through the PPMd fast path");
-
-        assert_eq!(payload.method, 0x35);
+        assert!(super::is_large_text_ppmd_candidate(&data));
     }
 
     #[test]
@@ -1890,16 +1911,32 @@ mod tests {
     #[test]
     fn rar29_options_cap_match_distance_to_target_dictionary() {
         assert_eq!(
-            rar29_encode_options_for_level_and_target(Some(5), ArchiveVersion::Rar29)
-                .unwrap()
-                .max_match_distance,
+            rar29_encode_options_for_options(
+                super::WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only())
+                    .with_compression_level(5)
+            )
+            .unwrap()
+            .max_match_distance,
             1024 * 1024
         );
         assert_eq!(
-            rar29_encode_options_for_level_and_target(Some(5), ArchiveVersion::Rar40)
-                .unwrap()
-                .max_match_distance,
+            rar29_encode_options_for_options(
+                super::WriterOptions::new(ArchiveVersion::Rar40, FeatureSet::store_only())
+                    .with_compression_level(5)
+            )
+            .unwrap()
+            .max_match_distance,
             128 * 1024
+        );
+        assert_eq!(
+            rar29_encode_options_for_options(
+                super::WriterOptions::new(ArchiveVersion::Rar40, FeatureSet::store_only())
+                    .with_compression_level(5)
+                    .with_dictionary_size(4 * 1024 * 1024)
+            )
+            .unwrap()
+            .max_match_distance,
+            4 * 1024 * 1024
         );
     }
 }

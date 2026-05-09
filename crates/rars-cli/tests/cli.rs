@@ -1122,11 +1122,12 @@ fn accepts_rar70_v1_dictionary_size() {
 }
 
 #[test]
-fn rejects_dictionary_size_for_legacy_writers() {
-    let dir = scratch("reject-legacy-dict-size");
+fn accepts_rar15_40_dictionary_size() {
+    let dir = scratch("accept-rar15-40-dict-size");
     let source = dir.join("source.txt");
-    let archive = dir.join("legacy.rar");
-    fs::write(&source, b"legacy dictionary size rejection\n").unwrap();
+    let archive = dir.join("dict.rar");
+    let payload = b"rar15-40 dictionary size accepted by cli\n".repeat(64);
+    fs::write(&source, &payload).unwrap();
 
     let create = rars()
         .args(["a", "--format", "rar40", "--dict-size", "512k"])
@@ -1135,8 +1136,29 @@ fn rejects_dictionary_size_for_legacy_writers() {
         .output()
         .unwrap();
 
+    assert!(create.status.success(), "stderr: {}", stderr(&create));
+    let parsed = rars::rar15_40::Archive::parse_path(&archive).unwrap();
+    let file = parsed.files().next().unwrap();
+    assert_eq!(file.block.flags & 0x00e0, 0x0060);
+    assert_archive_tests_and_extracts_file(&archive, None, "source.txt", &payload);
+}
+
+#[test]
+fn rejects_dictionary_size_for_rar13_writer() {
+    let dir = scratch("reject-rar13-dict-size");
+    let source = dir.join("source.txt");
+    let archive = dir.join("legacy.rar");
+    fs::write(&source, b"legacy dictionary size rejection\n").unwrap();
+
+    let create = rars()
+        .args(["a", "--format", "rar14", "--dict-size", "512k"])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+
     assert!(!create.status.success());
-    assert!(stderr(&create).contains("--dict-size is currently available only for RAR 5/7"));
+    assert!(stderr(&create).contains("--dict-size is available only for RAR 1.5+"));
 }
 
 #[test]

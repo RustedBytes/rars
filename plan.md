@@ -9,11 +9,11 @@
 
 ## Compression Work
 
-- Investigate degenerate recompression outliers before broader tuning:
-  `libarchive/test_read_format_rar_ppmd_lzss_conversion.rar` (RAR29, 104x),
-  and `libarchive/test_read_format_rar_multi_lzss_blocks.rar` (RAR29, 84x).
-  These are valid archives but likely hit a pathological fallback or block
-  policy path rather than ordinary compression-quality drift.
+- Keep an eye on RAR29 PPMd/LZSS conversion in wild recompression. The known
+  libarchive PPMd/LZSS and multi-LZSS outliers now recompress to valid,
+  compact archives after preserving RAR4 dictionary bits, preventing level-3
+  LZ recompress from silently switching to PPMd, and using period-compatible
+  PPMd LZ escape lengths.
 - Revisit RAR 1.4 old-distance token emission with DOS RAR 1.402 oracle
   coverage. The writer currently avoids that compatibility-sensitive
   vocabulary and relies on repeat-last, short-LZ, and long-LZ matches.
