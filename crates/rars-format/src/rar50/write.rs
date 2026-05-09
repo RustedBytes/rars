@@ -708,12 +708,7 @@ impl<'a> Rar50Writer<'a> {
                         )?
                     } else {
                         (
-                            encode_lz_member_with_options(
-                                entry.data,
-                                algorithm_version,
-                                encode_options,
-                            )
-                            .map_err(Error::from)?,
+                            encode_safe_lz_member(entry.data, algorithm_version, encode_options)?,
                             false,
                         )
                     };
@@ -1193,8 +1188,7 @@ fn write_compressed_volume_set_impl(
             )?
         } else {
             (
-                encode_lz_member_with_options(entry.data, algorithm_version, encode_options)
-                    .map_err(Error::from)?,
+                encode_safe_lz_member(entry.data, algorithm_version, encode_options)?,
                 false,
             )
         };
@@ -1406,8 +1400,7 @@ fn write_encrypted_compressed_volume_set_impl(
             )?
         } else {
             (
-                encode_lz_member_with_options(entry.data, algorithm_version, encode_options)
-                    .map_err(Error::from)?,
+                encode_safe_lz_member(entry.data, algorithm_version, encode_options)?,
                 false,
             )
         };
@@ -1559,9 +1552,7 @@ fn encode_member_with_filter_policy(
     options: EncodeOptions,
 ) -> Result<Vec<u8>> {
     match policy {
-        FilterPolicy::None => {
-            encode_lz_member_with_options(data, algorithm_version, options).map_err(Error::from)
-        }
+        FilterPolicy::None => encode_safe_lz_member(data, algorithm_version, options),
         FilterPolicy::Explicit(filter) => {
             encode_member_with_filter(data, algorithm_version, filter, options).map_err(Error::from)
         }
@@ -1588,10 +1579,10 @@ fn encode_with_solid_reset_policy(
     index: usize,
 ) -> Result<(Vec<u8>, bool)> {
     if index == 0 {
-        return encoder
+        let packed = encoder
             .encode_member(data, algorithm_version)
-            .map(|packed| (packed, false))
-            .map_err(Error::from);
+            .map_err(Error::from)?;
+        return Ok((packed, false));
     }
 
     let mut continued = encoder.clone();
@@ -1761,17 +1752,23 @@ fn compression_info(
         | solid_compression_flag(solid_continuation))
 }
 
+fn encode_safe_lz_member(
+    data: &[u8],
+    algorithm_version: u8,
+    options: EncodeOptions,
+) -> Result<Vec<u8>> {
+    encode_lz_member_with_options(data, algorithm_version, options).map_err(Error::from)
+}
+
 fn encode_member_with_auto_size_filter(
     data: &[u8],
     algorithm_version: u8,
     options: EncodeOptions,
 ) -> Result<Vec<u8>> {
     if data.is_empty() {
-        return encode_lz_member_with_options(data, algorithm_version, options)
-            .map_err(Error::from);
+        return encode_safe_lz_member(data, algorithm_version, options);
     }
-    let mut best =
-        encode_lz_member_with_options(data, algorithm_version, options).map_err(Error::from)?;
+    let mut best = encode_safe_lz_member(data, algorithm_version, options)?;
     let mut candidates = vec![FilterKind::E8, FilterKind::E8E9, FilterKind::Arm];
     for channels in 1..=4 {
         candidates.push(FilterKind::Delta { channels });

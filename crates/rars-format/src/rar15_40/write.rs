@@ -4,14 +4,17 @@ use crate::x86_filter_scan::auto_x86_filter_ranges;
 use rars_codec::rar13::{unpack15_encode, Unpack15Encoder};
 use rars_codec::rar20::{unpack20_encode_literals, Unpack20Encoder};
 use rars_codec::rar29::{
-    unpack29_encode_literals, unpack29_encode_literals_with_options, unpack29_encode_ppmd,
-    unpack29_encode_ppmd_with_filter, EncodeOptions as Rar29EncodeOptions, Unpack29Encoder,
+    unpack29_encode_literals, unpack29_encode_literals_with_options, unpack29_encode_ppmd_literals,
+    unpack29_encode_ppmd_literals_with_filter, EncodeOptions as Rar29EncodeOptions,
+    Unpack29Encoder,
 };
 pub use rars_codec::rar29::{Rar29FilterKind as FilterKind, Rar29FilterSpec as FilterSpec};
 
 const AUTO_RGB_WIDTHS: [usize; 4] = [24, 48, 96, 192];
 const AUTO_DELTA_EDGE_SKIP: usize = 64;
 const MIN_STORE_FALLBACK_SIZE: usize = 1024;
+const RAR29_LARGE_TEXT_PPMD_THRESHOLD: usize = 16 * 1024 * 1024;
+const RAR29_TEXT_SAMPLE_SIZE: usize = 8192;
 const RAR29_MAX_MATCH_CANDIDATES_DEFAULT: usize = 256;
 const RAR15_ALIGN_OVERFLOW: &str = "RAR 1.5 block size overflows usize";
 
@@ -145,11 +148,12 @@ fn encode_rar29_policy_filtered_payload(
             method: lz_method,
         }),
         FilterPolicy::Ppmd => Ok(EncodedPayload {
-            data: unpack29_encode_ppmd(data).map_err(Error::from)?,
+            data: unpack29_encode_ppmd_literals(data).map_err(Error::from)?,
             method: 0x35,
         }),
         FilterPolicy::PpmdFiltered(filter) => Ok(EncodedPayload {
-            data: unpack29_encode_ppmd_with_filter(data, filter.clone()).map_err(Error::from)?,
+            data: unpack29_encode_ppmd_literals_with_filter(data, filter.clone())
+                .map_err(Error::from)?,
             method: 0x35,
         }),
     }
@@ -237,6 +241,12 @@ fn encode_rar29_auto_filtered_member(
             method: 0x30,
         });
     }
+    if is_large_text_ppmd_candidate(data) {
+        return Ok(EncodedPayload {
+            data: unpack29_encode_ppmd_literals(data).map_err(Error::from)?,
+            method: 0x35,
+        });
+    }
     let mut best = EncodedPayload {
         data: unpack29_encode_literals_with_options(data, options).map_err(Error::from)?,
         method: lz_method,
@@ -244,7 +254,7 @@ fn encode_rar29_auto_filtered_member(
     let mut candidates = Vec::new();
     if include_ppmd {
         candidates.push(EncodedPayload {
-            data: unpack29_encode_ppmd(data).map_err(Error::from)?,
+            data: unpack29_encode_ppmd_literals(data).map_err(Error::from)?,
             method: 0x35,
         });
     }
@@ -363,6 +373,37 @@ fn encode_rar29_auto_filtered_member(
         });
     }
     Ok(best)
+}
+
+fn is_large_text_ppmd_candidate(data: &[u8]) -> bool {
+    data.len() >= RAR29_LARGE_TEXT_PPMD_THRESHOLD && is_text_ppmd_candidate(data)
+}
+
+fn is_text_ppmd_candidate(data: &[u8]) -> bool {
+    let mut printable = 0usize;
+    let mut nul = 0usize;
+    let mut total = 0usize;
+    for start in text_sample_offsets(data.len()) {
+        let end = start.saturating_add(RAR29_TEXT_SAMPLE_SIZE).min(data.len());
+        for &byte in &data[start..end] {
+            total += 1;
+            if byte == 0 {
+                nul += 1;
+            }
+            if byte.is_ascii_graphic() || matches!(byte, b'\n' | b'\r' | b'\t' | b' ') {
+                printable += 1;
+            }
+        }
+    }
+    total != 0 && nul * 100 <= total && printable * 100 >= total * 85
+}
+
+fn text_sample_offsets(len: usize) -> [usize; 3] {
+    [
+        0,
+        len.saturating_sub(RAR29_TEXT_SAMPLE_SIZE) / 2,
+        len.saturating_sub(RAR29_TEXT_SAMPLE_SIZE),
+    ]
 }
 
 fn auto_delta_filter_range(data: &[u8], channels: usize) -> Option<std::ops::Range<usize>> {
@@ -1674,7 +1715,7 @@ mod tests {
         auto_delta_filter_range, auto_x86_filter_ranges, disjoint_filter_ranges,
         encode_rar29_auto_filtered_member, encode_rar29_filtered_member,
         encode_rar29_filtered_members, rar29_encode_options_for_level_and_target, FilterKind,
-        FilterSpec, AUTO_DELTA_EDGE_SKIP,
+        FilterSpec, AUTO_DELTA_EDGE_SKIP, RAR29_LARGE_TEXT_PPMD_THRESHOLD,
     };
     use crate::ArchiveVersion;
     use rars_codec::rar29::{unpack29_decode, EncodeOptions};
@@ -1701,6 +1742,40 @@ mod tests {
         assert!(e8e9_ranges[0].contains(&12_000));
         assert!(e8e9_ranges.iter().any(|range| range.contains(&1024)));
         assert!(e8e9_ranges.iter().any(|range| range.contains(&12_000)));
+    }
+
+    #[test]
+    fn large_text_ppmd_candidate_accepts_html_like_payloads() {
+        let mut data = vec![b'a'; RAR29_LARGE_TEXT_PPMD_THRESHOLD + 1];
+        for index in (0..data.len()).step_by(79) {
+            data[index] = b'\n';
+        }
+        data[..32].copy_from_slice(b"<html><body>RAR PPMd text sample");
+
+        assert!(super::is_large_text_ppmd_candidate(&data));
+    }
+
+    #[test]
+    fn large_text_ppmd_candidate_rejects_binary_payloads() {
+        let mut data = vec![0u8; RAR29_LARGE_TEXT_PPMD_THRESHOLD + 1];
+        for index in (0..data.len()).step_by(257) {
+            data[index] = b'A';
+        }
+
+        assert!(!super::is_large_text_ppmd_candidate(&data));
+    }
+
+    #[test]
+    fn auto_filtered_rar29_large_text_uses_ppmd_before_lz_candidates() {
+        let mut data = vec![b'x'; RAR29_LARGE_TEXT_PPMD_THRESHOLD + 1];
+        for index in (0..data.len()).step_by(97) {
+            data[index] = b' ';
+        }
+
+        let payload = encode_rar29_auto_filtered_member(&data, EncodeOptions::new(0), 0x31, false)
+            .expect("large text should encode through the PPMd fast path");
+
+        assert_eq!(payload.method, 0x35);
     }
 
     #[test]

@@ -11,6 +11,10 @@
 
 ## Compression Work
 
+- Decide RAR29 writer compatibility policy for RARVM-filtered streams.
+  `sharpcompress/Rar.Audio_program.rar` still needs a period-oracle pass:
+  make the generated filter stream acceptable to WinRAR 3.x/4.x or keep it out
+  of default RAR29 writer policy.
 - Revisit RAR 1.4 old-distance token emission with DOS RAR 1.402 oracle
   coverage. The writer currently avoids that compatibility-sensitive
   vocabulary and relies on repeat-last, short-LZ, and long-LZ matches.

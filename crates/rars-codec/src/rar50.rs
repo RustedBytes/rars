@@ -18,6 +18,7 @@ const STREAM_HISTORY_LIMIT: usize = 64 * 1024 * 1024;
 const MAX_ENCODER_MATCH_OFFSET: usize = DEFAULT_DICTIONARY_SIZE;
 const MAX_ENCODER_MATCH_LENGTH: usize = 4096;
 const MAX_COMPRESSED_BLOCK_OUTPUT: usize = 4 * 1024 * 1024;
+const MAX_FILTER_BLOCK_LENGTH: usize = 0x3ffff;
 const MATCH_HASH_BUCKETS: usize = 4096;
 const MAX_MATCH_CANDIDATES: usize = 256;
 
@@ -643,7 +644,7 @@ fn filtered_lz_blocks(
         history[history.len().saturating_sub(options.max_match_distance)..].to_vec();
     let mut chunk_start = 0usize;
     while chunk_start < data.len() {
-        let chunk_end = (chunk_start + MAX_COMPRESSED_BLOCK_OUTPUT).min(data.len());
+        let chunk_end = (chunk_start + MAX_FILTER_BLOCK_LENGTH).min(data.len());
         let mut chunk = data[chunk_start..chunk_end].to_vec();
         let mut records = Vec::new();
         for filter in &filters {
@@ -940,7 +941,7 @@ impl Unpack50Encoder {
         algorithm_version: u8,
         filters: &[Rar50FilterSpec],
     ) -> Result<Vec<u8>> {
-        if input.len() > MAX_COMPRESSED_BLOCK_OUTPUT {
+        if input.len() > MAX_FILTER_BLOCK_LENGTH {
             let packed = filtered_lz_blocks(
                 input,
                 filters,
@@ -3225,6 +3226,39 @@ mod tests {
                 Rar50FilterSpec::range(Rar50FilterKind::E8, 0..data.len()),
             )
             .unwrap();
+        let mut cursor = std::io::Cursor::new(encoded.as_slice());
+        let first = read_compressed_block(&mut cursor).unwrap();
+        let mut blocks = 1usize;
+        let mut last_is_last = first.header.is_last;
+        while cursor.position() < encoded.len() as u64 {
+            last_is_last = read_compressed_block(&mut cursor).unwrap().header.is_last;
+            blocks += 1;
+        }
+        let mut decoder = Unpack50Decoder::new();
+
+        assert!(!first.header.is_last);
+        assert!(last_is_last);
+        assert!(blocks > 2);
+        assert_eq!(
+            decoder
+                .decode_member(&encoded, 0, data.len(), false, DecodeMode::Lz)
+                .unwrap(),
+            data
+        );
+    }
+
+    #[test]
+    fn filters_are_split_before_rar_reader_filter_limit() {
+        let data = vec![0u8; MAX_FILTER_BLOCK_LENGTH + 1];
+        let encoded = Unpack50Encoder::with_options(
+            EncodeOptions::new(0).with_max_match_distance(128 * 1024),
+        )
+        .encode_member_with_filter(
+            &data,
+            0,
+            Rar50FilterSpec::new(Rar50FilterKind::Delta { channels: 4 }),
+        )
+        .unwrap();
         let mut cursor = std::io::Cursor::new(encoded.as_slice());
         let first = read_compressed_block(&mut cursor).unwrap();
         let second = read_compressed_block(&mut cursor).unwrap();

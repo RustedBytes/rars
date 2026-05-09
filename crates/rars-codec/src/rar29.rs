@@ -134,6 +134,21 @@ pub fn unpack29_encode_ppmd(input: &[u8]) -> Result<Vec<u8>> {
 }
 
 pub fn unpack29_encode_ppmd_with_filter(input: &[u8], filter: Rar29FilterSpec) -> Result<Vec<u8>> {
+    encode_ppmd_filtered_member(input, filter, true)
+}
+
+pub fn unpack29_encode_ppmd_literals_with_filter(
+    input: &[u8],
+    filter: Rar29FilterSpec,
+) -> Result<Vec<u8>> {
+    encode_ppmd_filtered_member(input, filter, false)
+}
+
+fn encode_ppmd_filtered_member(
+    input: &[u8],
+    filter: Rar29FilterSpec,
+    lz_escapes: bool,
+) -> Result<Vec<u8>> {
     let filtered = filtered_member(input, &filter)?;
     let record = VmFilterRecord {
         block_start: filtered.block_start,
@@ -142,7 +157,7 @@ pub fn unpack29_encode_ppmd_with_filter(input: &[u8], filter: Rar29FilterSpec) -
         code: filtered.code,
     };
     let record = encode_vm_filter_record(record)?;
-    encode_ppmd_member(&filtered.data, true, Some(&record))
+    encode_ppmd_member(&filtered.data, lz_escapes, Some(&record))
 }
 
 fn filtered_members(input: &[u8], filters: &[Rar29FilterSpec]) -> Result<FilteredMembers> {
