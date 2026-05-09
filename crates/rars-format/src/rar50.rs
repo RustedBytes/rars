@@ -1341,7 +1341,6 @@ fn parse_block_header_bytes(
         archive_len,
         sfx_offset,
         header_crc,
-        header_size,
         header_total,
     )
 }
@@ -1395,7 +1394,6 @@ fn parse_encrypted_block_header_bytes(
         archive_len,
         sfx_offset,
         header_crc,
-        header_size,
         disk_header_len,
     )
 }
@@ -1430,7 +1428,6 @@ fn read_block_header_at(
         archive_len,
         sfx_offset,
         header_crc,
-        header_size,
         header_total,
     )
 }
@@ -1482,7 +1479,6 @@ fn read_encrypted_block_header_at(
         archive_len,
         sfx_offset,
         header_crc,
-        header_size,
         disk_header_len,
     )
 }
@@ -1493,22 +1489,11 @@ fn parse_block_header_image(
     archive_len: usize,
     sfx_offset: usize,
     header_crc: u32,
-    header_size: u64,
     disk_header_len: usize,
 ) -> Result<ParsedBlockHeader> {
-    let actual = crc32(&header[4..]);
-    if actual != header_crc {
-        return Err(Error::Crc32Mismatch {
-            expected: header_crc,
-            actual,
-        });
-    }
-
     let header_total = header.len();
     let (decoded_header_size, header_size_len) = read_vint_at(&header, 4, header_total)?;
-    if decoded_header_size != header_size {
-        return Err(Error::InvalidHeader("RAR 5 header size decode mismatch"));
-    }
+    validate_block_header_crc(&header, header_crc)?;
     let type_start = 4 + header_size_len;
     let mut reader = SliceReader::new(&header, type_start, header_total);
     let header_type = reader.read_vint()?;
@@ -1554,7 +1539,7 @@ fn parse_block_header_image(
     Ok(ParsedBlockHeader {
         block: BlockHeader {
             header_crc,
-            header_size,
+            header_size: decoded_header_size,
             header_type,
             flags,
             extra_area_size,
@@ -1568,6 +1553,14 @@ fn parse_block_header_image(
         extra_range: type_specific_end..header_total,
         next_offset,
     })
+}
+
+fn validate_block_header_crc(header: &[u8], expected: u32) -> Result<()> {
+    let actual = crc32(header.get(4..).ok_or(Error::TooShort)?);
+    if actual != expected {
+        return Err(Error::Crc32Mismatch { expected, actual });
+    }
+    Ok(())
 }
 
 struct HeaderReader<'a> {

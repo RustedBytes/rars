@@ -15,8 +15,6 @@
   range extends past the recovery block. Add an oracle fixture if possible;
   either repair those overlap sectors correctly or document the unsupported
   layout explicitly.
-- Simplify RAR5 file-backed header parsing so plaintext and encrypted header
-  paths do not duplicate the same CRC32 validation before `parse_block_header_image`.
 - Pin an exact RAR3 AES KDF vector for long password material that forces the
   custom SHA-1 block path, not just round-trip encryption/decryption.
 - Add adversarial PPMd fixtures as corpus bugs appear.
