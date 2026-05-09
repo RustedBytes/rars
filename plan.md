@@ -10,7 +10,6 @@
 ## Compression Work
 
 - Investigate degenerate recompression outliers before broader tuning:
-  `node-unrar-js/FolderTest.rar` (RAR20, 186x),
   `libarchive/test_read_format_rar_ppmd_lzss_conversion.rar` (RAR29, 104x),
   and `libarchive/test_read_format_rar_multi_lzss_blocks.rar` (RAR29, 84x).
   These are valid archives but likely hit a pathological fallback or block
