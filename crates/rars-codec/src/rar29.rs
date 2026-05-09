@@ -16,6 +16,10 @@ const MAX_HISTORY: usize = 4 * 1024 * 1024;
 const INPUT_CHUNK: usize = 64 * 1024;
 const STREAM_CHUNK: usize = 1024 * 1024;
 const MAX_VM_FILTER_BLOCK_SIZE: usize = 128 * 1024;
+// The standard AUDIO bytecode uses separate input/output regions inside RARVM
+// memory. Keep generated blocks below the overlap boundary accepted by period
+// decoders.
+const MAX_VM_AUDIO_FILTER_BLOCK_SIZE: usize = 120_000;
 const MAX_VM_GLOBAL_DATA: usize = 0x2000;
 const MAX_VM_CODE_SIZE: usize = 64 * 1024;
 const MAX_VM_PROGRAMS: usize = 1024;
@@ -187,18 +191,23 @@ fn split_large_filter(input_len: usize, filter: Rar29FilterSpec) -> Result<Vec<R
     if range.start >= range.end || range.end > input_len {
         return Err(Error::InvalidData("RAR 2.9 VM filter range is invalid"));
     }
-    if range.len() <= MAX_VM_FILTER_BLOCK_SIZE {
-        return Ok(vec![filter]);
-    }
 
     let chunk_size = match filter.kind {
-        Rar29FilterKind::Delta { channels } | Rar29FilterKind::Audio { channels } => {
+        Rar29FilterKind::Delta { channels } => {
             if channels == 0 || channels > MAX_VM_FILTER_BLOCK_SIZE {
                 return Err(Error::InvalidData(
                     "RAR 2.9 VM filter channel count is invalid",
                 ));
             }
             MAX_VM_FILTER_BLOCK_SIZE - (MAX_VM_FILTER_BLOCK_SIZE % channels)
+        }
+        Rar29FilterKind::Audio { channels } => {
+            if channels == 0 || channels > MAX_VM_AUDIO_FILTER_BLOCK_SIZE {
+                return Err(Error::InvalidData(
+                    "RAR 2.9 VM filter channel count is invalid",
+                ));
+            }
+            MAX_VM_AUDIO_FILTER_BLOCK_SIZE - (MAX_VM_AUDIO_FILTER_BLOCK_SIZE % channels)
         }
         Rar29FilterKind::Rgb { width, .. } => {
             if width == 0 || width > MAX_VM_FILTER_BLOCK_SIZE {
@@ -212,6 +221,15 @@ fn split_large_filter(input_len: usize, filter: Rar29FilterSpec) -> Result<Vec<R
             MAX_VM_FILTER_BLOCK_SIZE
         }
     };
+    if range.len() <= chunk_size {
+        return Ok(vec![filter]);
+    }
+    if matches!(filter.kind, Rar29FilterKind::Audio { .. }) {
+        return Ok(vec![Rar29FilterSpec::range(
+            filter.kind,
+            range.start..range.start + chunk_size,
+        )]);
+    }
     if chunk_size == 0 {
         return Err(Error::InvalidData(
             "RAR 2.9 VM filter chunk size is invalid",
@@ -696,7 +714,9 @@ fn encoded_filter_records(filters: &[OwnedVmFilterRecord]) -> Result<Vec<Vec<u8>
     let mut programs: Vec<&'static [u8]> = Vec::new();
     let mut records = Vec::with_capacity(filters.len());
     for filter in filters {
-        let existing = programs.iter().position(|&code| code == filter.code);
+        let existing = (filter.code != RAR3_AUDIO_FILTER_BYTECODE)
+            .then(|| programs.iter().position(|&code| code == filter.code))
+            .flatten();
         let (program_selector, include_code) = match existing {
             Some(index) => (
                 u32::try_from(index + 1)
@@ -2822,12 +2842,13 @@ mod tests {
 
     use super::{
         apply_standard_filter, audio_encode, best_match, encode_ppmd_tokens, encode_tokens,
-        insert_match_position, itanium_decode, itanium_encode, should_lazy_emit_literal,
-        split_large_filter, unpack29_decode, unpack29_encode_literals, unpack29_encode_ppmd,
-        unpack29_encode_ppmd_literals, unpack29_encode_ppmd_with_filter, BitWriter, EncodeOptions,
-        EncodeToken, EncoderMatchState, Error, Huffman, PpmdEncodeToken, Rar29FilterKind,
-        Rar29FilterSpec, Result, StandardFilter, Unpack29, Unpack29Encoder, VmFilter, VmProgram,
-        VmProgramKind, MAIN_COUNT, MATCH_HASH_BUCKETS, MAX_MATCH_CANDIDATES,
+        encoded_filter_records, insert_match_position, itanium_decode, itanium_encode,
+        should_lazy_emit_literal, split_large_filter, unpack29_decode, unpack29_encode_literals,
+        unpack29_encode_ppmd, unpack29_encode_ppmd_literals, unpack29_encode_ppmd_with_filter,
+        BitReader, BitWriter, EncodeOptions, EncodeToken, EncoderMatchState, Error, Huffman,
+        OwnedVmFilterRecord, PpmdEncodeToken, Rar29FilterKind, Rar29FilterSpec, Result,
+        StandardFilter, Unpack29, Unpack29Encoder, VmFilter, VmProgram, VmProgramKind, MAIN_COUNT,
+        MATCH_HASH_BUCKETS, MAX_MATCH_CANDIDATES, MAX_VM_AUDIO_FILTER_BLOCK_SIZE,
         MAX_VM_FILTER_BLOCK_SIZE, RAR3_AUDIO_FILTER_BYTECODE,
     };
 
@@ -3402,8 +3423,8 @@ mod tests {
     #[test]
     fn audio_filter_bytecode_matches_builtin_transform() {
         let channels = 2;
-        let input: Vec<u8> = (0..4096)
-            .map(|index| (index * 7 + index / channels) as u8)
+        let input: Vec<u8> = (0..MAX_VM_AUDIO_FILTER_BLOCK_SIZE)
+            .map(|index| (index * 7 + index / channels + index / 257) as u8)
             .collect();
         let encoded = audio_encode(&input, channels).unwrap();
         let program = Program::parse(RAR3_AUDIO_FILTER_BYTECODE).unwrap();
@@ -3421,20 +3442,37 @@ mod tests {
     }
 
     #[test]
-    fn large_audio_filters_are_split_to_rarvm_sized_blocks() {
+    fn large_audio_filters_are_capped_to_rarvm_safe_block() {
         let filters = split_large_filter(
             MAX_VM_FILTER_BLOCK_SIZE * 2 + 123,
             Rar29FilterSpec::whole(Rar29FilterKind::Audio { channels: 4 }),
         )
         .unwrap();
 
-        assert!(filters.len() > 1);
-        assert!(filters.iter().all(|filter| {
-            filter
-                .range
-                .as_ref()
-                .is_some_and(|range| range.len() <= MAX_VM_FILTER_BLOCK_SIZE)
-        }));
+        assert_eq!(filters.len(), 1);
+        assert_eq!(filters[0].range, Some(0..MAX_VM_AUDIO_FILTER_BLOCK_SIZE));
+    }
+
+    #[test]
+    fn segmented_audio_filters_redeclare_program_state() {
+        let filters = [
+            OwnedVmFilterRecord {
+                block_start: 0,
+                block_size: MAX_VM_AUDIO_FILTER_BLOCK_SIZE,
+                init_regs: vec![(0, 4)],
+                code: RAR3_AUDIO_FILTER_BYTECODE,
+            },
+            OwnedVmFilterRecord {
+                block_start: MAX_VM_AUDIO_FILTER_BLOCK_SIZE,
+                block_size: 4096,
+                init_regs: vec![(0, 4)],
+                code: RAR3_AUDIO_FILTER_BYTECODE,
+            },
+        ];
+        let records = encoded_filter_records(&filters).unwrap();
+
+        assert_vm_filter_declares_program(&records[0], 0);
+        assert_vm_filter_declares_program(&records[1], 2);
     }
 
     #[test]
@@ -3450,6 +3488,38 @@ mod tests {
         let decoded = unpack29_decode(&packed, input.len()).unwrap();
 
         assert_eq!(decoded, input);
+    }
+
+    fn assert_vm_filter_declares_program(record: &[u8], expected_selector: u32) {
+        let first = record[0];
+        assert_ne!(first & 0x80, 0);
+        assert_ne!(first & 0x20, 0);
+        assert_ne!(first & 0x10, 0);
+        let inline_len = match first & 7 {
+            len @ 0..=5 => len as usize + 1,
+            6 => usize::from(record[1]) + 7,
+            _ => u16::from_be_bytes([record[1], record[2]]) as usize,
+        };
+        let body_start = match first & 7 {
+            0..=5 => 1,
+            6 => 2,
+            _ => 3,
+        };
+        let body = &record[body_start..body_start + inline_len];
+        let mut bits = BitReader::from_bytes(body);
+        assert_eq!(bits.read_encoded_u32().unwrap(), expected_selector);
+        let _block_start = bits.read_encoded_u32().unwrap();
+        let _block_size = bits.read_encoded_u32().unwrap();
+        let mask = bits.read_bits(7).unwrap();
+        for index in 0..7 {
+            if mask & (1 << index) != 0 {
+                let _ = bits.read_encoded_u32().unwrap();
+            }
+        }
+        assert_eq!(
+            bits.read_encoded_u32().unwrap() as usize,
+            RAR3_AUDIO_FILTER_BYTECODE.len()
+        );
     }
 
     #[test]

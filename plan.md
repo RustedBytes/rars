@@ -11,10 +11,6 @@
 
 ## Compression Work
 
-- Decide RAR29 writer compatibility policy for RARVM-filtered streams.
-  `sharpcompress/Rar.Audio_program.rar` still needs a period-oracle pass:
-  make the generated filter stream acceptable to WinRAR 3.x/4.x or keep it out
-  of default RAR29 writer policy.
 - Revisit RAR 1.4 old-distance token emission with DOS RAR 1.402 oracle
   coverage. The writer currently avoids that compatibility-sensitive
   vocabulary and relies on repeat-last, short-LZ, and long-LZ matches.
@@ -30,6 +26,10 @@
   `m1..m4` LZ-filter auto policy are present.
   Remaining work is deeper filter-block boundary tuning and match-finder
   strategy against WinRAR 2.90/3.x/4.x oracles.
+- Implement proper multi-record RARVM scheduling for RAR29/RAR30/RAR40
+  writers. AUDIO currently filters only a single VM-safe prefix because
+  adjacent generated AUDIO records need correct program/global-state scheduling
+  to remain acceptable to period WinRAR decoders.
 - Reintroduce RAR29/RAR30/RAR40 frequency-weighted Huffman lengths only with
   independent decoder-oracle coverage. The current writer deliberately uses
   uniform LZ Huffman tables after weighted Main tables produced streams that
