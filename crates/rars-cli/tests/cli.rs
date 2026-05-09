@@ -1062,6 +1062,36 @@ fn accepts_rar50_dictionary_size() {
 }
 
 #[test]
+fn rar70_default_dictionary_keeps_rar5_compatible_algorithm() {
+    let dir = scratch("rar70-default-dict-uses-v0");
+    let source = dir.join("source.txt");
+    let archive = dir.join("dict.rar");
+    let payload = b"rar70 default dictionary remains rar5-compatible\n".repeat(64);
+    fs::write(&source, &payload).unwrap();
+
+    let create = rars()
+        .args(["a", "--format", "rar70"])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+
+    assert!(create.status.success(), "stderr: {}", stderr(&create));
+    let info = rars().arg("info").arg(&archive).output().unwrap();
+    assert!(info.status.success(), "stderr: {}", stderr(&info));
+    let info_stdout = stdout(&info);
+    assert!(info_stdout.contains("algo=0"));
+    assert!(info_stdout.contains("dict=131072"));
+
+    let parsed = rars::rar50::Archive::parse_path(&archive).unwrap();
+    let file = parsed.files().next().unwrap();
+    let compression_info = file.decoded_compression_info().unwrap();
+    assert_eq!(compression_info.algorithm_version, 0);
+    assert_eq!(compression_info.dictionary_size, 128 * 1024);
+    assert_archive_tests_and_extracts_file(&archive, None, "source.txt", &payload);
+}
+
+#[test]
 fn accepts_rar70_v1_dictionary_size() {
     let dir = scratch("accept-rar70-v1-dict-size");
     let source = dir.join("source.txt");

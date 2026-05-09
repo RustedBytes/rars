@@ -21,9 +21,12 @@
 - Add WinRAR 2.90 oracle coverage before enabling RAR20 repeat-distance,
   old-distance, short-distance, or audio writer tokens. The current writer
   deliberately emits only literals and fresh LZ matches.
-- Tune RAR29/RAR30/RAR40 lower-level policy: `m5` is already strong, but
-  `m1..m4` still need filter-block boundary tuning and match-finder strategy
-  work against WinRAR 2.90/3.x/4.x oracles.
+- Tune RAR29/RAR30/RAR40 lower-level policy: `m5` is already strong, and
+  cost-aware lazy lookahead, repeat-distance candidates, frequency-weighted
+  Huffman lengths, dictionary-bounded match search, multi-range x86 filtering,
+  ranged Delta filtering, and `m1..m4` LZ-filter auto policy are present.
+  Remaining work is deeper filter-block boundary tuning and match-finder
+  strategy against WinRAR 2.90/3.x/4.x oracles.
 - Improve RAR50/RAR70 ratio policy beyond the current baseline. Wire-level
   method stamping, stored fallback, lazy matching, state-aware match costs,
   repeat-distance candidates, bounded cost-aware lookahead, frequency-weighted

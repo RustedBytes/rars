@@ -3,6 +3,8 @@ use crate::ppmd::{PpmdByteReader, PpmdDecoder, PpmdEncoder};
 use crate::rarvm;
 use crate::{Error, Result};
 use rars_crc32::crc32;
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::io::{Read, Write};
 use std::ops::Range;
 
@@ -142,6 +144,35 @@ pub fn unpack29_encode_ppmd_with_filter(input: &[u8], filter: Rar29FilterSpec) -
     };
     let record = encode_vm_filter_record(record)?;
     encode_ppmd_member(&filtered.data, true, Some(&record))
+}
+
+fn filtered_members(input: &[u8], filters: &[Rar29FilterSpec]) -> Result<FilteredMembers> {
+    let mut data = input.to_vec();
+    let mut records = Vec::with_capacity(filters.len());
+    for filter in filters {
+        let filtered = filtered_member(input, filter)?;
+        let range = filtered.block_start..filtered.block_start + filtered.block_size;
+        data[range.clone()].copy_from_slice(&filtered.data[range]);
+        records.push(OwnedVmFilterRecord {
+            block_start: filtered.block_start,
+            block_size: filtered.block_size,
+            init_regs: filtered.init_regs,
+            code: filtered.code,
+        });
+    }
+    Ok(FilteredMembers { data, records })
+}
+
+struct FilteredMembers {
+    data: Vec<u8>,
+    records: Vec<OwnedVmFilterRecord>,
+}
+
+struct OwnedVmFilterRecord {
+    block_start: usize,
+    block_size: usize,
+    init_regs: Vec<(usize, u32)>,
+    code: &'static [u8],
 }
 
 fn encode_ppmd_member(
@@ -297,6 +328,8 @@ fn rar29_delta_messages() -> DeltaErrorMessages {
 pub struct EncodeOptions {
     pub max_match_candidates: usize,
     pub lazy_matching: bool,
+    pub lazy_lookahead: usize,
+    pub max_match_distance: usize,
 }
 
 impl EncodeOptions {
@@ -304,11 +337,23 @@ impl EncodeOptions {
         Self {
             max_match_candidates,
             lazy_matching: false,
+            lazy_lookahead: 1,
+            max_match_distance: MAX_ENCODER_MATCH_OFFSET,
         }
     }
 
     pub const fn with_lazy_matching(mut self, enabled: bool) -> Self {
         self.lazy_matching = enabled;
+        self
+    }
+
+    pub const fn with_lazy_lookahead(mut self, bytes: usize) -> Self {
+        self.lazy_lookahead = bytes;
+        self
+    }
+
+    pub const fn with_max_match_distance(mut self, distance: usize) -> Self {
+        self.max_match_distance = distance;
         self
     }
 }
@@ -361,6 +406,23 @@ impl Unpack29Encoder {
         Ok(packed)
     }
 
+    pub fn encode_member_with_filters(
+        &mut self,
+        input: &[u8],
+        filters: &[Rar29FilterSpec],
+    ) -> Result<Vec<u8>> {
+        let filtered = filtered_members(input, filters)?;
+        let records = encoded_filter_records(&filtered.records)?;
+        let packed = encode_member_with_initial_filters(
+            &filtered.data,
+            &self.history,
+            &records,
+            self.options,
+        )?;
+        self.remember(input);
+        Ok(packed)
+    }
+
     fn remember(&mut self, input: &[u8]) {
         self.history.extend_from_slice(input);
         let keep_from = self.history.len().saturating_sub(MAX_HISTORY);
@@ -379,7 +441,7 @@ fn encode_member_with_options(
     history: &[u8],
     options: EncodeOptions,
 ) -> Result<Vec<u8>> {
-    encode_member_inner(input, history, None, options)
+    encode_member_inner(input, history, &[], options)
 }
 
 fn encode_member_with_initial_filter(
@@ -388,76 +450,86 @@ fn encode_member_with_initial_filter(
     filter: VmFilterRecord<'_>,
     options: EncodeOptions,
 ) -> Result<Vec<u8>> {
-    encode_member_inner(input, history, Some(filter), options)
+    let records = vec![encode_vm_filter_record(filter)?];
+    encode_member_with_initial_filters(input, history, &records, options)
+}
+
+fn encode_member_with_initial_filters(
+    input: &[u8],
+    history: &[u8],
+    filters: &[Vec<u8>],
+    options: EncodeOptions,
+) -> Result<Vec<u8>> {
+    encode_member_inner(input, history, filters, options)
 }
 
 fn encode_member_inner(
     input: &[u8],
     history: &[u8],
-    initial_filter: Option<VmFilterRecord<'_>>,
+    initial_filters: &[Vec<u8>],
     options: EncodeOptions,
 ) -> Result<Vec<u8>> {
     let tokens = encode_tokens(input, history, options);
-    let mut used_main = [false; MAIN_COUNT];
-    let mut used_match_slots = [false; LENGTH_COUNT];
-    let mut used_low_offsets = [false; LOW_OFFSET_COUNT];
-    if initial_filter.is_some() {
-        used_main[257] = true;
-    }
+    let mut main_frequencies = vec![0usize; MAIN_COUNT];
+    let mut offset_frequencies = vec![0usize; OFFSET_COUNT];
+    let mut low_offset_frequencies = vec![0usize; LOW_OFFSET_COUNT];
+    let mut length_frequencies = vec![0usize; LENGTH_COUNT];
+    main_frequencies[257] += initial_filters.len();
+    let mut match_state = EncoderMatchState::default();
     for token in &tokens {
         match *token {
-            EncodeToken::Literal(byte) => used_main[byte as usize] = true,
+            EncodeToken::Literal(byte) => {
+                main_frequencies[byte as usize] += 1;
+            }
             EncodeToken::Match { length, offset } => {
-                let encoded_length = length.checked_sub(match_length_adjustment(offset)).ok_or(
-                    Error::InvalidData("RAR 2.9 adjusted match length underflows"),
-                )?;
-                let (slot, _) = length_slot_for_match(encoded_length)?;
-                let (offset_slot, offset_extra) = offset_slot_for_match(offset)?;
-                used_match_slots[slot] = true;
-                if offset_slot > 9 {
-                    used_low_offsets[offset_extra & 0x0f] = true;
+                match match_state.encode_match(length, offset)? {
+                    EncodedMatch::LastLengthRepeat => {
+                        main_frequencies[258] += 1;
+                    }
+                    EncodedMatch::RepeatOffset {
+                        index, length_slot, ..
+                    } => {
+                        main_frequencies[259 + index] += 1;
+                        length_frequencies[length_slot] += 1;
+                    }
+                    EncodedMatch::Fresh {
+                        length_slot,
+                        offset_slot,
+                        offset_extra,
+                        ..
+                    } => {
+                        main_frequencies[271 + length_slot] += 1;
+                        offset_frequencies[offset_slot] += 1;
+                        if offset_slot > 9 {
+                            low_offset_frequencies[offset_extra & 0x0f] += 1;
+                        }
+                    }
                 }
+                match_state.remember(length, offset);
             }
         }
     }
-    used_main[256] = true;
-    for (slot, used) in used_match_slots.iter().enumerate() {
-        if *used {
-            used_main[271 + slot] = true;
-        }
-    }
-    let main_symbol_count = used_main.iter().filter(|&&used| used).count();
-    let main_len = literal_code_len(main_symbol_count)?;
+    main_frequencies[256] += 1;
 
     let mut table_lengths = [0u8; TABLE_COUNT];
-    for (symbol, used) in used_main.iter().enumerate() {
-        if *used {
-            table_lengths[symbol] = main_len;
-        }
+    if low_offset_frequencies
+        .iter()
+        .all(|&frequency| frequency == 0)
+    {
+        low_offset_frequencies[0] = 1;
     }
-    let mut used_offset_slots = [false; OFFSET_COUNT];
-    for token in &tokens {
-        if let EncodeToken::Match { offset, .. } = *token {
-            let (slot, _) = offset_slot_for_match(offset)?;
-            used_offset_slots[slot] = true;
-        }
-    }
-    for (slot, used) in used_offset_slots.iter().enumerate() {
-        if *used {
-            table_lengths[MAIN_COUNT + slot] = main_len;
-        }
-    }
-    if used_low_offsets.iter().all(|&used| !used) {
-        used_low_offsets[0] = true;
-    }
-    for (symbol, used) in used_low_offsets.iter().enumerate() {
-        if *used {
-            table_lengths[MAIN_COUNT + OFFSET_COUNT + symbol] = main_len;
-        }
-    }
+    let main_lengths = huffman_lengths_for_frequencies(&main_frequencies);
+    let offset_lengths = huffman_lengths_for_frequencies(&offset_frequencies);
+    let low_offset_lengths = huffman_lengths_for_frequencies(&low_offset_frequencies);
+    let length_lengths = huffman_lengths_for_frequencies(&length_frequencies);
+    table_lengths[..MAIN_COUNT].copy_from_slice(&main_lengths);
+    table_lengths[MAIN_COUNT..MAIN_COUNT + OFFSET_COUNT].copy_from_slice(&offset_lengths);
+    table_lengths[MAIN_COUNT + OFFSET_COUNT..MAIN_COUNT + OFFSET_COUNT + LOW_OFFSET_COUNT]
+        .copy_from_slice(&low_offset_lengths);
+    table_lengths[MAIN_COUNT + OFFSET_COUNT + LOW_OFFSET_COUNT..].copy_from_slice(&length_lengths);
 
-    let level_symbols = encode_table_level_symbols(&table_lengths, main_len);
-    let level_lengths = level_code_lengths(main_len);
+    let level_symbols = encode_table_level_symbols(&table_lengths);
+    let level_lengths = level_code_lengths(&level_symbols);
     let level_codes = canonical_codes(&level_lengths)?;
     let main_codes = canonical_codes(&table_lengths[..MAIN_COUNT])?;
 
@@ -477,15 +549,18 @@ fn encode_member_inner(
     let low_offset_codes = canonical_codes(
         &table_lengths[MAIN_COUNT + OFFSET_COUNT..MAIN_COUNT + OFFSET_COUNT + LOW_OFFSET_COUNT],
     )?;
-    if let Some(filter) = initial_filter {
+    let length_codes =
+        canonical_codes(&table_lengths[MAIN_COUNT + OFFSET_COUNT + LOW_OFFSET_COUNT..])?;
+    for filter in initial_filters {
         let code = main_codes[257].ok_or(Error::InvalidData(
             "RAR 2.9 encoder missing VM filter Huffman code",
         ))?;
         bits.write_bits(code.code as u32, code.len);
-        for byte in encode_vm_filter_record(filter)? {
+        for &byte in filter {
             bits.write_bits(u32::from(byte), 8);
         }
     }
+    let mut match_state = EncoderMatchState::default();
     for token in tokens {
         match token {
             EncodeToken::Literal(byte) => {
@@ -495,34 +570,63 @@ fn encode_member_inner(
                 bits.write_bits(code.code as u32, code.len);
             }
             EncodeToken::Match { length, offset } => {
-                let encoded_length = length.checked_sub(match_length_adjustment(offset)).ok_or(
-                    Error::InvalidData("RAR 2.9 adjusted match length underflows"),
-                )?;
-                let (slot, extra) = length_slot_for_match(encoded_length)?;
-                let code = main_codes[271 + slot].ok_or(Error::InvalidData(
-                    "RAR 2.9 encoder missing match Huffman code",
-                ))?;
-                bits.write_bits(code.code as u32, code.len);
-                if LENGTH_BITS[slot] != 0 {
-                    bits.write_bits(extra as u32, LENGTH_BITS[slot]);
-                }
-                let (offset_slot, offset_extra) = offset_slot_for_match(offset)?;
-                let offset = offset_codes[offset_slot].ok_or(Error::InvalidData(
-                    "RAR 2.9 encoder missing offset Huffman code",
-                ))?;
-                bits.write_bits(offset.code as u32, offset.len);
-                if offset_slot > 9 {
-                    let offset_bits = OFFSET_BITS[offset_slot];
-                    if offset_bits > 4 {
-                        bits.write_bits((offset_extra >> 4) as u32, offset_bits - 4);
+                match match_state.encode_match(length, offset)? {
+                    EncodedMatch::LastLengthRepeat => {
+                        let code = main_codes[258].ok_or(Error::InvalidData(
+                            "RAR 2.9 encoder missing last-length repeat Huffman code",
+                        ))?;
+                        bits.write_bits(code.code as u32, code.len);
                     }
-                    let low_offset = low_offset_codes[offset_extra & 0x0f].ok_or(
-                        Error::InvalidData("RAR 2.9 encoder missing low-offset Huffman code"),
-                    )?;
-                    bits.write_bits(low_offset.code as u32, low_offset.len);
-                } else if OFFSET_BITS[offset_slot] != 0 {
-                    bits.write_bits(offset_extra as u32, OFFSET_BITS[offset_slot]);
+                    EncodedMatch::RepeatOffset {
+                        index,
+                        length_slot,
+                        length_extra,
+                    } => {
+                        let code = main_codes[259 + index].ok_or(Error::InvalidData(
+                            "RAR 2.9 encoder missing repeat-offset Huffman code",
+                        ))?;
+                        bits.write_bits(code.code as u32, code.len);
+                        let length_code = length_codes[length_slot].ok_or(Error::InvalidData(
+                            "RAR 2.9 encoder missing repeat length Huffman code",
+                        ))?;
+                        bits.write_bits(length_code.code as u32, length_code.len);
+                        if LENGTH_BITS[length_slot] != 0 {
+                            bits.write_bits(length_extra as u32, LENGTH_BITS[length_slot]);
+                        }
+                    }
+                    EncodedMatch::Fresh {
+                        length_slot,
+                        length_extra,
+                        offset_slot,
+                        offset_extra,
+                    } => {
+                        let code = main_codes[271 + length_slot].ok_or(Error::InvalidData(
+                            "RAR 2.9 encoder missing match Huffman code",
+                        ))?;
+                        bits.write_bits(code.code as u32, code.len);
+                        if LENGTH_BITS[length_slot] != 0 {
+                            bits.write_bits(length_extra as u32, LENGTH_BITS[length_slot]);
+                        }
+                        let offset = offset_codes[offset_slot].ok_or(Error::InvalidData(
+                            "RAR 2.9 encoder missing offset Huffman code",
+                        ))?;
+                        bits.write_bits(offset.code as u32, offset.len);
+                        if offset_slot > 9 {
+                            let offset_bits = OFFSET_BITS[offset_slot];
+                            if offset_bits > 4 {
+                                bits.write_bits((offset_extra >> 4) as u32, offset_bits - 4);
+                            }
+                            let low_offset =
+                                low_offset_codes[offset_extra & 0x0f].ok_or(Error::InvalidData(
+                                    "RAR 2.9 encoder missing low-offset Huffman code",
+                                ))?;
+                            bits.write_bits(low_offset.code as u32, low_offset.len);
+                        } else if OFFSET_BITS[offset_slot] != 0 {
+                            bits.write_bits(offset_extra as u32, OFFSET_BITS[offset_slot]);
+                        }
+                    }
                 }
+                match_state.remember(length, offset);
             }
         }
     }
@@ -534,6 +638,42 @@ fn encode_member_inner(
     Ok(bits.finish())
 }
 
+fn encoded_filter_records(filters: &[OwnedVmFilterRecord]) -> Result<Vec<Vec<u8>>> {
+    let mut programs: Vec<&'static [u8]> = Vec::new();
+    let mut records = Vec::with_capacity(filters.len());
+    for filter in filters {
+        let existing = programs.iter().position(|&code| code == filter.code);
+        let (program_selector, include_code) = match existing {
+            Some(index) => (
+                u32::try_from(index + 1)
+                    .map_err(|_| Error::InvalidData("RAR 2.9 VM program index overflows"))?,
+                false,
+            ),
+            None => {
+                let selector = if programs.is_empty() {
+                    0
+                } else {
+                    u32::try_from(programs.len() + 1)
+                        .map_err(|_| Error::InvalidData("RAR 2.9 VM program index overflows"))?
+                };
+                programs.push(filter.code);
+                (selector, true)
+            }
+        };
+        records.push(encode_vm_filter_record_inner(
+            VmFilterRecord {
+                block_start: filter.block_start,
+                block_size: filter.block_size,
+                init_regs: &filter.init_regs,
+                code: filter.code,
+            },
+            program_selector,
+            include_code,
+        )?);
+    }
+    Ok(records)
+}
+
 #[derive(Debug, Clone, Copy)]
 struct VmFilterRecord<'a> {
     block_start: usize,
@@ -543,15 +683,23 @@ struct VmFilterRecord<'a> {
 }
 
 fn encode_vm_filter_record(record: VmFilterRecord<'_>) -> Result<Vec<u8>> {
+    encode_vm_filter_record_inner(record, 0, true)
+}
+
+fn encode_vm_filter_record_inner(
+    record: VmFilterRecord<'_>,
+    program_selector: u32,
+    include_code: bool,
+) -> Result<Vec<u8>> {
     if record.block_size == 0 {
         return Err(Error::InvalidData("RAR 2.9 VM filter block is empty"));
     }
-    if record.code.is_empty() {
+    if include_code && record.code.is_empty() {
         return Err(Error::InvalidData("RAR 2.9 VM filter bytecode is empty"));
     }
 
     let mut body = BitWriter::default();
-    body.write_encoded_u32(0);
+    body.write_encoded_u32(program_selector);
     body.write_encoded_u32(
         u32::try_from(record.block_start)
             .map_err(|_| Error::InvalidData("RAR 2.9 VM block start overflows"))?,
@@ -577,12 +725,14 @@ fn encode_vm_filter_record(record: VmFilterRecord<'_>) -> Result<Vec<u8>> {
             }
         }
     }
-    body.write_encoded_u32(
-        u32::try_from(record.code.len())
-            .map_err(|_| Error::InvalidData("RAR 2.9 VM code size overflows"))?,
-    );
-    for &byte in record.code {
-        body.write_bits(u32::from(byte), 8);
+    if include_code {
+        body.write_encoded_u32(
+            u32::try_from(record.code.len())
+                .map_err(|_| Error::InvalidData("RAR 2.9 VM code size overflows"))?,
+        );
+        for &byte in record.code {
+            body.write_bits(u32::from(byte), 8);
+        }
     }
     let body = body.finish();
 
@@ -737,10 +887,85 @@ enum EncodeToken {
     Match { length: usize, offset: usize },
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct EncoderMatchState {
+    old_offsets: [usize; 4],
+    last_offset: usize,
+    last_length: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EncodedMatch {
+    LastLengthRepeat,
+    RepeatOffset {
+        index: usize,
+        length_slot: usize,
+        length_extra: usize,
+    },
+    Fresh {
+        length_slot: usize,
+        length_extra: usize,
+        offset_slot: usize,
+        offset_extra: usize,
+    },
+}
+
+impl EncoderMatchState {
+    fn encode_match(&self, length: usize, offset: usize) -> Result<EncodedMatch> {
+        if offset == self.last_offset && length == self.last_length && self.last_length != 0 {
+            return Ok(EncodedMatch::LastLengthRepeat);
+        }
+        if let Some(index) = self
+            .old_offsets
+            .iter()
+            .position(|&old_offset| old_offset == offset && old_offset != 0)
+        {
+            let (length_slot, length_extra) = length_slot_for_repeat_match(length)?;
+            return Ok(EncodedMatch::RepeatOffset {
+                index,
+                length_slot,
+                length_extra,
+            });
+        }
+        let encoded_length =
+            length
+                .checked_sub(match_length_adjustment(offset))
+                .ok_or(Error::InvalidData(
+                    "RAR 2.9 adjusted match length underflows",
+                ))?;
+        let (length_slot, length_extra) = length_slot_for_match(encoded_length)?;
+        let (offset_slot, offset_extra) = offset_slot_for_match(offset)?;
+        Ok(EncodedMatch::Fresh {
+            length_slot,
+            length_extra,
+            offset_slot,
+            offset_extra,
+        })
+    }
+
+    fn remember(&mut self, length: usize, offset: usize) {
+        if offset == self.last_offset && length == self.last_length && self.last_length != 0 {
+            return;
+        }
+        if let Some(index) = self
+            .old_offsets
+            .iter()
+            .position(|&old_offset| old_offset == offset)
+        {
+            self.old_offsets[..=index].rotate_right(1);
+        } else {
+            self.old_offsets.rotate_right(1);
+            self.old_offsets[0] = offset;
+        }
+        self.last_offset = offset;
+        self.last_length = length;
+    }
+}
+
 fn encode_tokens(input: &[u8], history: &[u8], options: EncodeOptions) -> Vec<EncodeToken> {
     let mut tokens = Vec::new();
     let mut buckets = vec![Vec::new(); MATCH_HASH_BUCKETS];
-    let history = &history[history.len().saturating_sub(MAX_ENCODER_MATCH_OFFSET)..];
+    let history = &history[history.len().saturating_sub(options.max_match_distance)..];
     let mut combined = Vec::with_capacity(history.len() + input.len());
     combined.extend_from_slice(history);
     combined.extend_from_slice(input);
@@ -750,15 +975,18 @@ fn encode_tokens(input: &[u8], history: &[u8], options: EncodeOptions) -> Vec<En
 
     let mut pos = history.len();
     let end = combined.len();
+    let mut state = EncoderMatchState::default();
     while pos < end {
-        if let Some((length, offset)) = best_match(&combined, pos, end, &buckets, options) {
-            if should_lazy_emit_literal(&combined, pos, end, &buckets, options, length) {
+        if let Some(candidate) = best_match(&combined, pos, end, &buckets, options, &state) {
+            if should_lazy_emit_literal(&combined, pos, end, &buckets, options, &state, candidate) {
                 tokens.push(EncodeToken::Literal(combined[pos]));
                 insert_match_position(&combined, pos, &mut buckets);
                 pos += 1;
                 continue;
             }
+            let MatchCandidate { length, offset, .. } = candidate;
             tokens.push(EncodeToken::Match { length, offset });
+            state.remember(length, offset);
             for history_pos in pos..pos + length {
                 insert_match_position(&combined, history_pos, &mut buckets);
             }
@@ -778,13 +1006,28 @@ fn should_lazy_emit_literal(
     end: usize,
     buckets: &[Vec<usize>],
     options: EncodeOptions,
-    current_length: usize,
+    state: &EncoderMatchState,
+    current: MatchCandidate,
 ) -> bool {
     if !options.lazy_matching || pos + 1 >= end {
         return false;
     }
-    best_match(input, pos + 1, end, buckets, options)
-        .is_some_and(|(next_length, _)| next_length > current_length + 1)
+    let lookahead = options.lazy_lookahead.max(1);
+    (1..=lookahead)
+        .take_while(|offset| pos + offset < end)
+        .any(|offset| {
+            best_match(input, pos + offset, end, buckets, options, state).is_some_and(|next| {
+                let skipped_literal_score = offset as isize * 8;
+                next.score > current.score + skipped_literal_score
+            })
+        })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MatchCandidate {
+    length: usize,
+    offset: usize,
+    score: isize,
 }
 
 fn encode_ppmd_tokens(input: &[u8], lz_escapes: bool) -> Vec<PpmdEncodeToken> {
@@ -887,8 +1130,9 @@ fn best_match(
     end: usize,
     buckets: &[Vec<usize>],
     options: EncodeOptions,
-) -> Option<(usize, usize)> {
-    let max_offset = pos.min(MAX_ENCODER_MATCH_OFFSET);
+    state: &EncoderMatchState,
+) -> Option<MatchCandidate> {
+    let max_offset = pos.min(options.max_match_distance);
     let max_length = (end - pos).min(MAX_ENCODER_MATCH_LENGTH);
     if options.max_match_candidates == 0
         || max_offset == 0
@@ -900,6 +1144,13 @@ fn best_match(
     let bucket = &buckets[match_hash(input, pos)];
     let mut best = None;
     let mut checked = 0usize;
+    for offset in state.old_offsets {
+        if offset == 0 || offset > max_offset {
+            continue;
+        }
+        let length = match_length(input, pos, offset, max_length);
+        consider_match_candidate(&mut best, state, length, offset);
+    }
     for &candidate in bucket.iter().rev() {
         if candidate >= pos {
             continue;
@@ -909,26 +1160,71 @@ fn best_match(
             break;
         }
         checked += 1;
-        let mut length = 0usize;
-        while length < max_length && input[pos + length] == input[pos + length - offset] {
-            length += 1;
-        }
-        let encodable = length >= 4 + match_length_adjustment(offset);
-        if encodable
-            && best.is_none_or(|(best_length, best_offset)| {
-                length > best_length || (length == best_length && offset < best_offset)
-            })
-        {
-            best = Some((length, offset));
-            if length == max_length {
-                break;
-            }
+        let length = match_length(input, pos, offset, max_length);
+        consider_match_candidate(&mut best, state, length, offset);
+        if best.is_some_and(|candidate| candidate.length == max_length) {
+            break;
         }
         if checked >= options.max_match_candidates {
             break;
         }
     }
     best
+}
+
+fn match_length(input: &[u8], pos: usize, offset: usize, max_length: usize) -> usize {
+    let mut length = 0usize;
+    while length < max_length && input[pos + length] == input[pos + length - offset] {
+        length += 1;
+    }
+    length
+}
+
+fn consider_match_candidate(
+    best: &mut Option<MatchCandidate>,
+    state: &EncoderMatchState,
+    length: usize,
+    offset: usize,
+) {
+    if length < 4 {
+        return;
+    }
+    let Ok(cost) = estimated_match_cost(state, length, offset) else {
+        return;
+    };
+    let score = (length as isize * 8) - cost as isize;
+    let candidate = MatchCandidate {
+        length,
+        offset,
+        score,
+    };
+    if best.is_none_or(|best| {
+        candidate.score > best.score
+            || (candidate.score == best.score
+                && (candidate.length > best.length
+                    || (candidate.length == best.length && candidate.offset < best.offset)))
+    }) {
+        *best = Some(candidate);
+    }
+}
+
+fn estimated_match_cost(state: &EncoderMatchState, length: usize, offset: usize) -> Result<usize> {
+    match state.encode_match(length, offset)? {
+        EncodedMatch::LastLengthRepeat => Ok(2),
+        EncodedMatch::RepeatOffset { length_slot, .. } => {
+            Ok(5 + usize::from(LENGTH_BITS[length_slot]))
+        }
+        EncodedMatch::Fresh {
+            length_slot,
+            offset_slot,
+            ..
+        } => {
+            let low_offset_cost = usize::from(offset_slot > 9) * 4;
+            Ok(8 + usize::from(LENGTH_BITS[length_slot])
+                + usize::from(OFFSET_BITS[offset_slot])
+                + low_offset_cost)
+        }
+    }
 }
 
 fn match_length_adjustment(offset: usize) -> usize {
@@ -967,6 +1263,30 @@ fn length_slot_for_match(length: usize) -> Result<(usize, usize)> {
     Err(Error::InvalidData("RAR 2.9 match length is too long"))
 }
 
+fn length_slot_for_repeat_match(length: usize) -> Result<(usize, usize)> {
+    if length < 2 {
+        return Err(Error::InvalidData(
+            "RAR 2.9 repeat match length is too short",
+        ));
+    }
+    let adjusted = length - 2;
+    for (slot, &base) in LENGTH_BASES.iter().enumerate() {
+        let extra_bits = LENGTH_BITS[slot];
+        let max = base
+            + if extra_bits == 0 {
+                0
+            } else {
+                (1usize << extra_bits) - 1
+            };
+        if adjusted >= base && adjusted <= max {
+            return Ok((slot, adjusted - base));
+        }
+    }
+    Err(Error::InvalidData(
+        "RAR 2.9 repeat match length is too long",
+    ))
+}
+
 fn offset_slot_for_match(offset: usize) -> Result<(usize, usize)> {
     if offset == 0 {
         return Err(Error::InvalidData("RAR 2.9 match offset is zero"));
@@ -987,25 +1307,89 @@ fn offset_slot_for_match(offset: usize) -> Result<(usize, usize)> {
     Err(Error::InvalidData("RAR 2.9 match offset is too large"))
 }
 
-fn literal_code_len(symbol_count: usize) -> Result<u8> {
-    if symbol_count == 0 {
-        return Err(Error::InvalidData("RAR 2.9 encoder has no main symbols"));
+fn huffman_bits_for_symbol_count(count: usize) -> u8 {
+    match count {
+        0 | 1 => 1,
+        _ => usize::BITS as u8 - (count - 1).leading_zeros() as u8,
     }
-    let len = usize::BITS - (symbol_count - 1).leading_zeros();
-    u8::try_from(len.max(1)).map_err(|_| Error::InvalidData("RAR 2.9 literal table is too large"))
 }
 
-fn encode_table_level_symbols(lengths: &[u8; TABLE_COUNT], main_len: u8) -> Vec<usize> {
-    lengths
+fn huffman_lengths_for_frequencies(frequencies: &[usize]) -> Vec<u8> {
+    let used_count = frequencies
         .iter()
-        .map(|&len| if len == 0 { 0 } else { main_len as usize })
+        .filter(|&&frequency| frequency != 0)
+        .count();
+    if used_count <= 1 {
+        return uniform_huffman_lengths_for_frequencies(frequencies);
+    }
+
+    let mut lengths = vec![0u8; frequencies.len()];
+    let mut heap = BinaryHeap::new();
+    let mut order = 0usize;
+    for (symbol, &frequency) in frequencies.iter().enumerate() {
+        if frequency == 0 {
+            continue;
+        }
+        heap.push(Reverse((frequency, order, vec![symbol])));
+        order += 1;
+    }
+
+    while heap.len() > 1 {
+        let Reverse((left_frequency, _, mut left_symbols)) = heap
+            .pop()
+            .expect("frequency heap has a left node while merging");
+        let Reverse((right_frequency, _, mut right_symbols)) = heap
+            .pop()
+            .expect("frequency heap has a right node while merging");
+        for &symbol in left_symbols.iter().chain(right_symbols.iter()) {
+            lengths[symbol] += 1;
+        }
+        left_symbols.append(&mut right_symbols);
+        heap.push(Reverse((
+            left_frequency.saturating_add(right_frequency),
+            order,
+            left_symbols,
+        )));
+        order += 1;
+    }
+
+    if lengths.iter().any(|&length| length > 15) {
+        uniform_huffman_lengths_for_frequencies(frequencies)
+    } else {
+        lengths
+    }
+}
+
+fn uniform_huffman_lengths_for_frequencies(frequencies: &[usize]) -> Vec<u8> {
+    let used_count = frequencies
+        .iter()
+        .filter(|&&frequency| frequency != 0)
+        .count();
+    let uniform_length = huffman_bits_for_symbol_count(used_count);
+    frequencies
+        .iter()
+        .map(|&frequency| if frequency == 0 { 0 } else { uniform_length })
         .collect()
 }
 
-fn level_code_lengths(main_len: u8) -> [u8; LEVEL_COUNT] {
+fn encode_table_level_symbols(lengths: &[u8; TABLE_COUNT]) -> Vec<usize> {
+    lengths.iter().map(|&len| len as usize).collect()
+}
+
+fn level_code_lengths(symbols: &[usize]) -> [u8; LEVEL_COUNT] {
     let mut lengths = [0u8; LEVEL_COUNT];
-    lengths[0] = 1;
-    lengths[main_len as usize] = 1;
+    let used_count = symbols
+        .iter()
+        .copied()
+        .filter(|&symbol| symbol < 16)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    let len = huffman_bits_for_symbol_count(used_count);
+    for &symbol in symbols {
+        if symbol < 16 {
+            lengths[symbol] = len;
+        }
+    }
     lengths
 }
 
@@ -2429,12 +2813,13 @@ mod tests {
     use std::ops::Range;
 
     use super::{
-        apply_standard_filter, encode_ppmd_tokens, encode_tokens, itanium_decode, itanium_encode,
-        unpack29_decode, unpack29_encode_literals, unpack29_encode_ppmd,
+        apply_standard_filter, best_match, encode_ppmd_tokens, encode_tokens,
+        huffman_lengths_for_frequencies, insert_match_position, itanium_decode, itanium_encode,
+        should_lazy_emit_literal, unpack29_decode, unpack29_encode_literals, unpack29_encode_ppmd,
         unpack29_encode_ppmd_literals, unpack29_encode_ppmd_with_filter, BitWriter, EncodeOptions,
-        EncodeToken, Error, Huffman, PpmdEncodeToken, Rar29FilterKind, Rar29FilterSpec, Result,
-        StandardFilter, Unpack29, Unpack29Encoder, VmFilter, VmProgram, VmProgramKind,
-        MAX_MATCH_CANDIDATES,
+        EncodeToken, EncoderMatchState, Error, Huffman, PpmdEncodeToken, Rar29FilterKind,
+        Rar29FilterSpec, Result, StandardFilter, Unpack29, Unpack29Encoder, VmFilter, VmProgram,
+        VmProgramKind, MAIN_COUNT, MATCH_HASH_BUCKETS, MAX_MATCH_CANDIDATES,
     };
 
     const COMPRESSED_TEXT: &[u8] = &[
@@ -2490,6 +2875,236 @@ mod tests {
             .iter()
             .any(|token| matches!(token, EncodeToken::Match { length, .. } if *length > 8)));
         assert_eq!(unpack29_decode(&packed, input.len()).unwrap(), input);
+    }
+
+    #[test]
+    fn lazy_lz_parser_uses_match_cost_not_only_match_length() {
+        let pos = 300_000usize;
+        let mut input = vec![0u8; pos + 16];
+        input[100..106].copy_from_slice(b"BCDEFG");
+        input[106] = b'!';
+        input[pos - 10..pos - 5].copy_from_slice(b"ABCD!");
+        input[pos..pos + 7].copy_from_slice(b"ABCDEFG");
+        let mut buckets = vec![Vec::new(); MATCH_HASH_BUCKETS];
+        insert_match_position(&input, 100, &mut buckets);
+        insert_match_position(&input, pos - 10, &mut buckets);
+
+        let current = best_match(
+            &input,
+            pos,
+            input.len(),
+            &buckets,
+            EncodeOptions::new(MAX_MATCH_CANDIDATES),
+            &EncoderMatchState::default(),
+        )
+        .unwrap();
+        let next = best_match(
+            &input,
+            pos + 1,
+            input.len(),
+            &buckets,
+            EncodeOptions::new(MAX_MATCH_CANDIDATES),
+            &EncoderMatchState::default(),
+        )
+        .unwrap();
+
+        assert_eq!(current.length, 4);
+        assert_eq!(current.offset, 10);
+        assert_eq!(next.length, 6);
+        assert!(next.offset > 0x40000);
+        assert!(!should_lazy_emit_literal(
+            &input,
+            pos,
+            input.len(),
+            &buckets,
+            EncodeOptions::new(MAX_MATCH_CANDIDATES).with_lazy_matching(true),
+            &EncoderMatchState::default(),
+            current,
+        ));
+    }
+
+    #[test]
+    fn lazy_lz_parser_uses_bounded_cost_lookahead() {
+        let pos = 160;
+        let mut input: Vec<u8> = (0..240u16)
+            .map(|value| value.wrapping_mul(91) as u8)
+            .collect();
+        input[pos - 30..pos - 22].copy_from_slice(b"ABCDEFGH");
+        input[pos - 80..pos - 64].copy_from_slice(b"CDEFGHIJKLMNOPQR");
+        input[pos..pos + 18].copy_from_slice(b"ABCDEFGHIJKLMNOPQR");
+
+        let mut buckets = vec![Vec::new(); MATCH_HASH_BUCKETS];
+        for candidate in 0..pos {
+            insert_match_position(&input, candidate, &mut buckets);
+        }
+        let current = best_match(
+            &input,
+            pos,
+            input.len(),
+            &buckets,
+            EncodeOptions::default(),
+            &EncoderMatchState::default(),
+        )
+        .unwrap();
+
+        assert_eq!((current.length, current.offset), (8, 30));
+        assert!(!should_lazy_emit_literal(
+            &input,
+            pos,
+            input.len(),
+            &buckets,
+            EncodeOptions::default()
+                .with_lazy_matching(true)
+                .with_lazy_lookahead(1),
+            &EncoderMatchState::default(),
+            current,
+        ));
+        assert!(should_lazy_emit_literal(
+            &input,
+            pos,
+            input.len(),
+            &buckets,
+            EncodeOptions::default()
+                .with_lazy_matching(true)
+                .with_lazy_lookahead(2),
+            &EncoderMatchState::default(),
+            current,
+        ));
+    }
+
+    #[test]
+    fn match_state_encodes_last_length_and_repeat_offset_symbols() {
+        let mut state = EncoderMatchState::default();
+        assert!(matches!(
+            state.encode_match(12, 64).unwrap(),
+            super::EncodedMatch::Fresh { .. }
+        ));
+        state.remember(12, 64);
+
+        assert_eq!(
+            state.encode_match(12, 64).unwrap(),
+            super::EncodedMatch::LastLengthRepeat
+        );
+        assert!(matches!(
+            state.encode_match(9, 64).unwrap(),
+            super::EncodedMatch::RepeatOffset { index: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn cost_aware_match_selection_prefers_repeat_offset_token() {
+        let pos = 600usize;
+        let mut input: Vec<u8> = (0..pos + 16)
+            .map(|index| (index as u8).wrapping_mul(37))
+            .collect();
+        input[pos - 30..pos - 22].copy_from_slice(b"ABCDEFGH");
+        input[pos - 512..pos - 503].copy_from_slice(b"ABCDEFGHI");
+        input[pos..pos + 9].copy_from_slice(b"ABCDEFGHI");
+        input[pos - 22] = 0x11;
+        input[pos - 503] = 0x22;
+        input[pos + 9] = 0x33;
+        let mut buckets = vec![Vec::new(); MATCH_HASH_BUCKETS];
+        insert_match_position(&input, pos - 30, &mut buckets);
+        insert_match_position(&input, pos - 512, &mut buckets);
+
+        let fresh = best_match(
+            &input,
+            pos,
+            input.len(),
+            &buckets,
+            EncodeOptions::default(),
+            &EncoderMatchState::default(),
+        )
+        .unwrap();
+        let repeat = best_match(
+            &input,
+            pos,
+            input.len(),
+            &buckets,
+            EncodeOptions::default(),
+            &EncoderMatchState {
+                old_offsets: [30, 0, 0, 0],
+                last_offset: 0,
+                last_length: 0,
+            },
+        )
+        .unwrap();
+
+        assert_eq!((fresh.length, fresh.offset), (9, 512));
+        assert_eq!((repeat.length, repeat.offset), (8, 30));
+    }
+
+    #[test]
+    fn match_finder_respects_configured_maximum_distance() {
+        let phrase = b"rar29 bounded dictionary phrase";
+        let mut input = Vec::new();
+        input.extend_from_slice(phrase);
+        input.extend(std::iter::repeat_n(0u8, 256 * 1024));
+        input.extend_from_slice(phrase);
+
+        let bounded = encode_tokens(
+            &input,
+            &[],
+            EncodeOptions::new(MAX_MATCH_CANDIDATES).with_max_match_distance(128 * 1024),
+        );
+        let unbounded = encode_tokens(
+            &input,
+            &[],
+            EncodeOptions::new(MAX_MATCH_CANDIDATES).with_max_match_distance(1024 * 1024),
+        );
+
+        assert!(!bounded.iter().any(
+            |token| matches!(token, EncodeToken::Match { offset, .. } if *offset > 128 * 1024)
+        ));
+        assert!(unbounded.iter().any(
+            |token| matches!(token, EncodeToken::Match { offset, .. } if *offset > 128 * 1024)
+        ));
+    }
+
+    #[test]
+    fn frequency_weighted_huffman_lengths_shorten_common_rar29_symbols() {
+        let mut frequencies = vec![1usize; 8];
+        frequencies[3] = 128;
+
+        let lengths = huffman_lengths_for_frequencies(&frequencies);
+
+        assert!(lengths[3] < lengths[0]);
+    }
+
+    #[test]
+    fn lz_encoder_uses_frequency_weighted_rar29_huffman_lengths() {
+        let mut input = Vec::new();
+        for byte in 0u8..120 {
+            input.push(b'A');
+            input.push(byte);
+        }
+        let tokens = encode_tokens(&input, &[], EncodeOptions::default());
+        let mut frequencies = vec![0usize; MAIN_COUNT];
+        frequencies[256] = 1;
+        for token in tokens {
+            match token {
+                EncodeToken::Literal(byte) => frequencies[byte as usize] += 1,
+                EncodeToken::Match { length, offset } => {
+                    let encoded_length = length - super::match_length_adjustment(offset);
+                    let (slot, _) = super::length_slot_for_match(encoded_length).unwrap();
+                    frequencies[271 + slot] += 1;
+                }
+            }
+        }
+
+        let lengths = huffman_lengths_for_frequencies(&frequencies);
+
+        assert!(lengths[b'A' as usize] > 0);
+        assert!(lengths[256] > 0);
+        assert!(lengths[b'A' as usize] < lengths[256]);
+        assert_eq!(
+            unpack29_decode(
+                &Unpack29Encoder::new().encode_member(&input).unwrap(),
+                input.len()
+            )
+            .unwrap(),
+            input
+        );
     }
 
     #[test]
@@ -2581,6 +3196,18 @@ mod tests {
         Unpack29Encoder::new().encode_member_with_filter(input, Rar29FilterSpec::range(kind, range))
     }
 
+    fn encode_with_filter_ranges(
+        input: &[u8],
+        kind: Rar29FilterKind,
+        ranges: Vec<Range<usize>>,
+    ) -> Result<Vec<u8>> {
+        let filters: Vec<_> = ranges
+            .into_iter()
+            .map(|range| Rar29FilterSpec::range(kind, range))
+            .collect();
+        Unpack29Encoder::new().encode_member_with_filters(input, &filters)
+    }
+
     #[test]
     fn encoder_emits_rar29_offset_one_matches_for_repeated_bytes() {
         let input = b"Z".repeat(1024);
@@ -2628,7 +3255,10 @@ mod tests {
         let packed = encode_with_filter(&input, Rar29FilterKind::E8).unwrap();
         let decoded = unpack29_decode(&packed, input.len()).unwrap();
 
-        assert_eq!(decoded, input);
+        assert!(
+            decoded == input,
+            "RAR 2.9 multi-filter E8 round-trip failed"
+        );
     }
 
     #[test]
@@ -2648,6 +3278,28 @@ mod tests {
         let end = input.len();
         input.extend_from_slice(b" suffix data that should also remain raw");
         let packed = encode_with_filter_range(&input, Rar29FilterKind::E8, start..end).unwrap();
+        let decoded = unpack29_decode(&packed, input.len()).unwrap();
+
+        assert_eq!(decoded, input);
+    }
+
+    #[test]
+    fn encoder_emits_rar29_multiple_e8_vm_filter_records() {
+        let mut input = vec![0x41u8; 80_000];
+        for cluster_start in [8_000, 60_000] {
+            for index in 0..8 {
+                let pos = cluster_start + index * 64;
+                input[pos] = 0xe8;
+                input[pos + 1..pos + 5].copy_from_slice(&(0x2000u32 + index as u32).to_le_bytes());
+            }
+        }
+
+        let packed = encode_with_filter_ranges(
+            &input,
+            Rar29FilterKind::E8,
+            vec![8_000..8_512, 60_000..60_512],
+        )
+        .unwrap();
         let decoded = unpack29_decode(&packed, input.len()).unwrap();
 
         assert_eq!(decoded, input);

@@ -10,6 +10,7 @@ use rars_codec::rar29::{
 pub use rars_codec::rar29::{Rar29FilterKind as FilterKind, Rar29FilterSpec as FilterSpec};
 
 const AUTO_RGB_WIDTHS: [usize; 4] = [24, 48, 96, 192];
+const AUTO_DELTA_EDGE_SKIP: usize = 64;
 const MIN_STORE_FALLBACK_SIZE: usize = 1024;
 const RAR29_MAX_MATCH_CANDIDATES_DEFAULT: usize = 256;
 const RAR15_ALIGN_OVERFLOW: &str = "RAR 1.5 block size overflows usize";
@@ -116,7 +117,8 @@ pub fn write_rar29_compressed_archive_with_filter_policy(
     policy: FilterPolicy,
 ) -> Result<Vec<u8>> {
     validate_rar29_filter_policy(&policy)?;
-    let encode_options = rar29_encode_options_for_level(options.compression_level)?;
+    let encode_options =
+        rar29_encode_options_for_level_and_target(options.compression_level, options.target)?;
     let lz_method = compression_method_for_level(options)?;
     write_rar29_filtered_archive(entries, options, |entry| {
         encode_rar29_policy_filtered_payload(entry.data, &policy, encode_options, lz_method)
@@ -137,7 +139,7 @@ fn encode_rar29_policy_filtered_payload(
     }
     match policy {
         FilterPolicy::Lz => encode_rar29_lz_member(data, options, lz_method),
-        FilterPolicy::Auto => encode_rar29_auto_filtered_member(data, options, lz_method),
+        FilterPolicy::Auto => encode_rar29_auto_filtered_member(data, options, lz_method, true),
         FilterPolicy::Explicit(filter) => Ok(EncodedPayload {
             data: encode_rar29_filtered_member(data, filter.clone(), options)?,
             method: lz_method,
@@ -213,20 +215,34 @@ fn encode_rar29_filtered_member(
         .map_err(Error::from)
 }
 
+fn encode_rar29_filtered_members(
+    data: &[u8],
+    filters: &[FilterSpec],
+    options: Rar29EncodeOptions,
+) -> Result<Vec<u8>> {
+    Unpack29Encoder::with_options(options)
+        .encode_member_with_filters(data, filters)
+        .map_err(Error::from)
+}
+
 fn encode_rar29_auto_filtered_member(
     data: &[u8],
     options: Rar29EncodeOptions,
     lz_method: u8,
+    include_ppmd: bool,
 ) -> Result<EncodedPayload> {
     let mut best = EncodedPayload {
         data: unpack29_encode_literals_with_options(data, options).map_err(Error::from)?,
         method: lz_method,
     };
-    let mut candidates = vec![
-        EncodedPayload {
+    let mut candidates = Vec::new();
+    if include_ppmd {
+        candidates.push(EncodedPayload {
             data: unpack29_encode_ppmd(data).map_err(Error::from)?,
             method: 0x35,
-        },
+        });
+    }
+    candidates.extend([
         EncodedPayload {
             data: encode_rar29_filtered_member(data, FilterSpec::whole(FilterKind::E8), options)?,
             method: lz_method,
@@ -243,7 +259,7 @@ fn encode_rar29_auto_filtered_member(
             )?,
             method: lz_method,
         },
-    ];
+    ]);
     for range in auto_x86_filter_ranges(data, false) {
         candidates.push(EncodedPayload {
             data: encode_rar29_filtered_member(
@@ -254,6 +270,17 @@ fn encode_rar29_auto_filtered_member(
             method: lz_method,
         });
     }
+    let e8_ranges = disjoint_filter_ranges(auto_x86_filter_ranges(data, false));
+    if e8_ranges.len() > 1 {
+        let filters: Vec<_> = e8_ranges
+            .into_iter()
+            .map(|range| FilterSpec::range(FilterKind::E8, range))
+            .collect();
+        candidates.push(EncodedPayload {
+            data: encode_rar29_filtered_members(data, &filters, options)?,
+            method: lz_method,
+        });
+    }
     for range in auto_x86_filter_ranges(data, true) {
         candidates.push(EncodedPayload {
             data: encode_rar29_filtered_member(
@@ -261,6 +288,17 @@ fn encode_rar29_auto_filtered_member(
                 FilterSpec::range(FilterKind::E8E9, range),
                 options,
             )?,
+            method: lz_method,
+        });
+    }
+    let e8e9_ranges = disjoint_filter_ranges(auto_x86_filter_ranges(data, true));
+    if e8e9_ranges.len() > 1 {
+        let filters: Vec<_> = e8e9_ranges
+            .into_iter()
+            .map(|range| FilterSpec::range(FilterKind::E8E9, range))
+            .collect();
+        candidates.push(EncodedPayload {
+            data: encode_rar29_filtered_members(data, &filters, options)?,
             method: lz_method,
         });
     }
@@ -281,6 +319,18 @@ fn encode_rar29_auto_filtered_member(
             )?,
             method: lz_method,
         });
+    }
+    for channels in 1..=4 {
+        if let Some(range) = auto_delta_filter_range(data, channels) {
+            candidates.push(EncodedPayload {
+                data: encode_rar29_filtered_member(
+                    data,
+                    FilterSpec::range(FilterKind::Delta { channels }, range),
+                    options,
+                )?,
+                method: lz_method,
+            });
+        }
     }
     for width in AUTO_RGB_WIDTHS {
         if data.len() >= width {
@@ -307,6 +357,29 @@ fn encode_rar29_auto_filtered_member(
         });
     }
     Ok(best)
+}
+
+fn auto_delta_filter_range(data: &[u8], channels: usize) -> Option<std::ops::Range<usize>> {
+    if channels == 0 || data.len() <= AUTO_DELTA_EDGE_SKIP * 2 + channels * 8 {
+        return None;
+    }
+    let start = AUTO_DELTA_EDGE_SKIP;
+    let end = data.len() - AUTO_DELTA_EDGE_SKIP;
+    let aligned_start = start + ((channels - start % channels) % channels);
+    let aligned_end = end - (end - aligned_start) % channels;
+    (aligned_start + channels * 8 <= aligned_end).then_some(aligned_start..aligned_end)
+}
+
+fn disjoint_filter_ranges(mut ranges: Vec<std::ops::Range<usize>>) -> Vec<std::ops::Range<usize>> {
+    ranges.sort_by_key(|range| (range.start, range.end));
+    let mut disjoint: Vec<std::ops::Range<usize>> = Vec::new();
+    for range in ranges {
+        if disjoint.last().is_some_and(|last| range.start < last.end) {
+            continue;
+        }
+        disjoint.push(range);
+    }
+    disjoint
 }
 
 fn write_rar29_filtered_archive(
@@ -674,7 +747,25 @@ fn rar29_encode_options_for_level(level: Option<u8>) -> Result<Rar29EncodeOption
             ))
         }
     };
-    Ok(Rar29EncodeOptions::new(candidates).with_lazy_matching(level >= 4))
+    Ok(Rar29EncodeOptions::new(candidates)
+        .with_lazy_matching(level >= 4)
+        .with_lazy_lookahead(if level >= 5 { 4 } else { 1 }))
+}
+
+fn rar29_encode_options_for_level_and_target(
+    level: Option<u8>,
+    target: ArchiveVersion,
+) -> Result<Rar29EncodeOptions> {
+    Ok(rar29_encode_options_for_level(level)?
+        .with_max_match_distance(rar29_default_dictionary_size(target)))
+}
+
+fn rar29_default_dictionary_size(target: ArchiveVersion) -> usize {
+    match target {
+        ArchiveVersion::Rar29 => 1024 * 1024,
+        ArchiveVersion::Rar30 | ArchiveVersion::Rar40 => 128 * 1024,
+        _ => 64 * 1024,
+    }
 }
 
 fn compression_method_for_level(options: WriterOptions) -> Result<u8> {
@@ -719,9 +810,11 @@ impl SolidEncoder {
         let encoder = match target {
             ArchiveVersion::Rar15 => Self::Rar15(Box::new(Unpack15Encoder::new())),
             ArchiveVersion::Rar20 => Self::Rar20(Unpack20Encoder::new()),
-            ArchiveVersion::Rar29 | ArchiveVersion::Rar30 | ArchiveVersion::Rar40 => Self::Rar29(
-                Unpack29Encoder::with_options(rar29_encode_options_for_level(compression_level)?),
-            ),
+            ArchiveVersion::Rar29 | ArchiveVersion::Rar30 | ArchiveVersion::Rar40 => {
+                Self::Rar29(Unpack29Encoder::with_options(
+                    rar29_encode_options_for_level_and_target(compression_level, target)?,
+                ))
+            }
             _ => return Ok(None),
         };
         Ok(Some(encoder))
@@ -752,12 +845,13 @@ fn encode_or_store_payload(
             ArchiveVersion::Rar29 | ArchiveVersion::Rar30 | ArchiveVersion::Rar40
         )
     {
-        let encode_options = rar29_encode_options_for_level(options.compression_level)?;
+        let encode_options =
+            rar29_encode_options_for_level_and_target(options.compression_level, options.target)?;
         let lz_method = compression_method_for_level(options)?;
         if matches!(options.compression_level, Some(1..=4)) {
-            return encode_rar29_lz_member(data, encode_options, lz_method);
+            return encode_rar29_auto_filtered_member(data, encode_options, lz_method, false);
         }
-        return encode_rar29_auto_filtered_member(data, encode_options, lz_method);
+        return encode_rar29_auto_filtered_member(data, encode_options, lz_method, true);
     }
     let compressed = encode_compressed_payload(data, target, solid_encoder.as_mut())?;
     if should_store_fallback(target, solid, data.len(), compressed.len()) {
@@ -1570,7 +1664,14 @@ fn write_comment_header_crc(out: &mut [u8], start: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::auto_x86_filter_ranges;
+    use super::{
+        auto_delta_filter_range, auto_x86_filter_ranges, disjoint_filter_ranges,
+        encode_rar29_auto_filtered_member, encode_rar29_filtered_member,
+        encode_rar29_filtered_members, rar29_encode_options_for_level_and_target, FilterKind,
+        FilterSpec, AUTO_DELTA_EDGE_SKIP,
+    };
+    use crate::ArchiveVersion;
+    use rars_codec::rar29::{unpack29_decode, EncodeOptions};
 
     #[test]
     fn auto_x86_filter_ranges_select_dense_opcode_clusters() {
@@ -1612,5 +1713,88 @@ mod tests {
         assert!(ranges[0].contains(&14_064));
         assert!(ranges.iter().any(|range| range.contains(&4096)));
         assert!(ranges.iter().any(|range| range.contains(&14_064)));
+    }
+
+    #[test]
+    fn auto_x86_policy_can_encode_multiple_disjoint_ranges() {
+        let mut data = vec![0x41u8; 80_000];
+        for cluster_start in [8_000, 60_000] {
+            for index in 0..8 {
+                let pos = cluster_start + index * 64;
+                data[pos] = 0xe8;
+                data[pos + 1..pos + 5].copy_from_slice(&(0x2000u32 + index as u32).to_le_bytes());
+            }
+        }
+        let filters: Vec<_> = disjoint_filter_ranges(auto_x86_filter_ranges(&data, false))
+            .into_iter()
+            .map(|range| FilterSpec::range(FilterKind::E8, range))
+            .collect();
+
+        let packed = encode_rar29_filtered_members(&data, &filters, EncodeOptions::default())
+            .expect("multi-filter RAR29 member should encode");
+        let decoded = unpack29_decode(&packed, data.len()).unwrap();
+
+        assert_eq!(filters.len(), 2);
+        assert!(
+            decoded == data,
+            "RAR 2.9 auto multi-filter E8 round-trip failed"
+        );
+    }
+
+    #[test]
+    fn auto_delta_filter_range_skips_container_edges_and_aligns_channels() {
+        let data = vec![0u8; 512];
+
+        let range = auto_delta_filter_range(&data, 3).unwrap();
+
+        assert!(range.start >= AUTO_DELTA_EDGE_SKIP);
+        assert!(range.end <= data.len() - AUTO_DELTA_EDGE_SKIP);
+        assert_eq!(range.start % 3, 0);
+        assert_eq!((range.end - range.start) % 3, 0);
+        assert!(auto_delta_filter_range(&data[..80], 3).is_none());
+    }
+
+    #[test]
+    fn auto_filter_policy_considers_ranged_delta_candidates() {
+        let mut data = vec![0x55u8; AUTO_DELTA_EDGE_SKIP];
+        for sample in 0..256u16 {
+            let left = sample as u8;
+            let right = left.wrapping_add(1);
+            data.extend_from_slice(&[left, right]);
+        }
+        data.extend(std::iter::repeat_n(0xaa, AUTO_DELTA_EDGE_SKIP));
+        let options = EncodeOptions::default();
+
+        let plain =
+            rars_codec::rar29::unpack29_encode_literals_with_options(&data, options).unwrap();
+        let ranged = encode_rar29_filtered_member(
+            &data,
+            FilterSpec::range(
+                FilterKind::Delta { channels: 2 },
+                auto_delta_filter_range(&data, 2).unwrap(),
+            ),
+            options,
+        )
+        .unwrap();
+        let auto = encode_rar29_auto_filtered_member(&data, options, 0x35, true).unwrap();
+
+        assert!(ranged.len() < plain.len());
+        assert!(auto.data.len() <= ranged.len());
+    }
+
+    #[test]
+    fn rar29_options_cap_match_distance_to_target_dictionary() {
+        assert_eq!(
+            rar29_encode_options_for_level_and_target(Some(5), ArchiveVersion::Rar29)
+                .unwrap()
+                .max_match_distance,
+            1024 * 1024
+        );
+        assert_eq!(
+            rar29_encode_options_for_level_and_target(Some(5), ArchiveVersion::Rar40)
+                .unwrap()
+                .max_match_distance,
+            128 * 1024
+        );
     }
 }

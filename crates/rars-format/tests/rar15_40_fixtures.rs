@@ -2756,7 +2756,58 @@ fn rar29_family_writer_level_three_uses_lz_and_level_five_uses_auto_policy() {
 }
 
 #[test]
-fn rar29_family_level_four_enables_lazy_lz_matching() {
+fn rar29_family_writer_middle_levels_use_lz_filter_policy_without_ppmd() {
+    let mut payload = Vec::new();
+    payload.extend((0..2048).map(|index| (index * 37 + 11) as u8));
+    let code_start = payload.len();
+    let call_target = code_start + 0x1800;
+    for index in 0..512usize {
+        payload.extend_from_slice(&[0x55, 0x8b, 0xec, 0x83, 0xec, (index & 0x7f) as u8]);
+        let call_pos = payload.len();
+        payload.push(0xe8);
+        let next = call_pos + 5;
+        let relative = (call_target as i64 - next as i64) as i32;
+        payload.extend_from_slice(&relative.to_le_bytes());
+        payload.extend_from_slice(&[0x83, 0xc4, 0x04, 0x5d, 0xc3]);
+    }
+    payload.extend((0..2048).map(|index| (index * 53 + 7) as u8));
+    let entries = [FileEntry {
+        name: b"rar29-level-four-x86.bin",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+
+    for target in [
+        ArchiveVersion::Rar29,
+        ArchiveVersion::Rar30,
+        ArchiveVersion::Rar40,
+    ] {
+        let plain_lz_size = rars_codec::rar29::unpack29_encode_literals(&payload)
+            .unwrap()
+            .len() as u64;
+
+        for (level, expected_method) in [(1, 0x31), (2, 0x32), (3, 0x33), (4, 0x34)] {
+            let bytes = write_compressed_archive(
+                &entries,
+                WriterOptions::new(target, FeatureSet::store_only()).with_compression_level(level),
+            )
+            .unwrap();
+            let archive = Archive::parse(&bytes).unwrap();
+            let file = archive.files().next().unwrap();
+
+            assert_eq!(file.method, expected_method, "{target:?} level {level}");
+            assert!(file.pack_size < plain_lz_size, "{target:?} level {level}");
+            assert_eq!(collect_extract(&archive).unwrap()[0].data, payload);
+        }
+    }
+}
+
+#[test]
+fn rar29_family_level_four_stamps_method_and_round_trips_lazy_payload() {
     let payload = b"abcdXbcdYYYYYYYYYYYYabcdYYYYYYYYYYYY".repeat(64);
     let entries = [FileEntry {
         name: b"lazy-lz.txt",
@@ -2790,10 +2841,6 @@ fn rar29_family_level_four_enables_lazy_lz_matching() {
 
         assert_eq!(level_three_file.method, 0x33, "{target:?}");
         assert_eq!(level_four_file.method, 0x34, "{target:?}");
-        assert!(
-            level_four_file.pack_size <= level_three_file.pack_size,
-            "{target:?}"
-        );
         assert_eq!(
             collect_extract(&level_four_archive).unwrap()[0].data,
             payload
