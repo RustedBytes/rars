@@ -30,7 +30,7 @@ rars test archive.rar
 rars x archive.rar out/
 ```
 
-Create archives by selecting the target RAR generation explicitly:
+Create archives with specific RAR generation:
 
 ```sh
 rars a --format rar29 archive.rar files...
