@@ -9,6 +9,12 @@
 
 ## Compression Work
 
+- Investigate degenerate recompression outliers before broader tuning:
+  `node-unrar-js/FolderTest.rar` (RAR20, 186x),
+  `libarchive/test_read_format_rar_ppmd_lzss_conversion.rar` (RAR29, 104x),
+  and `libarchive/test_read_format_rar_multi_lzss_blocks.rar` (RAR29, 84x).
+  These are valid archives but likely hit a pathological fallback or block
+  policy path rather than ordinary compression-quality drift.
 - Revisit RAR 1.4 old-distance token emission with DOS RAR 1.402 oracle
   coverage. The writer currently avoids that compatibility-sensitive
   vocabulary and relies on repeat-last, short-LZ, and long-LZ matches.
@@ -25,9 +31,12 @@
   Remaining work is deeper filter-block boundary tuning and match-finder
   strategy against WinRAR 2.90/3.x/4.x oracles.
 - Implement proper multi-record RARVM scheduling for RAR29/RAR30/RAR40
-  writers. AUDIO currently filters only a single VM-safe prefix because
-  adjacent generated AUDIO records need correct program/global-state scheduling
-  to remain acceptable to period WinRAR decoders.
+  writers. DELTA and AUDIO currently filter only a single VM-safe prefix
+  because larger or adjacent generated records need correct program/global-state
+  scheduling to remain acceptable to period WinRAR decoders.
+- Improve RAR20/RAR29 audio-filter policy after correctness is stable. Wild
+  recompression still shows sizable audio-filter regressions, especially the
+  Unpack20/Unpack30 `BoatModernEnglish` fixtures.
 - Reintroduce RAR29/RAR30/RAR40 frequency-weighted Huffman lengths only with
   independent decoder-oracle coverage. The current writer deliberately uses
   uniform LZ Huffman tables after weighted Main tables produced streams that

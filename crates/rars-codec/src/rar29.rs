@@ -19,6 +19,7 @@ const MAX_VM_FILTER_BLOCK_SIZE: usize = 128 * 1024;
 // The standard AUDIO bytecode uses separate input/output regions inside RARVM
 // memory. Keep generated blocks below the overlap boundary accepted by period
 // decoders.
+const MAX_VM_DELTA_FILTER_BLOCK_SIZE: usize = 120_000;
 const MAX_VM_AUDIO_FILTER_BLOCK_SIZE: usize = 120_000;
 const MAX_VM_GLOBAL_DATA: usize = 0x2000;
 const MAX_VM_CODE_SIZE: usize = 64 * 1024;
@@ -194,12 +195,12 @@ fn split_large_filter(input_len: usize, filter: Rar29FilterSpec) -> Result<Vec<R
 
     let chunk_size = match filter.kind {
         Rar29FilterKind::Delta { channels } => {
-            if channels == 0 || channels > MAX_VM_FILTER_BLOCK_SIZE {
+            if channels == 0 || channels > MAX_VM_DELTA_FILTER_BLOCK_SIZE {
                 return Err(Error::InvalidData(
                     "RAR 2.9 VM filter channel count is invalid",
                 ));
             }
-            MAX_VM_FILTER_BLOCK_SIZE - (MAX_VM_FILTER_BLOCK_SIZE % channels)
+            MAX_VM_DELTA_FILTER_BLOCK_SIZE - (MAX_VM_DELTA_FILTER_BLOCK_SIZE % channels)
         }
         Rar29FilterKind::Audio { channels } => {
             if channels == 0 || channels > MAX_VM_AUDIO_FILTER_BLOCK_SIZE {
@@ -224,7 +225,10 @@ fn split_large_filter(input_len: usize, filter: Rar29FilterSpec) -> Result<Vec<R
     if range.len() <= chunk_size {
         return Ok(vec![filter]);
     }
-    if matches!(filter.kind, Rar29FilterKind::Audio { .. }) {
+    if matches!(
+        filter.kind,
+        Rar29FilterKind::Delta { .. } | Rar29FilterKind::Audio { .. }
+    ) {
         return Ok(vec![Rar29FilterSpec::range(
             filter.kind,
             range.start..range.start + chunk_size,
@@ -2849,7 +2853,7 @@ mod tests {
         OwnedVmFilterRecord, PpmdEncodeToken, Rar29FilterKind, Rar29FilterSpec, Result,
         StandardFilter, Unpack29, Unpack29Encoder, VmFilter, VmProgram, VmProgramKind, MAIN_COUNT,
         MATCH_HASH_BUCKETS, MAX_MATCH_CANDIDATES, MAX_VM_AUDIO_FILTER_BLOCK_SIZE,
-        MAX_VM_FILTER_BLOCK_SIZE, RAR3_AUDIO_FILTER_BYTECODE,
+        MAX_VM_DELTA_FILTER_BLOCK_SIZE, MAX_VM_FILTER_BLOCK_SIZE, RAR3_AUDIO_FILTER_BYTECODE,
     };
 
     const COMPRESSED_TEXT: &[u8] = &[
@@ -3451,6 +3455,18 @@ mod tests {
 
         assert_eq!(filters.len(), 1);
         assert_eq!(filters[0].range, Some(0..MAX_VM_AUDIO_FILTER_BLOCK_SIZE));
+    }
+
+    #[test]
+    fn large_delta_filters_are_capped_to_one_rarvm_safe_block() {
+        let filters = split_large_filter(
+            MAX_VM_FILTER_BLOCK_SIZE * 2 + 123,
+            Rar29FilterSpec::whole(Rar29FilterKind::Delta { channels: 4 }),
+        )
+        .unwrap();
+
+        assert_eq!(filters.len(), 1);
+        assert_eq!(filters[0].range, Some(0..MAX_VM_DELTA_FILTER_BLOCK_SIZE));
     }
 
     #[test]

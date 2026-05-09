@@ -252,7 +252,7 @@ fn encode_rar29_auto_filtered_member(
         method: lz_method,
     };
     let mut candidates = Vec::new();
-    if include_ppmd {
+    if include_ppmd && is_auto_ppmd_candidate(data) {
         candidates.push(EncodedPayload {
             data: unpack29_encode_ppmd_literals(data).map_err(Error::from)?,
             method: 0x35,
@@ -377,6 +377,10 @@ fn encode_rar29_auto_filtered_member(
 
 fn is_large_text_ppmd_candidate(data: &[u8]) -> bool {
     data.len() >= RAR29_LARGE_TEXT_PPMD_THRESHOLD && is_text_ppmd_candidate(data)
+}
+
+fn is_auto_ppmd_candidate(data: &[u8]) -> bool {
+    is_text_ppmd_candidate(data)
 }
 
 fn is_text_ppmd_candidate(data: &[u8]) -> bool {
@@ -1763,6 +1767,26 @@ mod tests {
         }
 
         assert!(!super::is_large_text_ppmd_candidate(&data));
+    }
+
+    #[test]
+    fn auto_ppmd_candidate_rejects_binary_audio_shaped_payloads() {
+        let mut data = Vec::new();
+        for sample in 0..8192i16 {
+            let left = sample.wrapping_mul(5).wrapping_add(200);
+            let right = sample.wrapping_mul(7).wrapping_sub(200);
+            data.extend_from_slice(&left.to_le_bytes());
+            data.extend_from_slice(&right.to_le_bytes());
+        }
+
+        assert!(!super::is_auto_ppmd_candidate(&data));
+    }
+
+    #[test]
+    fn auto_ppmd_candidate_accepts_text_payloads() {
+        let data = b"fn main() {\n    println!(\"rar ppmd text candidate\");\n}\n".repeat(256);
+
+        assert!(super::is_auto_ppmd_candidate(&data));
     }
 
     #[test]
