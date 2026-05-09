@@ -20,8 +20,6 @@
 - Add adversarial PPMd fixtures as corpus bugs appear.
 - Harden PPMd hostile-state arithmetic paths (`make_esc_freq`,
   `update_model`) with focused malformed-stream regression tests.
-- Tighten RAR5 REV metadata parsing so table reads use checked slice helpers
-  and forward-compatible trailing bytes are accepted deliberately.
 - Add fuzz targets for `Archive::parse`, `Unpack29::decode_member`, PPMd decode,
   and RARVM program parsing/execution.
 
