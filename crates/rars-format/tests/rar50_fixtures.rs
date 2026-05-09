@@ -3863,6 +3863,18 @@ fn extracts_wild_rar50_solid_archives_with_redundant_filter_records() {
 }
 
 #[test]
+fn extracts_wild_rar50_loop_fixture_as_empty_file() {
+    let bytes = std::fs::read(fixture("wild/libarchive_loop_bug.rar")).unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+
+    let extracted = collect_extract(&archive).unwrap();
+
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].name, b"a");
+    assert!(extracted[0].data.is_empty());
+}
+
+#[test]
 fn parses_rar50_multifile_stored_archive() {
     let bytes = std::fs::read(fixture("multifile.rar")).unwrap();
     let archive = Archive::parse(&bytes).unwrap();

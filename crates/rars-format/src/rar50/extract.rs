@@ -264,16 +264,27 @@ impl FileHeader {
             Error::InvalidHeader("RAR 5 dictionary size overflows host address size")
         })?;
         let output_size = checked_unpacked_size(self.unpacked_size)?;
-        decoder
-            .decode_member_with_dictionary(
-                packed,
-                info.algorithm_version,
-                output_size,
-                dictionary_size,
-                info.solid,
-                mode,
-            )
-            .map_err(Error::from)
+        match decoder.decode_member_with_dictionary(
+            packed,
+            info.algorithm_version,
+            output_size,
+            dictionary_size,
+            info.solid,
+            mode,
+        ) {
+            Ok(data) => Ok(data),
+            Err(error) => self.map_truncated_unverified_payload(error),
+        }
+    }
+
+    fn map_truncated_unverified_payload(&self, error: rars_codec::Error) -> Result<Vec<u8>> {
+        if matches!(error, rars_codec::Error::NeedMoreInput)
+            && self.data_crc32.is_none()
+            && self.hash.is_none()
+        {
+            return Ok(Vec::new());
+        }
+        Err(Error::from(error))
     }
 
     fn stream_packed_with_decoder<R: Read>(
