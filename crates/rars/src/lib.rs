@@ -919,10 +919,11 @@ mod tests {
     fn archive_members_exposes_rar15_40_common_metadata_and_typed_detail() {
         let mut features = FeatureSet::store_only();
         features.file_comment = true;
+        let payload = b"rar 2.9 member metadata ".repeat(32);
         let bytes = rar15_40::write_compressed_archive(
             &[rar15_40::FileEntry {
                 name: b"newer.txt",
-                data: b"rar 2.9 member metadata",
+                data: &payload,
                 file_time: 0x0102_0304,
                 file_attr: 0x20,
                 host_os: 2,
@@ -939,10 +940,7 @@ mod tests {
         assert_eq!(members.len(), 1);
         assert_eq!(members[0].meta.family, ArchiveFamily::Rar15To40);
         assert_eq!(members[0].meta.name, b"newer.txt");
-        assert_eq!(
-            members[0].meta.unpacked_size,
-            b"rar 2.9 member metadata".len() as u64
-        );
+        assert_eq!(members[0].meta.unpacked_size, payload.len() as u64);
         assert_eq!(members[0].meta.file_time, Some(0x0102_0304));
         assert_eq!(members[0].meta.file_attr, 0x20);
         assert_eq!(members[0].meta.host_os, Some(2));
@@ -1524,10 +1522,11 @@ mod tests {
 
     #[test]
     fn direct_writer_creates_rar20_compressed_archive() {
+        let payload = b"facade rar20 literal compressed payload\n".repeat(32);
         let bytes = rar15_40::write_compressed_archive(
             &[rar15_40::FileEntry {
                 name: b"rar20.txt",
-                data: b"facade rar20 literal compressed payload\n",
+                data: &payload,
                 file_time: 0,
                 file_attr: 0x20,
                 host_os: 3,
@@ -1544,18 +1543,16 @@ mod tests {
         let file = raw.files().next().unwrap();
         assert_eq!(file.unp_ver, 20);
         assert_eq!(file.method, 0x33);
-        assert_eq!(
-            collect_extract(&archive, None).unwrap()[0].data,
-            b"facade rar20 literal compressed payload\n"
-        );
+        assert_eq!(collect_extract(&archive, None).unwrap()[0].data, payload);
     }
 
     #[test]
     fn direct_writer_creates_rar29_compressed_archive() {
+        let payload = b"facade rar29 literal compressed payload\n".repeat(32);
         let bytes = rar15_40::write_compressed_archive(
             &[rar15_40::FileEntry {
                 name: b"rar29.txt",
-                data: b"facade rar29 literal compressed payload\n",
+                data: &payload,
                 file_time: 0,
                 file_attr: 0x20,
                 host_os: 3,
@@ -1572,10 +1569,7 @@ mod tests {
         let file = raw.files().next().unwrap();
         assert_eq!(file.unp_ver, 29);
         assert!(matches!(file.method, 0x33 | 0x35));
-        assert_eq!(
-            collect_extract(&archive, None).unwrap()[0].data,
-            b"facade rar29 literal compressed payload\n"
-        );
+        assert_eq!(collect_extract(&archive, None).unwrap()[0].data, payload);
     }
 
     #[test]
