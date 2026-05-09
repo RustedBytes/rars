@@ -9,7 +9,6 @@ use rars_recovery::rar5::build_structural_inline_recovery_data;
 
 const MAX_MATCH_CANDIDATES_DEFAULT: usize = 256;
 const DEFAULT_RAR50_DICTIONARY_SIZE: u64 = 128 * 1024;
-const MAX_RAR50_FILTERED_BLOCK_OUTPUT: usize = 4 * 1024 * 1024;
 const AUTO_DELTA_EDGE_SKIP: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1564,11 +1563,6 @@ fn encode_member_with_filter_policy(
             encode_lz_member_with_options(data, algorithm_version, options).map_err(Error::from)
         }
         FilterPolicy::Explicit(filter) => {
-            if data.len() > MAX_RAR50_FILTERED_BLOCK_OUTPUT {
-                return Err(Error::InvalidHeader(
-                    "RAR 5 large explicit filtered member writer is not supported",
-                ));
-            }
             encode_member_with_filter(data, algorithm_version, filter, options).map_err(Error::from)
         }
         FilterPolicy::AutoSize => {
@@ -1778,9 +1772,6 @@ fn encode_member_with_auto_size_filter(
     }
     let mut best =
         encode_lz_member_with_options(data, algorithm_version, options).map_err(Error::from)?;
-    if data.len() > MAX_RAR50_FILTERED_BLOCK_OUTPUT {
-        return Ok(best);
-    }
     let mut candidates = vec![FilterKind::E8, FilterKind::E8E9, FilterKind::Arm];
     for channels in 1..=4 {
         candidates.push(FilterKind::Delta { channels });
@@ -3637,31 +3628,28 @@ mod tests {
     }
 
     #[test]
-    fn auto_filter_policy_skips_large_members_for_split_block_compatibility() {
-        let data: Vec<_> = (0..MAX_RAR50_FILTERED_BLOCK_OUTPUT + 512)
-            .map(|index| index as u8)
-            .collect();
-        let options = EncodeOptions::new(0);
-
-        let plain = encode_lz_member_with_options(&data, 0, options).unwrap();
-        let auto = encode_member_with_auto_size_filter(&data, 0, options).unwrap();
-
-        assert_eq!(auto, plain);
-    }
-
-    #[test]
-    fn explicit_filters_reject_large_members_until_filter_ranges_can_be_split() {
-        let data = vec![0u8; MAX_RAR50_FILTERED_BLOCK_OUTPUT + 1];
-        let err = encode_member_with_filter_policy(
+    fn explicit_filters_accept_large_members_after_filter_ranges_are_split() {
+        let data = vec![0u8; 4 * 1024 * 1024 + 1];
+        let packed = encode_member_with_filter_policy(
             &data,
             0,
             FilterPolicy::Explicit(FilterKind::Delta { channels: 1 }),
             EncodeOptions::new(0),
         )
-        .unwrap_err();
+        .unwrap();
+        let mut decoder = rars_codec::rar50::Unpack50Decoder::new();
 
-        assert!(
-            matches!(err, Error::InvalidHeader(message) if message.contains("large explicit filtered"))
+        assert_eq!(
+            decoder
+                .decode_member(
+                    &packed,
+                    0,
+                    data.len(),
+                    false,
+                    rars_codec::rar50::DecodeMode::Lz
+                )
+                .unwrap(),
+            data
         );
     }
 

@@ -37,10 +37,6 @@
   filtering, and conservative solid reset policy are present. Remaining work is
   deeper optimal parsing and oracle-guided filter range tuning against WinRAR
   6.x/7.x oracles.
-- Add split-aware RAR50/RAR70 filtered-block writing. Auto-filter currently
-  falls back to unfiltered split blocks for members larger than 4 MiB, and
-  explicit filters reject those large members rather than writing streams that
-  external decoders corrupt.
 - Expand RAR7-specific writer policy beyond the current dictionary-field
   upgrade path. RAR70 now uses v1 compression-info fields when `--dict-size`
   cannot be represented as RAR5 v0, with writer and CLI coverage, but the

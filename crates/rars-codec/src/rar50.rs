@@ -576,39 +576,7 @@ fn filtered_lz_member(
         }
 
         let filter_data = &mut filtered[range.clone()];
-        let (filter_type, channels) = match filter.kind {
-            Rar50FilterKind::Delta { channels } => {
-                filters::encode_in_place(
-                    FilterOp::Delta { channels },
-                    filter_data,
-                    0,
-                    rar50_delta_messages(),
-                )?;
-                (FilterType::Delta, channels)
-            }
-            Rar50FilterKind::E8 => {
-                filters::encode_in_place(
-                    FilterOp::E8,
-                    filter_data,
-                    range.start as u32,
-                    rar50_delta_messages(),
-                )?;
-                (FilterType::E8, 0)
-            }
-            Rar50FilterKind::E8E9 => {
-                filters::encode_in_place(
-                    FilterOp::E8E9,
-                    filter_data,
-                    range.start as u32,
-                    rar50_delta_messages(),
-                )?;
-                (FilterType::E8E9, 0)
-            }
-            Rar50FilterKind::Arm => {
-                arm_encode(filter_data, range.start as u32);
-                (FilterType::Arm, 0)
-            }
-        };
+        let (filter_type, channels) = encode_filter_data(filter.kind, filter_data, range.start)?;
         records.push(EncodeFilter {
             offset: range.start,
             length: range.len(),
@@ -617,6 +585,126 @@ fn filtered_lz_member(
         });
     }
     Ok((filtered, records))
+}
+
+fn encode_filter_data(
+    kind: Rar50FilterKind,
+    data: &mut [u8],
+    file_offset: usize,
+) -> Result<(FilterType, usize)> {
+    if file_offset > u32::MAX as usize {
+        return Err(Error::InvalidData("RAR 5 filter offset is too large"));
+    }
+    match kind {
+        Rar50FilterKind::Delta { channels } => {
+            filters::encode_in_place(
+                FilterOp::Delta { channels },
+                data,
+                0,
+                rar50_delta_messages(),
+            )?;
+            Ok((FilterType::Delta, channels))
+        }
+        Rar50FilterKind::E8 => {
+            filters::encode_in_place(
+                FilterOp::E8,
+                data,
+                file_offset as u32,
+                rar50_delta_messages(),
+            )?;
+            Ok((FilterType::E8, 0))
+        }
+        Rar50FilterKind::E8E9 => {
+            filters::encode_in_place(
+                FilterOp::E8E9,
+                data,
+                file_offset as u32,
+                rar50_delta_messages(),
+            )?;
+            Ok((FilterType::E8E9, 0))
+        }
+        Rar50FilterKind::Arm => {
+            arm_encode(data, file_offset as u32);
+            Ok((FilterType::Arm, 0))
+        }
+    }
+}
+
+fn filtered_lz_blocks(
+    data: &[u8],
+    filters: &[Rar50FilterSpec],
+    history: &[u8],
+    algorithm_version: u8,
+    options: EncodeOptions,
+) -> Result<Vec<u8>> {
+    let filters = normalized_filter_specs(data.len(), filters)?;
+    let mut out = Vec::new();
+    let mut block_history =
+        history[history.len().saturating_sub(options.max_match_distance)..].to_vec();
+    let mut chunk_start = 0usize;
+    while chunk_start < data.len() {
+        let chunk_end = (chunk_start + MAX_COMPRESSED_BLOCK_OUTPUT).min(data.len());
+        let mut chunk = data[chunk_start..chunk_end].to_vec();
+        let mut records = Vec::new();
+        for filter in &filters {
+            let start = filter.range.start.max(chunk_start);
+            let end = filter.range.end.min(chunk_end);
+            if start >= end {
+                continue;
+            }
+            let local_start = start - chunk_start;
+            let local_end = end - chunk_start;
+            let (filter_type, channels) =
+                encode_filter_data(filter.kind, &mut chunk[local_start..local_end], start)?;
+            records.push(EncodeFilter {
+                offset: local_start,
+                length: local_end - local_start,
+                filter_type,
+                channels,
+            });
+        }
+        out.extend(encode_lz_block(
+            &chunk,
+            &block_history,
+            algorithm_version,
+            &records,
+            options,
+            chunk_end == data.len(),
+        )?);
+        block_history.extend_from_slice(&chunk);
+        let keep_from = block_history
+            .len()
+            .saturating_sub(options.max_match_distance);
+        if keep_from != 0 {
+            block_history.drain(..keep_from);
+        }
+        chunk_start = chunk_end;
+    }
+    Ok(out)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NormalizedFilterSpec {
+    kind: Rar50FilterKind,
+    range: Range<usize>,
+}
+
+fn normalized_filter_specs(
+    data_len: usize,
+    filters: &[Rar50FilterSpec],
+) -> Result<Vec<NormalizedFilterSpec>> {
+    let mut normalized = Vec::with_capacity(filters.len());
+    for filter in filters {
+        let range = filter.range.clone().unwrap_or(0..data_len);
+        if range.start >= range.end || range.end > data_len {
+            return Err(Error::InvalidData("RAR 5 filter range is invalid"));
+        }
+        normalized.push(NormalizedFilterSpec {
+            kind: filter.kind,
+            range,
+        });
+    }
+    Ok(normalized)
 }
 
 fn encode_lz_member_inner(
@@ -852,6 +940,17 @@ impl Unpack50Encoder {
         algorithm_version: u8,
         filters: &[Rar50FilterSpec],
     ) -> Result<Vec<u8>> {
+        if input.len() > MAX_COMPRESSED_BLOCK_OUTPUT {
+            let packed = filtered_lz_blocks(
+                input,
+                filters,
+                &self.history,
+                algorithm_version,
+                self.options,
+            )?;
+            self.remember(input);
+            return Ok(packed);
+        }
         let (filtered, records) = filtered_lz_member(input, filters)?;
         let packed = encode_lz_member_inner(
             &filtered,
@@ -3093,6 +3192,39 @@ mod tests {
     fn large_lz_members_are_split_into_multiple_compressed_blocks() {
         let data = vec![0u8; MAX_COMPRESSED_BLOCK_OUTPUT + 1];
         let encoded = encode_lz_member_with_options(&data, 0, EncodeOptions::new(16)).unwrap();
+        let mut cursor = std::io::Cursor::new(encoded.as_slice());
+        let first = read_compressed_block(&mut cursor).unwrap();
+        let second = read_compressed_block(&mut cursor).unwrap();
+        let mut decoder = Unpack50Decoder::new();
+
+        assert!(!first.header.is_last);
+        assert!(second.header.is_last);
+        assert_eq!(
+            decoder
+                .decode_member(&encoded, 0, data.len(), false, DecodeMode::Lz)
+                .unwrap(),
+            data
+        );
+    }
+
+    #[test]
+    fn large_filtered_lz_members_split_filter_records_by_block() {
+        let mut data: Vec<_> = (0..MAX_COMPRESSED_BLOCK_OUTPUT + 512)
+            .map(|index| index as u8)
+            .collect();
+        data[256] = 0xe8;
+        data[257..261].copy_from_slice(&0x20u32.to_le_bytes());
+        data[MAX_COMPRESSED_BLOCK_OUTPUT + 64] = 0xe8;
+        data[MAX_COMPRESSED_BLOCK_OUTPUT + 65..MAX_COMPRESSED_BLOCK_OUTPUT + 69]
+            .copy_from_slice(&0x40u32.to_le_bytes());
+
+        let encoded = Unpack50Encoder::with_options(EncodeOptions::new(0))
+            .encode_member_with_filter(
+                &data,
+                0,
+                Rar50FilterSpec::range(Rar50FilterKind::E8, 0..data.len()),
+            )
+            .unwrap();
         let mut cursor = std::io::Cursor::new(encoded.as_slice());
         let first = read_compressed_block(&mut cursor).unwrap();
         let second = read_compressed_block(&mut cursor).unwrap();
