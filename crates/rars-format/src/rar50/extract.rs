@@ -6,14 +6,13 @@ use rars_crc32::{crc32, Crc32};
 use rars_crypto::rar50::{Rar50Cipher, Rar50Keys};
 use std::io::{Read, Write};
 
+// Filtered RAR5 members still need whole-member byte transforms. Members at or
+// below this boundary use the buffered path, while larger members stream once
+// and reject filtered streams through the codec's typed sentinel.
 #[cfg(not(test))]
-const STREAM_DECODE_THRESHOLD: u64 = 128 * 1024 * 1024;
+const BUFFERED_DECODE_LIMIT: u64 = 512 * 1024 * 1024;
 #[cfg(test)]
-const STREAM_DECODE_THRESHOLD: u64 = 1024;
-// Filtered RAR5 members still need whole-member byte transforms. Keep a
-// bounded buffered fallback for practical files and reject larger filtered
-// members before caller-visible output is written.
-const FILTERED_BUFFER_FALLBACK_LIMIT: u64 = 512 * 1024 * 1024;
+const BUFFERED_DECODE_LIMIT: u64 = 1024;
 
 impl FileHeader {
     fn crypto_with_password(&self, password: Option<&[u8]>) -> Result<Option<Rar50Keys>> {
@@ -304,7 +303,7 @@ impl FileHeader {
                 StreamDecodeError::Decode(error) => Error::from(error),
                 StreamDecodeError::FilteredMember => Error::UnsupportedFeature {
                     version: crate::version::ArchiveVersion::Rar50,
-                    feature: "RAR 5 filtered compressed member above buffered fallback limit",
+                    feature: "RAR 5 filtered compressed member above buffered decode limit",
                 },
                 StreamDecodeError::Sink(error) => Error::from(error),
             })?;
@@ -467,27 +466,6 @@ impl<'a> DecoderSession<'a> {
         file: &FileHeader,
         writer: &mut dyn Write,
     ) -> Result<()> {
-        if file.unpacked_size <= FILTERED_BUFFER_FALLBACK_LIMIT {
-            return self.write_buffered_large_member(archive, file, writer);
-        }
-
-        // Filters are not streaming-safe yet because their byte transform can be
-        // discovered after earlier decoded bytes have already reached the sink.
-        // The preflight pass preserves all-or-nothing extraction for huge files;
-        // smaller filtered files use the bounded buffered fallback above.
-        let mut preflight_decoder = self.decoder.clone();
-        let (mut packed, keys) = file
-            .packed_reader_with_password(archive, self.password)
-            .map_err(|error| file.entry_error("reading", error))?;
-        let mut sink = std::io::sink();
-        file.stream_packed_with_decoder(
-            &mut packed,
-            keys.as_ref(),
-            &mut preflight_decoder,
-            &mut sink,
-        )
-        .map_err(|error| file.entry_error("decoding", error))?;
-
         let mut streaming_decoder = self.decoder.clone();
         let (mut packed, keys) = file
             .packed_reader_with_password(archive, self.password)
@@ -500,23 +478,6 @@ impl<'a> DecoderSession<'a> {
 
     fn decoded_file_data(&mut self, archive: &Archive, file: &FileHeader) -> Result<DecodedData> {
         file.decoded_data_with_decoder(archive, &mut self.decoder, self.password)
-    }
-
-    fn write_buffered_large_member(
-        &mut self,
-        archive: &Archive,
-        file: &FileHeader,
-        writer: &mut dyn Write,
-    ) -> Result<()> {
-        let decoded = self
-            .decoded_file_data(archive, file)
-            .map_err(|error| file.entry_error("decoding", error))?;
-        file.verify_integrity_with_keys(&decoded.data, decoded.keys.as_ref())
-            .map_err(|error| file.entry_error("verifying", error))?;
-        writer
-            .write_all(&decoded.data)
-            .map_err(Error::from)
-            .map_err(|error| file.entry_error("writing", error))
     }
 
     fn split_decryptor(
@@ -540,7 +501,7 @@ impl<'a> DecoderSession<'a> {
 
 impl FileHeader {
     fn should_stream_decode(&self) -> bool {
-        !self.is_stored() && self.unpacked_size > STREAM_DECODE_THRESHOLD
+        !self.is_stored() && self.unpacked_size > BUFFERED_DECODE_LIMIT
     }
 }
 
@@ -1070,13 +1031,44 @@ mod tests {
     }
 
     #[test]
-    fn large_filtered_members_fall_back_to_bounded_buffered_decode() {
+    fn bounded_filtered_members_use_buffered_decode() {
         let mut data = Vec::new();
-        for _ in 0..128 {
+        while data.len() + 29 <= BUFFERED_DECODE_LIMIT as usize {
             data.extend_from_slice(b"\xe8\0\0\0\0filtered payload block\n");
         }
-        assert!(data.len() as u64 > STREAM_DECODE_THRESHOLD);
-        assert!(data.len() as u64 <= FILTERED_BUFFER_FALLBACK_LIMIT);
+        assert!(data.len() as u64 <= BUFFERED_DECODE_LIMIT);
+
+        let archive = Rar50Writer::new(WriterOptions {
+            target: crate::ArchiveVersion::Rar50,
+            features: crate::FeatureSet::store_only(),
+            compression_level: None,
+        })
+        .compressed_entries(&[CompressedEntry {
+            name: b"filtered.bin",
+            data: &data,
+            mtime: None,
+            attributes: 0x20,
+            host_os: 3,
+        }])
+        .filter_policy(FilterPolicy::Explicit(FilterKind::E8))
+        .finish()
+        .unwrap();
+        let archive = Archive::parse(&archive).unwrap();
+        let file = archive.files().next().unwrap();
+        assert!(!file.should_stream_decode());
+
+        let mut out = Vec::new();
+        file.write_to(&archive, None, &mut out).unwrap();
+
+        assert_eq!(out, data);
+    }
+
+    #[test]
+    fn streaming_filtered_members_return_typed_error_without_preflight_decode() {
+        let mut data = Vec::new();
+        while data.len() as u64 <= BUFFERED_DECODE_LIMIT {
+            data.extend_from_slice(b"\xe8\0\0\0\0filtered payload block\n");
+        }
 
         let archive = Rar50Writer::new(WriterOptions {
             target: crate::ArchiveVersion::Rar50,
@@ -1098,9 +1090,19 @@ mod tests {
         assert!(file.should_stream_decode());
 
         let mut out = Vec::new();
-        file.write_to(&archive, None, &mut out).unwrap();
+        let error = file.write_to(&archive, None, &mut out).unwrap_err();
 
-        assert_eq!(out, data);
+        assert!(matches!(
+            error,
+            Error::AtEntry {
+                operation: "decoding",
+                source,
+                ..
+            } if matches!(*source, Error::UnsupportedFeature {
+                feature: "RAR 5 filtered compressed member above buffered decode limit",
+                ..
+            })
+        ));
     }
 
     #[test]

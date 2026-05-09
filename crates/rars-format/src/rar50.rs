@@ -631,15 +631,42 @@ impl Archive {
                 "RAR 5 recovery prefix is out of bounds",
             ));
         }
-        let prefix = self.read_range(prefix_start..prefix_end)?;
         let recovery_data = recovery
             .decoded_data_unverified(self, None)
             .map_err(|error| error.at_entry(recovery.name.clone(), "reading recovery data"))?;
-        let repaired_prefix =
-            rars_recovery::rar5::repair_inline_recovery_prefix(&prefix, &recovery_data)?;
+        let prefix_len = prefix_end
+            .checked_sub(prefix_start)
+            .ok_or(Error::InvalidHeader(
+                "RAR 5 recovery prefix range overflows archive bounds",
+            ))?;
+        let repaired_shards = rars_recovery::rar5::repair_inline_recovery_prefix_shards(
+            prefix_len,
+            &recovery_data,
+            |range| {
+                let start = prefix_start
+                    .checked_add(range.start)
+                    .ok_or(rars_recovery::rar5::Error::PlanOverflow)?;
+                let end = prefix_start
+                    .checked_add(range.end)
+                    .ok_or(rars_recovery::rar5::Error::PlanOverflow)?;
+                self.read_range(start..end)
+                    .map_err(|_| rars_recovery::rar5::Error::BadRecoveryChunk)
+            },
+        )?;
 
         self.copy_range_to(0..prefix_start, writer)?;
-        writer.write_all(&repaired_prefix)?;
+        let mut cursor = 0usize;
+        for (range, data) in repaired_shards {
+            if range.start < cursor || range.end > prefix_len || range.len() != data.len() {
+                return Err(Error::InvalidHeader(
+                    "RAR 5 recovery shard range is invalid",
+                ));
+            }
+            self.copy_range_to(prefix_start + cursor..prefix_start + range.start, writer)?;
+            writer.write_all(&data)?;
+            cursor = range.end;
+        }
+        self.copy_range_to(prefix_start + cursor..prefix_end, writer)?;
         self.copy_range_to(prefix_end..source_len, writer)?;
         Ok(())
     }

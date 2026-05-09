@@ -1,14 +1,5 @@
 # rars plan
 
-## RAR5 Streaming And Recovery
-
-- Rework RAR5 large compressed-member extraction: align the streaming
-  thresholds, replace string-matched filter fallback with typed codec state,
-  avoid double-decoding large members, and keep the external large fixture as
-  coverage for the genuine streaming path.
-- Document and then implement the streaming sector path needed before RAR5
-  large-archive recovery repair is considered production-ready.
-
 ## Hardening
 
 - Verify RAR 2.x `PROTECT_HEAD` parity semantics when the declared protected

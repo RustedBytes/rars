@@ -310,6 +310,158 @@ pub fn repair_inline_recovery_prefix(
     Ok(repaired)
 }
 
+/// Repair damaged RAR5 inline-recovery data shards without materializing the
+/// whole protected prefix.
+///
+/// `read_range` receives byte ranges relative to the protected prefix and must
+/// return the current bytes for each requested range. The returned pairs contain
+/// only the damaged prefix ranges that need to be written back.
+pub fn repair_inline_recovery_prefix_shards<F>(
+    protected_size: usize,
+    recovery_data: &[u8],
+    mut read_range: F,
+) -> Result<Vec<(std::ops::Range<usize>, Vec<u8>)>>
+where
+    F: FnMut(std::ops::Range<usize>) -> Result<Vec<u8>>,
+{
+    let chunks = parse_available_inline_recovery_chunks(recovery_data)?;
+    let first = chunks.first().ok_or(Error::BadRecoveryChunk)?;
+    if first.protected_size != protected_size as u64 {
+        return Err(Error::BadRecoveryChunk);
+    }
+    if chunks
+        .iter()
+        .any(|chunk| chunk.plan != first.plan || chunk.protected_size != first.protected_size)
+    {
+        return Err(Error::BadRecoveryChunk);
+    }
+
+    let plan = first.plan;
+    let shard_len = usize::try_from(plan.group_count).map_err(|_| Error::PlanOverflow)?;
+    if shard_len % 2 != 0 {
+        return Err(Error::OddShardSize);
+    }
+    let shard_ranges = split_prefix_shard_ranges(protected_size, plan)?;
+    let mut damaged = Vec::new();
+    for (index, range) in shard_ranges.iter().enumerate() {
+        let shard = read_range(range.clone())?;
+        if crc64_rar_state(&shard) != first.data_shard_states[index] {
+            damaged.push(index);
+        }
+    }
+    if damaged.is_empty() {
+        return Ok(Vec::new());
+    }
+    if damaged.len() > chunks.len() {
+        return Err(Error::TooManyDamagedShards);
+    }
+
+    let recovery_rows: Vec<_> = chunks[..damaged.len()]
+        .iter()
+        .map(|chunk| (chunk.shard_index, chunk.parity.as_slice()))
+        .collect();
+    if recovery_rows
+        .iter()
+        .any(|(_, shard)| shard.len() != shard_len)
+    {
+        return Err(Error::ShardSizeMismatch);
+    }
+    let matrix = make_encoder_matrix(shard_ranges.len(), plan.recovery_shards as usize)?;
+    let equations: Vec<Vec<u16>> = recovery_rows
+        .iter()
+        .map(|&(row_index, _)| {
+            damaged
+                .iter()
+                .map(|&data_index| matrix[row_index][data_index])
+                .collect()
+        })
+        .collect();
+    let gf = shared_gf16();
+    let inverse = invert_linear_system_matrix(gf, &equations)?;
+    let word_count = shard_len / 2;
+    let mut rhs_by_row = recovery_rows
+        .iter()
+        .map(|(_, parity)| {
+            parity
+                .chunks_exact(2)
+                .map(|word| u16::from_le_bytes([word[0], word[1]]))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let damaged_lookup = damaged_lookup(shard_ranges.len(), &damaged)?;
+
+    for (data_index, range) in shard_ranges.iter().enumerate() {
+        if damaged_lookup[data_index] {
+            continue;
+        }
+        let shard = read_padded_prefix_shard(range.clone(), shard_len, &mut read_range)?;
+        for (row_index, rhs) in rhs_by_row.iter_mut().enumerate() {
+            let coeff = matrix[recovery_rows[row_index].0][data_index];
+            if coeff == 0 {
+                continue;
+            }
+            for (word_index, word) in shard.chunks_exact(2).enumerate() {
+                let data_symbol = u16::from_le_bytes([word[0], word[1]]);
+                rhs[word_index] ^= gf.mul(coeff, data_symbol);
+            }
+        }
+    }
+
+    let mut repaired = damaged
+        .iter()
+        .map(|&index| vec![0; shard_ranges[index].len()])
+        .collect::<Vec<_>>();
+    for word_index in 0..word_count {
+        let rhs = rhs_by_row
+            .iter()
+            .map(|row| row[word_index])
+            .collect::<Vec<_>>();
+        let solved = apply_inverse_matrix(gf, &inverse, &rhs)?;
+        for (output, &symbol) in repaired.iter_mut().zip(&solved) {
+            let byte_offset = word_index * 2;
+            if byte_offset < output.len() {
+                let bytes = symbol.to_le_bytes();
+                let take = (output.len() - byte_offset).min(2);
+                output[byte_offset..byte_offset + take].copy_from_slice(&bytes[..take]);
+            }
+        }
+    }
+
+    Ok(damaged
+        .into_iter()
+        .zip(repaired)
+        .map(|(index, data)| (shard_ranges[index].clone(), data))
+        .collect())
+}
+
+fn damaged_lookup(data_count: usize, damaged: &[usize]) -> Result<Vec<bool>> {
+    let mut lookup = vec![false; data_count];
+    for &index in damaged {
+        if index >= data_count {
+            return Err(Error::TooManyDamagedShards);
+        }
+        lookup[index] = true;
+    }
+    Ok(lookup)
+}
+
+fn read_padded_prefix_shard<F>(
+    range: std::ops::Range<usize>,
+    shard_len: usize,
+    read_range: &mut F,
+) -> Result<Vec<u8>>
+where
+    F: FnMut(std::ops::Range<usize>) -> Result<Vec<u8>>,
+{
+    let mut shard = vec![0; shard_len];
+    let bytes = read_range(range)?;
+    if bytes.len() > shard_len {
+        return Err(Error::ShardSizeMismatch);
+    }
+    shard[..bytes.len()].copy_from_slice(&bytes);
+    Ok(shard)
+}
+
 pub fn repair_inline_recovery_archive(input: &[u8]) -> Result<Vec<u8>> {
     let chunks = find_inline_recovery_chunks(input)?;
     let first = chunks.first().ok_or(Error::BadRecoveryChunk)?;
@@ -749,8 +901,9 @@ mod tests {
         apply_inverse_matrix, build_structural_inline_recovery_data, crc64_rar_state, crc64_xz,
         encode_inline_recovery_parity, encode_parity_shards, invert_linear_system_matrix,
         make_encoder_matrix, plan_inline_recovery, reconstruct_data_shards,
-        repair_inline_recovery_archive, repair_inline_recovery_prefix, shared_gf16,
-        split_prefix_shard_ranges, split_prefix_shards, Error, Gf16, InlineRecoveryPlan,
+        repair_inline_recovery_archive, repair_inline_recovery_prefix,
+        repair_inline_recovery_prefix_shards, shared_gf16, split_prefix_shard_ranges,
+        split_prefix_shards, Error, Gf16, InlineRecoveryPlan,
     };
 
     #[test]
@@ -1088,6 +1241,30 @@ mod tests {
         damaged[9_000..9_400].fill(0x33);
 
         let repaired = repair_inline_recovery_prefix(&damaged, &recovery_data).unwrap();
+
+        assert_eq!(repaired, prefix);
+    }
+
+    #[test]
+    fn rar5_inline_recovery_returns_only_repaired_shard_ranges() {
+        let prefix: Vec<u8> = (0..128_000).map(|index| (index * 29) as u8).collect();
+        let recovery_data = build_structural_inline_recovery_data(&prefix, 20).unwrap();
+        let mut damaged = prefix.clone();
+        damaged[100..500].fill(0x11);
+        damaged[9_000..9_400].fill(0x33);
+
+        let repaired_shards =
+            repair_inline_recovery_prefix_shards(prefix.len(), &recovery_data, |range| {
+                Ok(damaged[range].to_vec())
+            })
+            .unwrap();
+        assert!(!repaired_shards.is_empty());
+
+        let mut repaired = damaged;
+        for (range, data) in repaired_shards {
+            assert_eq!(range.len(), data.len());
+            repaired[range].copy_from_slice(&data);
+        }
 
         assert_eq!(repaired, prefix);
     }

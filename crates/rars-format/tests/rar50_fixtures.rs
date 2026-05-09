@@ -1705,7 +1705,7 @@ fn reference_rar_accepts_rar50_acl_and_stream_file_service_records() {
 }
 
 #[test]
-#[ignore = "requires RARS_RAR50_LARGE_STREAM_FIXTURE pointing at an external >512 MiB sparse RAR5 fixture"]
+#[ignore = "requires RARS_RAR50_LARGE_STREAM_FIXTURE pointing at an external >512 MiB sparse unfiltered RAR5 fixture"]
 fn external_sparse_rar50_large_member_streams_to_sink() {
     let path = std::env::var_os("RARS_RAR50_LARGE_STREAM_FIXTURE")
         .expect("set RARS_RAR50_LARGE_STREAM_FIXTURE to an external sparse RAR5 fixture");
