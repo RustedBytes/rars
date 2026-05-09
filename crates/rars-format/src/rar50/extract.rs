@@ -126,10 +126,7 @@ impl FileHeader {
             0 => Err(Error::InvalidHeader(
                 "RAR 5 BLAKE2sp hash record has invalid length",
             )),
-            _ => Err(Error::UnsupportedFeature {
-                version: crate::version::ArchiveVersion::Rar50,
-                feature: "RAR 5 unknown file hash type",
-            }),
+            _ => Ok(()),
         }
     }
 
@@ -211,10 +208,31 @@ impl FileHeader {
         Ok(DecodedData { data, keys })
     }
 
+    fn decoded_data_with_mode(
+        &self,
+        archive: &Archive,
+        decoder: &mut Unpack50Decoder,
+        password: Option<&[u8]>,
+        mode: DecodeMode,
+    ) -> Result<DecodedData> {
+        let (packed, keys) = self.packed_data_with_password(archive, password)?;
+        let data = self.decode_packed_with_decoder_mode(&packed, decoder, mode)?;
+        Ok(DecodedData { data, keys })
+    }
+
     fn decode_packed_with_decoder(
         &self,
         packed: &[u8],
         decoder: &mut Unpack50Decoder,
+    ) -> Result<Vec<u8>> {
+        self.decode_packed_with_decoder_mode(packed, decoder, DecodeMode::Lz)
+    }
+
+    fn decode_packed_with_decoder_mode(
+        &self,
+        packed: &[u8],
+        decoder: &mut Unpack50Decoder,
+        mode: DecodeMode,
     ) -> Result<Vec<u8>> {
         if self.is_stored() {
             if self.encrypted {
@@ -253,7 +271,7 @@ impl FileHeader {
                 output_size,
                 dictionary_size,
                 info.solid,
-                DecodeMode::Lz,
+                mode,
             )
             .map_err(Error::from)
     }
@@ -404,6 +422,9 @@ impl Archive {
     {
         let mut session = DecoderSession::new_with_password(options.password);
         for file in self.files() {
+            if file.redirection.is_some() {
+                continue;
+            }
             if file.is_split_before() || file.is_split_after() {
                 return Err(Error::InvalidHeader(
                     "RAR 5 split entry requires multivolume extraction",
@@ -449,11 +470,28 @@ impl<'a> DecoderSession<'a> {
         if file.should_stream_decode() {
             return self.stream_file_to(archive, file, writer);
         }
+        let checkpoint = self.decoder.clone();
         let decoded = self
             .decoded_file_data(archive, file)
             .map_err(|error| file.entry_error("decoding", error))?;
-        file.verify_integrity_with_keys(&decoded.data, decoded.keys.as_ref())
-            .map_err(|error| file.entry_error("verifying", error))?;
+        let decoded = match file.verify_integrity_with_keys(&decoded.data, decoded.keys.as_ref()) {
+            Ok(()) => decoded,
+            Err(filtered_error) => {
+                let mut unfiltered_decoder = checkpoint;
+                let unfiltered = file
+                    .decoded_data_with_mode(
+                        archive,
+                        &mut unfiltered_decoder,
+                        self.password,
+                        DecodeMode::LzNoFilters,
+                    )
+                    .map_err(|error| file.entry_error("decoding", error))?;
+                file.verify_integrity_with_keys(&unfiltered.data, unfiltered.keys.as_ref())
+                    .map_err(|_| file.entry_error("verifying", filtered_error))?;
+                self.decoder = unfiltered_decoder;
+                unfiltered
+            }
+        };
         writer
             .write_all(&decoded.data)
             .map_err(Error::from)
@@ -526,6 +564,9 @@ where
         for (file_index, file) in archive.files().enumerate() {
             match split.advance(file.is_split_before(), file.is_split_after()) {
                 SplitVolumeStep::Regular => {
+                    if file.redirection.is_some() {
+                        continue;
+                    }
                     let meta = file.metadata();
                     let mut writer = open(&meta)?;
                     if !meta.is_directory {
@@ -814,10 +855,7 @@ fn streaming_hash_verifier(file: &FileHeader) -> Result<Option<([u8; 32], blake2
         0 => Err(Error::InvalidHeader(
             "RAR 5 BLAKE2sp hash record has invalid length",
         )),
-        _ => Err(Error::UnsupportedFeature {
-            version: crate::version::ArchiveVersion::Rar50,
-            feature: "RAR 5 unknown file hash type",
-        }),
+        _ => Ok(None),
     }
 }
 
@@ -1205,7 +1243,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_integrity_rejects_bad_blake2sp_length_and_unknown_hash_type() {
+    fn verify_integrity_rejects_bad_blake2sp_length_and_ignores_unknown_hash_type() {
         let data = b"hash me";
         let mut bad_length = plain_file(
             b"a.txt",
@@ -1222,14 +1260,11 @@ mod tests {
 
         bad_length.hash.as_mut().unwrap().hash_type = 99;
         bad_length.hash.as_mut().unwrap().data = vec![0u8; 32];
-        assert!(matches!(
-            bad_length.verify_integrity_with_keys(data, None),
-            Err(Error::UnsupportedFeature { .. })
-        ));
+        bad_length.verify_integrity_with_keys(data, None).unwrap();
     }
 
     #[test]
-    fn streaming_hash_verifier_rejects_bad_blake2sp_length_and_unknown_hash_type() {
+    fn streaming_hash_verifier_rejects_bad_blake2sp_length_and_ignores_unknown_hash_type() {
         let mut file = plain_file(
             b"a.txt",
             b"",
@@ -1245,10 +1280,7 @@ mod tests {
 
         file.hash.as_mut().unwrap().hash_type = 7;
         file.hash.as_mut().unwrap().data = vec![0u8; 32];
-        assert!(matches!(
-            streaming_hash_verifier(&file),
-            Err(Error::UnsupportedFeature { .. })
-        ));
+        assert!(matches!(streaming_hash_verifier(&file), Ok(None)));
 
         let nohash = plain_file(b"a.txt", b"", None);
         assert!(matches!(streaming_hash_verifier(&nohash), Ok(None)));

@@ -3798,6 +3798,66 @@ fn rejects_corrupt_rar50_stored_payload_hash_when_blake2_is_present() {
 }
 
 #[test]
+fn ignores_unknown_rar50_file_hash_records_when_extracting() {
+    let bytes = std::fs::read(fixture("wild/invalid_hash_valid_htime_exfld.rar")).unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+
+    let extracted = collect_extract(&archive).unwrap();
+
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].name, b"file.txt");
+    assert_eq!(
+        extracted[0].data,
+        b"invalid HASH extra, and later a valid HTIME extra"
+    );
+}
+
+#[test]
+fn skips_rar50_redirection_entries_when_extracting() {
+    for fixture_name in [
+        "wild/hardlink.rar",
+        "wild/symlink.rar",
+        "wild/rarfile_hlink.rar",
+    ] {
+        let bytes = std::fs::read(fixture(fixture_name)).unwrap();
+        let archive = Archive::parse(&bytes).unwrap();
+
+        let extracted = collect_extract(&archive).unwrap();
+
+        assert!(
+            archive.files().any(|file| file.redirection.is_some()),
+            "{fixture_name}"
+        );
+        assert!(
+            extracted.iter().all(|entry| archive
+                .files()
+                .find(|file| file.name == entry.name)
+                .is_some_and(|file| file.redirection.is_none())),
+            "{fixture_name}"
+        );
+    }
+}
+
+#[test]
+fn extracts_wild_rar50_solid_archives_with_redundant_filter_records() {
+    for fixture_name in ["wild/rarfile_solid.rar", "wild/rarfile_solid_qo.rar"] {
+        let bytes = std::fs::read(fixture(fixture_name)).unwrap();
+        let archive = Archive::parse(&bytes).unwrap();
+
+        let extracted = collect_extract(&archive).unwrap();
+
+        assert!(!extracted.is_empty(), "{fixture_name}");
+        assert!(
+            archive
+                .files()
+                .filter(|file| !file.is_directory() && file.redirection.is_none())
+                .any(|file| file.decoded_compression_info().is_ok_and(|info| info.solid)),
+            "{fixture_name}"
+        );
+    }
+}
+
+#[test]
 fn parses_rar50_multifile_stored_archive() {
     let bytes = std::fs::read(fixture("multifile.rar")).unwrap();
     let archive = Archive::parse(&bytes).unwrap();

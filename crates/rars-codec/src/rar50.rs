@@ -100,6 +100,17 @@ impl DecodeTables {
 pub enum DecodeMode {
     LiteralOnly,
     Lz,
+    LzNoFilters,
+}
+
+impl DecodeMode {
+    fn uses_lz(self) -> bool {
+        matches!(self, Self::Lz | Self::LzNoFilters)
+    }
+
+    fn applies_filters(self) -> bool {
+        matches!(self, Self::Lz)
+    }
 }
 
 pub fn parse_compressed_block(input: &[u8]) -> Result<CompressedBlock> {
@@ -1369,10 +1380,10 @@ impl Unpack50Decoder {
                 let symbol = tables.main.decode(&mut bits)?;
                 match symbol {
                     0..=255 => output.push(symbol as u8),
-                    256 if mode == DecodeMode::Lz => {
+                    256 if mode.uses_lz() => {
                         filters.push(read_filter(&mut bits, output.len())?);
                     }
-                    257 if mode == DecodeMode::Lz => {
+                    257 if mode.uses_lz() => {
                         if self.last_length != 0 {
                             self.copy_match(
                                 &mut output,
@@ -1383,7 +1394,7 @@ impl Unpack50Decoder {
                             )?;
                         }
                     }
-                    258..=261 if mode == DecodeMode::Lz => {
+                    258..=261 if mode.uses_lz() => {
                         let rep_index = symbol - 258;
                         let distance = self.reps[rep_index];
                         if distance == 0 {
@@ -1405,7 +1416,7 @@ impl Unpack50Decoder {
                             dictionary_size,
                         )?;
                     }
-                    262.. if mode == DecodeMode::Lz => {
+                    262.. if mode.uses_lz() => {
                         let length_slot = symbol - 262;
                         let length_extra = bits.read_bits(length_slot_extra_bits(length_slot)?)?;
                         let mut length = slot_to_length(length_slot, length_extra)?;
@@ -1451,7 +1462,9 @@ impl Unpack50Decoder {
         }
 
         if output.len() == output_size {
-            apply_filters(&mut output, &filters)?;
+            if mode.applies_filters() {
+                apply_filters(&mut output, &filters)?;
+            }
             self.history.extend_from_slice(&output);
             if self.history.len() > dictionary_size {
                 let discard = self.history.len() - dictionary_size;
