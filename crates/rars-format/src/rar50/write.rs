@@ -1533,7 +1533,7 @@ fn encode_options_for_level(level: Option<u8>) -> Result<EncodeOptions> {
             ))
         }
     };
-    Ok(EncodeOptions::new(candidates))
+    Ok(EncodeOptions::new(candidates).with_lazy_matching(matches!(level, None | Some(4..=5))))
 }
 
 fn validate_compression_level(options: WriterOptions) -> Result<()> {

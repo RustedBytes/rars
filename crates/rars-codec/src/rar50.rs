@@ -451,13 +451,20 @@ pub fn encode_lz_member(data: &[u8], algorithm_version: u8) -> Result<Vec<u8>> {
 #[non_exhaustive]
 pub struct EncodeOptions {
     pub max_match_candidates: usize,
+    pub lazy_matching: bool,
 }
 
 impl EncodeOptions {
     pub const fn new(max_match_candidates: usize) -> Self {
         Self {
             max_match_candidates,
+            lazy_matching: false,
         }
+    }
+
+    pub const fn with_lazy_matching(mut self, enabled: bool) -> Self {
+        self.lazy_matching = enabled;
+        self
     }
 }
 
@@ -908,6 +915,12 @@ fn encode_tokens(input: &[u8], history: &[u8], options: EncodeOptions) -> Vec<En
     let end = combined.len();
     while pos < end {
         if let Some((length, distance)) = best_match(&combined, pos, end, &buckets, options) {
+            if should_lazy_emit_literal(&combined, pos, end, &buckets, options, length) {
+                tokens.push(EncodeToken::Literal(combined[pos]));
+                insert_match_position(&combined, pos, &mut buckets);
+                pos += 1;
+                continue;
+            }
             tokens.push(EncodeToken::Match { length, distance });
             for history_pos in pos..pos + length {
                 insert_match_position(&combined, history_pos, &mut buckets);
@@ -920,6 +933,21 @@ fn encode_tokens(input: &[u8], history: &[u8], options: EncodeOptions) -> Vec<En
         }
     }
     tokens
+}
+
+fn should_lazy_emit_literal(
+    input: &[u8],
+    pos: usize,
+    end: usize,
+    buckets: &[Vec<usize>],
+    options: EncodeOptions,
+    current_length: usize,
+) -> bool {
+    if !options.lazy_matching || pos + 1 >= end {
+        return false;
+    }
+    best_match(input, pos + 1, end, buckets, options)
+        .is_some_and(|(next_length, _)| next_length > current_length + 1)
 }
 
 fn best_match(
@@ -2368,6 +2396,31 @@ mod tests {
         assert!(encode_tokens(data, &[], EncodeOptions::default())
             .iter()
             .any(|token| matches!(token, EncodeToken::Match { .. })));
+    }
+
+    #[test]
+    fn lazy_lz_parser_defers_short_match_for_longer_next_match() {
+        let input = b"abcdXbcdYYYYYYYYYYYYabcdYYYYYYYYYYYY";
+        let greedy = encode_tokens(input, &[], EncodeOptions::new(MAX_MATCH_CANDIDATES));
+        let lazy = encode_tokens(
+            input,
+            &[],
+            EncodeOptions::new(MAX_MATCH_CANDIDATES).with_lazy_matching(true),
+        );
+        let packed = encode_lz_member_with_options(
+            input,
+            0,
+            EncodeOptions::new(MAX_MATCH_CANDIDATES).with_lazy_matching(true),
+        )
+        .unwrap();
+
+        assert!(greedy
+            .iter()
+            .any(|token| matches!(token, EncodeToken::Match { length: 4, .. })));
+        assert!(lazy
+            .iter()
+            .any(|token| matches!(token, EncodeToken::Match { length, .. } if *length > 8)));
+        assert_eq!(decode_lz(&packed, 0, input.len()).unwrap(), input);
     }
 
     fn encode_lz_member_with_filter(data: &[u8], kind: Rar50FilterKind) -> Result<Vec<u8>> {

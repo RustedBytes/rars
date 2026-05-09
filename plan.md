@@ -21,12 +21,12 @@
 - Add WinRAR 2.90 oracle coverage before enabling RAR20 repeat-distance,
   old-distance, short-distance, or audio writer tokens. The current writer
   deliberately emits only literals and fresh LZ matches.
-- Improve RAR29/RAR30/RAR40 max-level policy after `--level` is wired:
-  filter-block boundary tuning, match-finder quality, and PPMd tuning against
-  WinRAR 2.90/3.x/4.x oracles.
-- Improve RAR50/RAR70 level policy beyond wire-level method stamping:
-  match-finder effort, incompressible-member store fallback, and filter
-  selection should be tuned against WinRAR 6.x/7.x oracles.
+- Tune RAR29/RAR30/RAR40 lower-level policy: `m5` is already strong, but
+  `m1..m4` still need filter-block boundary tuning and match-finder strategy
+  work against WinRAR 2.90/3.x/4.x oracles.
+- Improve RAR50/RAR70 ratio policy: wire-level method stamping and stored
+  fallback are present, but match-finder effort and filter selection still lag
+  WinRAR 6.x/7.x oracles.
 - Add RAR7-specific writer policy once fixtures/oracles identify useful
   version-7-only behaviour. RAR70 currently uses the RAR5 writer shape and
   emits byte-identical archives for the benchmark corpus.
