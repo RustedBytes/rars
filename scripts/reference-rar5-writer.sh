@@ -89,6 +89,8 @@ run_rars_add --password pass --format rar70 --store --archive-name encrypted-met
   "$tmpdir/encrypted-metadata.rar" "$payload"
 run_rars_add --format rar70 --archive-name compressed-metadata.rar \
   "$tmpdir/compressed-metadata.rar" "$payload"
+run_rars_add --format rar70 --dict-size 192k \
+  "$tmpdir/rar70-v1-dictionary.rar" "$payload"
 run_rars_add --password pass --format rar70 --archive-name encrypted-compressed-metadata.rar \
   "$tmpdir/encrypted-compressed-metadata.rar" "$payload"
 run_rars_add --password pass --format rar50 --store --encrypt-headers \
@@ -147,6 +149,7 @@ rar t -ppass "$tmpdir/encrypted.rar"
 rar t -ppass "$tmpdir/encrypted-file-comment.rar"
 rar t -ppass "$tmpdir/encrypted-metadata.rar"
 rar t "$tmpdir/compressed-metadata.rar"
+rar t "$tmpdir/rar70-v1-dictionary.rar"
 rar t -ppass "$tmpdir/encrypted-compressed-metadata.rar"
 rar t -ppass "$tmpdir/header-encrypted.rar"
 rar t -ppass "$tmpdir/header-encrypted-file-comment.rar"

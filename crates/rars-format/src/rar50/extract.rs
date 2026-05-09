@@ -1042,6 +1042,7 @@ mod tests {
             target: crate::ArchiveVersion::Rar50,
             features: crate::FeatureSet::store_only(),
             compression_level: None,
+            dictionary_size: None,
         })
         .compressed_entries(&[CompressedEntry {
             name: b"filtered.bin",
@@ -1074,6 +1075,7 @@ mod tests {
             target: crate::ArchiveVersion::Rar50,
             features: crate::FeatureSet::store_only(),
             compression_level: None,
+            dictionary_size: None,
         })
         .compressed_entries(&[CompressedEntry {
             name: b"filtered.bin",

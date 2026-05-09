@@ -24,7 +24,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 type CliResult<T> = std::result::Result<T, CliError>;
 
 const ADD_USAGE: &str =
-    "usage: rars a [--password <password>|--password-file <path>] --format <rar14|rar15|rar20|rar29|rar30|rar40|rar50|rar70> [--store] [--level <0..5>] [--solid] [--encrypt-headers] [--quick-open] [--comment <text>] [--archive-name <name>] [--file-comment <text>] [--recovery-percent <1..100>] [--volume-size <bytes|k|m|g>] [--ppmd|--auto-filter|--delta-filter <channels>|--e8-filter|--e8e9-filter|--itanium-filter|--rgb-filter <width>|--audio-filter <channels>|--arm-filter] <archive> <files...>";
+    "usage: rars a [--password <password>|--password-file <path>] --format <rar14|rar15|rar20|rar29|rar30|rar40|rar50|rar70> [--store] [--level <0..5>] [--dict-size <bytes|k|m|g>] [--solid] [--encrypt-headers] [--quick-open] [--comment <text>] [--archive-name <name>] [--file-comment <text>] [--recovery-percent <1..100>] [--volume-size <bytes|k|m|g>] [--ppmd|--auto-filter|--delta-filter <channels>|--e8-filter|--e8e9-filter|--itanium-filter|--rgb-filter <width>|--audio-filter <channels>|--arm-filter] <archive> <files...>";
 const DOS_DIRECTORY_ATTR: u8 = 0x10;
 const RAR50_SIGNATURE: &[u8] = b"Rar!\x1a\x07\x01\x00";
 const RAR50_STRUCTURAL_RR_WARNING: &str =
@@ -290,12 +290,14 @@ fn cmd_info(args: &[String]) -> CliResult<()> {
                         )
                     })?;
                     println!(
-                        "  #{index}: {} pack={} unp={} method={} solid={} flags={:#06x} attr={:#010x} crc={}",
+                        "  #{index}: {} pack={} unp={} algo={} method={} solid={} dict={} flags={:#06x} attr={:#010x} crc={}",
                         file.name_lossy(),
                         file.packed_size(),
                         file.unpacked_size,
+                        compression_info.algorithm_version,
                         compression_info.method,
                         compression_info.solid,
+                        compression_info.dictionary_size,
                         file.block.flags,
                         file.attributes,
                         file.data_crc32
@@ -734,6 +736,7 @@ struct AddCommand {
     target: ArchiveVersion,
     store: bool,
     compression_level: Option<u8>,
+    dictionary_size: Option<usize>,
     solid: bool,
     header_encryption: bool,
     quick_open: bool,
@@ -772,6 +775,7 @@ fn parse_add_command(args: &[String]) -> CliResult<AddCommand> {
     };
     let mut store = false;
     let mut compression_level = None;
+    let mut dictionary_size = None;
     let mut solid = false;
     let mut header_encryption = false;
     let mut quick_open = false;
@@ -806,6 +810,13 @@ fn parse_add_command(args: &[String]) -> CliResult<AddCommand> {
                     ));
                 }
                 compression_level = Some(level);
+                archive_index += 2;
+            }
+            "--dict-size" => {
+                let value = args
+                    .get(archive_index + 1)
+                    .ok_or_else(|| CliError::usage("missing --dict-size value"))?;
+                dictionary_size = Some(parse_size(value)?);
                 archive_index += 2;
             }
             "--solid" => {
@@ -932,6 +943,7 @@ fn parse_add_command(args: &[String]) -> CliResult<AddCommand> {
         target,
         store,
         compression_level,
+        dictionary_size,
         solid,
         header_encryption,
         quick_open,
@@ -959,6 +971,7 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
         target,
         store,
         compression_level,
+        dictionary_size,
         solid,
         header_encryption,
         quick_open,
@@ -978,6 +991,10 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
         archive_path,
         input_paths,
     } = parse_add_command(args)?;
+    if dictionary_size.is_some() && !matches!(target, ArchiveVersion::Rar50 | ArchiveVersion::Rar70)
+    {
+        return Err("--dict-size is currently available only for RAR 5/7 writers".into());
+    }
     let input_paths = input_paths.as_slice();
     let compress = !store;
 
@@ -1167,6 +1184,9 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
             let mut options = rars::rar50::WriterOptions::new(target, features);
             if let Some(level) = compression_level {
                 options = options.with_compression_level(level);
+            }
+            if let Some(dictionary_size) = dictionary_size {
+                options = options.with_dictionary_size(dictionary_size as u64);
             }
             if let Some(volume_size) = volume_size {
                 if archive_comment.is_some() {

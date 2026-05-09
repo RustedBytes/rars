@@ -1040,6 +1040,76 @@ fn accepts_rar50_compression_level() {
 }
 
 #[test]
+fn accepts_rar50_dictionary_size() {
+    let dir = scratch("accept-rar50-dict-size");
+    let source = dir.join("source.txt");
+    let archive = dir.join("dict.rar");
+    let payload = b"rar50 dictionary size accepted by cli\n".repeat(64);
+    fs::write(&source, &payload).unwrap();
+
+    let create = rars()
+        .args(["a", "--format", "rar50", "--dict-size", "512k"])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+
+    assert!(create.status.success(), "stderr: {}", stderr(&create));
+    let info = rars().arg("info").arg(&archive).output().unwrap();
+    assert!(info.status.success(), "stderr: {}", stderr(&info));
+    assert!(stdout(&info).contains("dict=524288"));
+    assert_archive_tests_and_extracts_file(&archive, None, "source.txt", &payload);
+}
+
+#[test]
+fn accepts_rar70_v1_dictionary_size() {
+    let dir = scratch("accept-rar70-v1-dict-size");
+    let source = dir.join("source.txt");
+    let archive = dir.join("dict.rar");
+    let payload = b"rar70 v1 dictionary size accepted by cli\n".repeat(64);
+    fs::write(&source, &payload).unwrap();
+
+    let create = rars()
+        .args(["a", "--format", "rar70", "--dict-size", "192k"])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+
+    assert!(create.status.success(), "stderr: {}", stderr(&create));
+    let info = rars().arg("info").arg(&archive).output().unwrap();
+    assert!(info.status.success(), "stderr: {}", stderr(&info));
+    let info_stdout = stdout(&info);
+    assert!(info_stdout.contains("algo=1"));
+    assert!(info_stdout.contains("dict=196608"));
+
+    let parsed = rars::rar50::Archive::parse_path(&archive).unwrap();
+    let file = parsed.files().next().unwrap();
+    let compression_info = file.decoded_compression_info().unwrap();
+    assert_eq!(compression_info.algorithm_version, 1);
+    assert_eq!(compression_info.dictionary_size, 192 * 1024);
+    assert_archive_tests_and_extracts_file(&archive, None, "source.txt", &payload);
+}
+
+#[test]
+fn rejects_dictionary_size_for_legacy_writers() {
+    let dir = scratch("reject-legacy-dict-size");
+    let source = dir.join("source.txt");
+    let archive = dir.join("legacy.rar");
+    fs::write(&source, b"legacy dictionary size rejection\n").unwrap();
+
+    let create = rars()
+        .args(["a", "--format", "rar40", "--dict-size", "512k"])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+
+    assert!(!create.status.success());
+    assert!(stderr(&create).contains("--dict-size is currently available only for RAR 5/7"));
+}
+
+#[test]
 fn rar50_compression_levels_change_output_size() {
     let dir = scratch("rar50-level-size");
     let source = dir.join("source.bin");
@@ -1047,10 +1117,9 @@ fn rar50_compression_levels_change_output_size() {
     let high = dir.join("level5.rar");
     let long_match = [b"abc".as_slice(), &[b'Z'; 256]].concat();
     let mut data = long_match.clone();
-    for index in 0..32u8 {
+    for index in 0..64u8 {
         data.extend_from_slice(b"abc");
         data.push(index);
-        data.extend_from_slice(&[index.wrapping_mul(17); 24]);
     }
     data.extend_from_slice(&long_match);
     fs::write(&source, &data).unwrap();

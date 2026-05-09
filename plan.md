@@ -24,19 +24,19 @@
 - Tune RAR29/RAR30/RAR40 lower-level policy: `m5` is already strong, but
   `m1..m4` still need filter-block boundary tuning and match-finder strategy
   work against WinRAR 2.90/3.x/4.x oracles.
-- Improve RAR50/RAR70 ratio policy: wire-level method stamping and stored
-  fallback are present, but match-finder effort and filter selection still lag
-  WinRAR 6.x/7.x oracles.
-- Add RAR7-specific writer policy once fixtures/oracles identify useful
-  version-7-only behaviour. RAR70 currently uses the RAR5 writer shape and
-  emits byte-identical archives for the benchmark corpus.
-- Add an explicit dictionary-size writer option and CLI knob once oracle data
-  shows which legacy targets should default above the current per-target
-  mapping.
+- Improve RAR50/RAR70 ratio policy beyond the current baseline. Wire-level
+  method stamping, stored fallback, lazy matching, state-aware match costs,
+  repeat-distance candidates, bounded cost-aware lookahead, frequency-weighted
+  Huffman lengths, dictionary sizing, multi-range x86 filtering, ranged Delta
+  filtering, and conservative solid reset policy are present. Remaining work is
+  deeper optimal parsing and oracle-guided filter range tuning against WinRAR
+  6.x/7.x oracles.
+- Expand RAR7-specific writer policy beyond the current dictionary-field
+  upgrade path. RAR70 now uses v1 compression-info fields when `--dict-size`
+  cannot be represented as RAR5 v0, with writer and CLI coverage, but the
+  default benchmark corpus still emits RAR5-compatible streams.
 - Refine non-zero `--level` mappings for RAR13/RAR15 after the bench
   harness reports which policy differences matter.
-- Add real RAR-created RAR5 filter fixtures for E8, E8E9, Delta, and ARM
-  reader coverage.
 
 ## Optional Oracles
 

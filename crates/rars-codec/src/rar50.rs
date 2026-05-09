@@ -1,5 +1,7 @@
 use crate::filters::{self, DeltaErrorMessages, FilterOp};
 use crate::{Error, Result};
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::io::Read;
 use std::ops::Range;
 
@@ -452,6 +454,8 @@ pub fn encode_lz_member(data: &[u8], algorithm_version: u8) -> Result<Vec<u8>> {
 pub struct EncodeOptions {
     pub max_match_candidates: usize,
     pub lazy_matching: bool,
+    pub lazy_lookahead: usize,
+    pub max_match_distance: usize,
 }
 
 impl EncodeOptions {
@@ -459,11 +463,23 @@ impl EncodeOptions {
         Self {
             max_match_candidates,
             lazy_matching: false,
+            lazy_lookahead: 1,
+            max_match_distance: MAX_ENCODER_MATCH_OFFSET,
         }
     }
 
     pub const fn with_lazy_matching(mut self, enabled: bool) -> Self {
         self.lazy_matching = enabled;
+        self
+    }
+
+    pub const fn with_lazy_lookahead(mut self, bytes: usize) -> Self {
+        self.lazy_lookahead = bytes;
+        self
+    }
+
+    pub const fn with_max_match_distance(mut self, distance: usize) -> Self {
+        self.max_match_distance = distance;
         self
     }
 }
@@ -483,7 +499,7 @@ pub fn encode_lz_member_with_history(
         data,
         history,
         algorithm_version,
-        None,
+        &[],
         EncodeOptions::default(),
     )
 }
@@ -502,7 +518,7 @@ pub fn encode_lz_member_with_history_and_options(
     algorithm_version: u8,
     options: EncodeOptions,
 ) -> Result<Vec<u8>> {
-    encode_lz_member_inner(data, history, algorithm_version, None, options)
+    encode_lz_member_inner(data, history, algorithm_version, &[], options)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -532,66 +548,70 @@ impl Rar50FilterSpec {
     }
 }
 
-fn filtered_lz_member(data: &[u8], filter: Rar50FilterSpec) -> Result<(Vec<u8>, EncodeFilter)> {
-    let range = filter.range.unwrap_or(0..data.len());
-    if range.start >= range.end || range.end > data.len() {
-        return Err(Error::InvalidData("RAR 5 filter range is invalid"));
-    }
-    if range.start > u32::MAX as usize {
-        return Err(Error::InvalidData("RAR 5 filter offset is too large"));
-    }
-
+fn filtered_lz_member(
+    data: &[u8],
+    filters: &[Rar50FilterSpec],
+) -> Result<(Vec<u8>, Vec<EncodeFilter>)> {
     let mut filtered = data.to_vec();
-    let filter_data = &mut filtered[range.clone()];
-    let (filter_type, channels) = match filter.kind {
-        Rar50FilterKind::Delta { channels } => {
-            filters::encode_in_place(
-                FilterOp::Delta { channels },
-                filter_data,
-                0,
-                rar50_delta_messages(),
-            )?;
-            (FilterType::Delta, channels)
+    let mut records = Vec::with_capacity(filters.len());
+    for filter in filters {
+        let range = filter.range.clone().unwrap_or(0..data.len());
+        if range.start >= range.end || range.end > data.len() {
+            return Err(Error::InvalidData("RAR 5 filter range is invalid"));
         }
-        Rar50FilterKind::E8 => {
-            filters::encode_in_place(
-                FilterOp::E8,
-                filter_data,
-                range.start as u32,
-                rar50_delta_messages(),
-            )?;
-            (FilterType::E8, 0)
+        if range.start > u32::MAX as usize {
+            return Err(Error::InvalidData("RAR 5 filter offset is too large"));
         }
-        Rar50FilterKind::E8E9 => {
-            filters::encode_in_place(
-                FilterOp::E8E9,
-                filter_data,
-                range.start as u32,
-                rar50_delta_messages(),
-            )?;
-            (FilterType::E8E9, 0)
-        }
-        Rar50FilterKind::Arm => {
-            arm_encode(filter_data, range.start as u32);
-            (FilterType::Arm, 0)
-        }
-    };
-    Ok((
-        filtered,
-        EncodeFilter {
+
+        let filter_data = &mut filtered[range.clone()];
+        let (filter_type, channels) = match filter.kind {
+            Rar50FilterKind::Delta { channels } => {
+                filters::encode_in_place(
+                    FilterOp::Delta { channels },
+                    filter_data,
+                    0,
+                    rar50_delta_messages(),
+                )?;
+                (FilterType::Delta, channels)
+            }
+            Rar50FilterKind::E8 => {
+                filters::encode_in_place(
+                    FilterOp::E8,
+                    filter_data,
+                    range.start as u32,
+                    rar50_delta_messages(),
+                )?;
+                (FilterType::E8, 0)
+            }
+            Rar50FilterKind::E8E9 => {
+                filters::encode_in_place(
+                    FilterOp::E8E9,
+                    filter_data,
+                    range.start as u32,
+                    rar50_delta_messages(),
+                )?;
+                (FilterType::E8E9, 0)
+            }
+            Rar50FilterKind::Arm => {
+                arm_encode(filter_data, range.start as u32);
+                (FilterType::Arm, 0)
+            }
+        };
+        records.push(EncodeFilter {
             offset: range.start,
             length: range.len(),
             filter_type,
             channels,
-        },
-    ))
+        });
+    }
+    Ok((filtered, records))
 }
 
 fn encode_lz_member_inner(
     data: &[u8],
     history: &[u8],
     algorithm_version: u8,
-    initial_filter: Option<EncodeFilter>,
+    initial_filters: &[EncodeFilter],
     options: EncodeOptions,
 ) -> Result<Vec<u8>> {
     let distance_size = match algorithm_version {
@@ -604,10 +624,8 @@ fn encode_lz_member_inner(
         }
     };
     let mut tokens = Vec::new();
-    if let Some(filter) = initial_filter {
-        tokens.push(EncodeToken::Filter(filter));
-    }
-    tokens.extend(encode_tokens(data, history, options));
+    tokens.extend(initial_filters.iter().copied().map(EncodeToken::Filter));
+    tokens.extend(encode_tokens(data, history, options, distance_size));
     let mut lengths = TableLengths {
         main: vec![0; MAIN_TABLE_SIZE],
         distance: vec![0; distance_size],
@@ -615,33 +633,36 @@ fn encode_lz_member_inner(
         length: vec![0; LENGTH_TABLE_SIZE],
     };
 
-    let mut used_main = vec![false; MAIN_TABLE_SIZE];
-    let mut used_distances = vec![false; distance_size];
-    let mut used_lengths = [false; LENGTH_TABLE_SIZE];
-    let mut uses_low_distance_table = false;
+    let mut main_frequencies = vec![0usize; MAIN_TABLE_SIZE];
+    let mut distance_frequencies = vec![0usize; distance_size];
+    let mut align_frequencies = vec![0usize; ALIGN_TABLE_SIZE];
+    let mut length_frequencies = vec![0usize; LENGTH_TABLE_SIZE];
     let mut state = EncoderMatchState::default();
     for token in &tokens {
         match *token {
-            EncodeToken::Filter(_) => used_main[256] = true,
-            EncodeToken::Literal(byte) => used_main[byte as usize] = true,
+            EncodeToken::Filter(_) => main_frequencies[256] += 1,
+            EncodeToken::Literal(byte) => main_frequencies[byte as usize] += 1,
             EncodeToken::Match { length, distance } => {
                 match state.encode_match(length, distance, distance_size)? {
-                    EncodedMatch::LastLengthRepeat => used_main[257] = true,
+                    EncodedMatch::LastLengthRepeat => main_frequencies[257] += 1,
                     EncodedMatch::RepeatDistance {
                         index, length_slot, ..
                     } => {
-                        used_main[258 + index] = true;
-                        used_lengths[length_slot] = true;
+                        main_frequencies[258 + index] += 1;
+                        length_frequencies[length_slot] += 1;
                     }
                     EncodedMatch::New {
                         length_slot,
                         distance_slot,
+                        distance_extra,
                         distance_bit_count,
                         ..
                     } => {
-                        used_main[262 + length_slot] = true;
-                        used_distances[distance_slot] = true;
-                        uses_low_distance_table |= distance_bit_count >= 4;
+                        main_frequencies[262 + length_slot] += 1;
+                        distance_frequencies[distance_slot] += 1;
+                        if distance_bit_count >= 4 {
+                            align_frequencies[distance_extra & 0x0f] += 1;
+                        }
                     }
                 }
                 state.remember(length, distance);
@@ -649,29 +670,10 @@ fn encode_lz_member_inner(
         }
     }
 
-    let main_len = huffman_bits_for_symbol_count(used_main.iter().filter(|&&used| used).count());
-    for (symbol, used) in used_main.into_iter().enumerate() {
-        if used {
-            lengths.main[symbol] = main_len;
-        }
-    }
-    let distance_len =
-        huffman_bits_for_symbol_count(used_distances.iter().filter(|&&used| used).count());
-    for (symbol, used) in used_distances.into_iter().enumerate() {
-        if used {
-            lengths.distance[symbol] = distance_len;
-        }
-    }
-    let length_len =
-        huffman_bits_for_symbol_count(used_lengths.iter().filter(|&&used| used).count());
-    for (symbol, used) in used_lengths.into_iter().enumerate() {
-        if used {
-            lengths.length[symbol] = length_len;
-        }
-    }
-    if uses_low_distance_table {
-        lengths.align.fill(4);
-    }
+    lengths.main = huffman_lengths_for_frequencies(&main_frequencies);
+    lengths.distance = huffman_lengths_for_frequencies(&distance_frequencies);
+    lengths.length = huffman_lengths_for_frequencies(&length_frequencies);
+    lengths.align = huffman_lengths_for_frequencies(&align_frequencies);
 
     let main_table = HuffmanTable::from_lengths(&lengths.main)?;
     let distance_table = HuffmanTable::from_lengths(&lengths.distance)?;
@@ -785,12 +787,21 @@ impl Unpack50Encoder {
         algorithm_version: u8,
         filter: Rar50FilterSpec,
     ) -> Result<Vec<u8>> {
-        let (filtered, record) = filtered_lz_member(input, filter)?;
+        self.encode_member_with_filters(input, algorithm_version, &[filter])
+    }
+
+    pub fn encode_member_with_filters(
+        &mut self,
+        input: &[u8],
+        algorithm_version: u8,
+        filters: &[Rar50FilterSpec],
+    ) -> Result<Vec<u8>> {
+        let (filtered, records) = filtered_lz_member(input, filters)?;
         let packed = encode_lz_member_inner(
             &filtered,
             &self.history,
             algorithm_version,
-            Some(record),
+            &records,
             self.options,
         )?;
         self.remember(input);
@@ -799,7 +810,10 @@ impl Unpack50Encoder {
 
     fn remember(&mut self, input: &[u8]) {
         self.history.extend_from_slice(input);
-        let keep_from = self.history.len().saturating_sub(DEFAULT_DICTIONARY_SIZE);
+        let keep_from = self
+            .history
+            .len()
+            .saturating_sub(self.options.max_match_distance);
         if keep_from != 0 {
             self.history.drain(..keep_from);
         }
@@ -900,10 +914,15 @@ impl EncoderMatchState {
     }
 }
 
-fn encode_tokens(input: &[u8], history: &[u8], options: EncodeOptions) -> Vec<EncodeToken> {
+fn encode_tokens(
+    input: &[u8],
+    history: &[u8],
+    options: EncodeOptions,
+    distance_size: usize,
+) -> Vec<EncodeToken> {
     let mut tokens = Vec::new();
     let mut buckets = vec![Vec::new(); MATCH_HASH_BUCKETS];
-    let history = &history[history.len().saturating_sub(DEFAULT_DICTIONARY_SIZE)..];
+    let history = &history[history.len().saturating_sub(options.max_match_distance)..];
     let mut combined = Vec::with_capacity(history.len() + input.len());
     combined.extend_from_slice(history);
     combined.extend_from_slice(input);
@@ -913,15 +932,36 @@ fn encode_tokens(input: &[u8], history: &[u8], options: EncodeOptions) -> Vec<En
 
     let mut pos = history.len();
     let end = combined.len();
+    let mut state = EncoderMatchState::default();
     while pos < end {
-        if let Some((length, distance)) = best_match(&combined, pos, end, &buckets, options) {
-            if should_lazy_emit_literal(&combined, pos, end, &buckets, options, length) {
+        if let Some(candidate) = best_match(
+            &combined,
+            pos,
+            end,
+            &buckets,
+            options,
+            &state,
+            distance_size,
+        ) {
+            if should_lazy_emit_literal(
+                &combined,
+                pos,
+                &buckets,
+                options,
+                &state,
+                distance_size,
+                candidate,
+            ) {
                 tokens.push(EncodeToken::Literal(combined[pos]));
                 insert_match_position(&combined, pos, &mut buckets);
                 pos += 1;
                 continue;
             }
+            let MatchCandidate {
+                length, distance, ..
+            } = candidate;
             tokens.push(EncodeToken::Match { length, distance });
+            state.remember(length, distance);
             for history_pos in pos..pos + length {
                 insert_match_position(&combined, history_pos, &mut buckets);
             }
@@ -938,16 +978,42 @@ fn encode_tokens(input: &[u8], history: &[u8], options: EncodeOptions) -> Vec<En
 fn should_lazy_emit_literal(
     input: &[u8],
     pos: usize,
-    end: usize,
     buckets: &[Vec<usize>],
     options: EncodeOptions,
-    current_length: usize,
+    state: &EncoderMatchState,
+    distance_size: usize,
+    current: MatchCandidate,
 ) -> bool {
+    let end = input.len();
     if !options.lazy_matching || pos + 1 >= end {
         return false;
     }
-    best_match(input, pos + 1, end, buckets, options)
-        .is_some_and(|(next_length, _)| next_length > current_length + 1)
+    let lookahead = options.lazy_lookahead.max(1);
+    (1..=lookahead)
+        .take_while(|offset| pos + offset < end)
+        .any(|offset| {
+            best_match(
+                input,
+                pos + offset,
+                end,
+                buckets,
+                options,
+                state,
+                distance_size,
+            )
+            .is_some_and(|next| {
+                let skipped_literal_score = offset as isize * 8;
+                next.score > current.score + skipped_literal_score
+            })
+        })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MatchCandidate {
+    length: usize,
+    distance: usize,
+    score: isize,
+    cost: usize,
 }
 
 fn best_match(
@@ -956,8 +1022,10 @@ fn best_match(
     end: usize,
     buckets: &[Vec<usize>],
     options: EncodeOptions,
-) -> Option<(usize, usize)> {
-    let max_distance = pos.min(MAX_ENCODER_MATCH_OFFSET);
+    state: &EncoderMatchState,
+    distance_size: usize,
+) -> Option<MatchCandidate> {
+    let max_distance = pos.min(options.max_match_distance);
     let max_length = (end - pos).min(MAX_ENCODER_MATCH_LENGTH);
     if options.max_match_candidates == 0
         || max_distance == 0
@@ -969,6 +1037,13 @@ fn best_match(
     let bucket = &buckets[match_hash(input, pos)];
     let mut best = None;
     let mut checked = 0usize;
+    for distance in state.reps {
+        if distance == 0 || distance > max_distance {
+            continue;
+        }
+        let length = match_length(input, pos, distance, max_length);
+        consider_match_candidate(&mut best, state, distance_size, length, distance);
+    }
     for &candidate in bucket.iter().rev() {
         if candidate >= pos {
             continue;
@@ -978,18 +1053,10 @@ fn best_match(
             break;
         }
         checked += 1;
-        let mut length = 0usize;
-        while length < max_length && input[pos + length] == input[pos + length - distance] {
-            length += 1;
-        }
-        let encodable = length >= 4 && length_slot_for_match_length(length, distance).is_some();
-        if encodable
-            && best.is_none_or(|(best_length, best_distance)| {
-                length > best_length || (length == best_length && distance < best_distance)
-            })
-        {
-            best = Some((length, distance));
-            if length == max_length {
+        let length = match_length(input, pos, distance, max_length);
+        consider_match_candidate(&mut best, state, distance_size, length, distance);
+        if let Some(best) = best {
+            if best.length == max_length {
                 break;
             }
         }
@@ -998,6 +1065,65 @@ fn best_match(
         }
     }
     best
+}
+
+fn match_length(input: &[u8], pos: usize, distance: usize, max_length: usize) -> usize {
+    let mut length = 0usize;
+    while length < max_length && input[pos + length] == input[pos + length - distance] {
+        length += 1;
+    }
+    length
+}
+
+fn consider_match_candidate(
+    best: &mut Option<MatchCandidate>,
+    state: &EncoderMatchState,
+    distance_size: usize,
+    length: usize,
+    distance: usize,
+) {
+    if length < 4 || length_slot_for_match_length(length, distance).is_none() {
+        return;
+    }
+    let Ok(cost) = estimated_match_cost(state, length, distance, distance_size) else {
+        return;
+    };
+    let candidate = MatchCandidate {
+        length,
+        distance,
+        score: (length as isize * 16) - cost as isize,
+        cost,
+    };
+    if best.is_none_or(|best| {
+        candidate.score > best.score
+            || (candidate.score == best.score
+                && (candidate.length > best.length
+                    || (candidate.length == best.length && candidate.cost < best.cost)
+                    || (candidate.length == best.length
+                        && candidate.cost == best.cost
+                        && candidate.distance < best.distance)))
+    }) {
+        *best = Some(candidate);
+    }
+}
+
+fn estimated_match_cost(
+    state: &EncoderMatchState,
+    length: usize,
+    distance: usize,
+    distance_size: usize,
+) -> Result<usize> {
+    match state.encode_match(length, distance, distance_size)? {
+        EncodedMatch::LastLengthRepeat => Ok(2),
+        EncodedMatch::RepeatDistance { length_slot, .. } => {
+            Ok(5 + usize::from(length_slot_extra_bits(length_slot)?))
+        }
+        EncodedMatch::New {
+            length_slot,
+            distance_bit_count,
+            ..
+        } => Ok(10 + usize::from(length_slot_extra_bits(length_slot)?) + distance_bit_count),
+    }
 }
 
 fn length_slot_for_match_length(length: usize, distance: usize) -> Option<(usize, usize)> {
@@ -1070,6 +1196,64 @@ fn huffman_bits_for_symbol_count(count: usize) -> u8 {
         0 | 1 => 1,
         _ => usize::BITS as u8 - (count - 1).leading_zeros() as u8,
     }
+}
+
+fn huffman_lengths_for_frequencies(frequencies: &[usize]) -> Vec<u8> {
+    let used_count = frequencies
+        .iter()
+        .filter(|&&frequency| frequency != 0)
+        .count();
+    if used_count <= 1 {
+        return uniform_huffman_lengths_for_frequencies(frequencies);
+    }
+
+    let mut lengths = vec![0u8; frequencies.len()];
+    let mut heap = BinaryHeap::new();
+    let mut order = 0usize;
+    for (symbol, &frequency) in frequencies.iter().enumerate() {
+        if frequency == 0 {
+            continue;
+        }
+        heap.push(Reverse((frequency, order, vec![symbol])));
+        order += 1;
+    }
+
+    while heap.len() > 1 {
+        let Reverse((left_frequency, _, mut left_symbols)) = heap
+            .pop()
+            .expect("frequency heap has a left node while merging");
+        let Reverse((right_frequency, _, mut right_symbols)) = heap
+            .pop()
+            .expect("frequency heap has a right node while merging");
+        for &symbol in left_symbols.iter().chain(right_symbols.iter()) {
+            lengths[symbol] += 1;
+        }
+        left_symbols.append(&mut right_symbols);
+        heap.push(Reverse((
+            left_frequency.saturating_add(right_frequency),
+            order,
+            left_symbols,
+        )));
+        order += 1;
+    }
+
+    if lengths.iter().any(|&length| length > 15) {
+        uniform_huffman_lengths_for_frequencies(frequencies)
+    } else {
+        lengths
+    }
+}
+
+fn uniform_huffman_lengths_for_frequencies(frequencies: &[usize]) -> Vec<u8> {
+    let used_count = frequencies
+        .iter()
+        .filter(|&&frequency| frequency != 0)
+        .count();
+    let uniform_length = huffman_bits_for_symbol_count(used_count);
+    frequencies
+        .iter()
+        .map(|&frequency| if frequency == 0 { 0 } else { uniform_length })
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -2393,19 +2577,52 @@ mod tests {
 
         assert_eq!(output, data);
         assert!(lz.len() < literal.len());
-        assert!(encode_tokens(data, &[], EncodeOptions::default())
-            .iter()
-            .any(|token| matches!(token, EncodeToken::Match { .. })));
+        assert!(
+            encode_tokens(data, &[], EncodeOptions::default(), DISTANCE_TABLE_SIZE_50)
+                .iter()
+                .any(|token| matches!(token, EncodeToken::Match { .. }))
+        );
+    }
+
+    #[test]
+    fn frequency_weighted_huffman_lengths_shorten_common_symbols() {
+        let mut frequencies = vec![1usize; 24];
+        frequencies[3] = 1024;
+
+        let lengths = huffman_lengths_for_frequencies(&frequencies);
+
+        assert!(lengths[3] < lengths[0]);
+        assert!(lengths.iter().all(|&length| length <= 15));
+    }
+
+    #[test]
+    fn lz_encoder_uses_frequency_weighted_huffman_lengths() {
+        let mut data = vec![b'a'; 200];
+        data.extend_from_slice(b"bcdefghijklmnopqrstuvwxyz");
+        let input = encode_lz_member_with_options(&data, 0, EncodeOptions::new(0)).unwrap();
+        let block = parse_compressed_block(&input).unwrap();
+        let (lengths, _) = read_table_lengths(&input[block.payload], 0).unwrap();
+
+        let output = decode_lz(&input, 0, data.len()).unwrap();
+
+        assert_eq!(output, data);
+        assert!(lengths.main[b'a' as usize] < lengths.main[b'z' as usize]);
     }
 
     #[test]
     fn lazy_lz_parser_defers_short_match_for_longer_next_match() {
         let input = b"abcdXbcdYYYYYYYYYYYYabcdYYYYYYYYYYYY";
-        let greedy = encode_tokens(input, &[], EncodeOptions::new(MAX_MATCH_CANDIDATES));
+        let greedy = encode_tokens(
+            input,
+            &[],
+            EncodeOptions::new(MAX_MATCH_CANDIDATES),
+            DISTANCE_TABLE_SIZE_50,
+        );
         let lazy = encode_tokens(
             input,
             &[],
             EncodeOptions::new(MAX_MATCH_CANDIDATES).with_lazy_matching(true),
+            DISTANCE_TABLE_SIZE_50,
         );
         let packed = encode_lz_member_with_options(
             input,
@@ -2421,6 +2638,185 @@ mod tests {
             .iter()
             .any(|token| matches!(token, EncodeToken::Match { length, .. } if *length > 8)));
         assert_eq!(decode_lz(&packed, 0, input.len()).unwrap(), input);
+    }
+
+    #[test]
+    fn cost_aware_match_selection_prefers_repeat_distance_token() {
+        let pos = 64;
+        let pattern = b"abcdefgh";
+        let mut input: Vec<u8> = (0..96u8).map(|byte| byte.wrapping_mul(37)).collect();
+        input[pos - 30..pos - 22].copy_from_slice(pattern);
+        input[pos - 10..pos - 2].copy_from_slice(pattern);
+        input[pos..pos + 8].copy_from_slice(pattern);
+        input[pos + 8] = b'X';
+
+        let mut buckets = vec![Vec::new(); MATCH_HASH_BUCKETS];
+        for candidate in 0..pos {
+            insert_match_position(&input, candidate, &mut buckets);
+        }
+        let state = EncoderMatchState {
+            reps: [30, 0, 0, 0],
+            last_length: 8,
+        };
+
+        let best = best_match(
+            &input,
+            pos,
+            input.len(),
+            &buckets,
+            EncodeOptions::default(),
+            &state,
+            DISTANCE_TABLE_SIZE_50,
+        )
+        .unwrap();
+
+        assert_eq!((best.length, best.distance), (8, 30));
+    }
+
+    #[test]
+    fn lazy_parser_uses_match_cost_not_only_match_length() {
+        let pos = 600;
+        let mut input: Vec<u8> = (0..700u16)
+            .map(|value| value.wrapping_mul(73) as u8)
+            .collect();
+        input[pos - 512..pos - 504].copy_from_slice(b"ABCDEFGH");
+        input[pos - 504] = b'Z';
+        input[pos - 29..pos - 21].copy_from_slice(b"BCDEFGHI");
+        input[pos - 30] = b'x';
+        input[pos..pos + 9].copy_from_slice(b"ABCDEFGHI");
+
+        let mut buckets = vec![Vec::new(); MATCH_HASH_BUCKETS];
+        for candidate in 0..pos {
+            insert_match_position(&input, candidate, &mut buckets);
+        }
+        let state = EncoderMatchState {
+            reps: [30, 0, 0, 0],
+            last_length: 8,
+        };
+        let current = best_match(
+            &input,
+            pos,
+            input.len(),
+            &buckets,
+            EncodeOptions::default(),
+            &state,
+            DISTANCE_TABLE_SIZE_50,
+        )
+        .unwrap();
+
+        assert_eq!((current.length, current.distance), (8, 512));
+        assert!(should_lazy_emit_literal(
+            &input,
+            pos,
+            &buckets,
+            EncodeOptions::default().with_lazy_matching(true),
+            &state,
+            DISTANCE_TABLE_SIZE_50,
+            current,
+        ));
+    }
+
+    #[test]
+    fn lazy_parser_uses_bounded_cost_lookahead() {
+        let pos = 160;
+        let mut input: Vec<u8> = (0..240u16)
+            .map(|value| value.wrapping_mul(91) as u8)
+            .collect();
+        input[pos - 30..pos - 22].copy_from_slice(b"ABCDEFGH");
+        input[pos - 80..pos - 70].copy_from_slice(b"CDEFGHIJKL");
+        input[pos..pos + 12].copy_from_slice(b"ABCDEFGHIJKL");
+
+        let mut buckets = vec![Vec::new(); MATCH_HASH_BUCKETS];
+        for candidate in 0..pos {
+            insert_match_position(&input, candidate, &mut buckets);
+        }
+        let state = EncoderMatchState::default();
+        let current = best_match(
+            &input,
+            pos,
+            input.len(),
+            &buckets,
+            EncodeOptions::default(),
+            &state,
+            DISTANCE_TABLE_SIZE_50,
+        )
+        .unwrap();
+
+        assert_eq!((current.length, current.distance), (8, 30));
+        assert!(!should_lazy_emit_literal(
+            &input,
+            pos,
+            &buckets,
+            EncodeOptions::default()
+                .with_lazy_matching(true)
+                .with_lazy_lookahead(1),
+            &state,
+            DISTANCE_TABLE_SIZE_50,
+            current,
+        ));
+        assert!(should_lazy_emit_literal(
+            &input,
+            pos,
+            &buckets,
+            EncodeOptions::default()
+                .with_lazy_matching(true)
+                .with_lazy_lookahead(2),
+            &state,
+            DISTANCE_TABLE_SIZE_50,
+            current,
+        ));
+    }
+
+    #[test]
+    fn lazy_parser_charges_for_skipped_literals() {
+        let pos = 160;
+        let mut input: Vec<u8> = (0..240u16)
+            .map(|value| value.wrapping_mul(91) as u8)
+            .collect();
+        input[pos - 30..pos - 22].copy_from_slice(b"ABCDEFGH");
+        input[pos - 80..pos - 71].copy_from_slice(b"CDEFGHIJK");
+        input[pos..pos + 12].copy_from_slice(b"ABCDEFGHIJKL");
+
+        let mut buckets = vec![Vec::new(); MATCH_HASH_BUCKETS];
+        for candidate in 0..pos {
+            insert_match_position(&input, candidate, &mut buckets);
+        }
+        let state = EncoderMatchState::default();
+        let current = best_match(
+            &input,
+            pos,
+            input.len(),
+            &buckets,
+            EncodeOptions::default(),
+            &state,
+            DISTANCE_TABLE_SIZE_50,
+        )
+        .unwrap();
+
+        let next = best_match(
+            &input,
+            pos + 2,
+            input.len(),
+            &buckets,
+            EncodeOptions::default(),
+            &state,
+            DISTANCE_TABLE_SIZE_50,
+        )
+        .unwrap();
+
+        assert!(next.score > current.score);
+        assert!(next.score <= current.score + 16);
+        assert!(!should_lazy_emit_literal(
+            &input,
+            pos,
+            &buckets,
+            EncodeOptions::default()
+                .with_lazy_matching(true)
+                .with_lazy_lookahead(2),
+            &state,
+            DISTANCE_TABLE_SIZE_50,
+            current,
+        ));
     }
 
     fn encode_lz_member_with_filter(data: &[u8], kind: Rar50FilterKind) -> Result<Vec<u8>> {
@@ -2536,6 +2932,46 @@ mod tests {
     }
 
     #[test]
+    fn encodes_lz_member_with_multiple_filter_records() {
+        let mut data = b"\xe8\0\0\0\0plain prefix outside filters".to_vec();
+        let first_start = data.len();
+        data.extend_from_slice(b"\xe8\0\0\0\0first filtered cluster");
+        let first_end = data.len();
+        data.extend_from_slice(b"large plain middle outside filters");
+        let second_start = data.len();
+        data.extend_from_slice(b"\xe8\0\0\0\0second filtered cluster");
+        let second_end = data.len();
+
+        let input = Unpack50Encoder::new()
+            .encode_member_with_filters(
+                &data,
+                0,
+                &[
+                    Rar50FilterSpec::range(Rar50FilterKind::E8, first_start..first_end),
+                    Rar50FilterSpec::range(Rar50FilterKind::E8, second_start..second_end),
+                ],
+            )
+            .unwrap();
+        let block = parse_compressed_block(&input).unwrap();
+        let (lengths, table_bits) = read_table_lengths(&input[block.payload.clone()], 0).unwrap();
+        let tables = DecodeTables::from_lengths(&lengths).unwrap();
+        let mut bits = BitReader {
+            input: &input[block.payload],
+            bit_pos: table_bits,
+        };
+        assert_eq!(tables.main.decode(&mut bits).unwrap(), 256);
+        let first = read_filter(&mut bits, 0).unwrap();
+        assert_eq!(tables.main.decode(&mut bits).unwrap(), 256);
+        let second = read_filter(&mut bits, 0).unwrap();
+
+        let output = decode_lz(&input, 0, data.len()).unwrap();
+
+        assert_eq!(output, data);
+        assert_eq!(first.start, first_start);
+        assert_eq!(second.start, second_start);
+    }
+
+    #[test]
     fn encodes_lz_member_with_arm_filter_record() {
         let data = [0x04, 0x00, 0x00, 0xeb, b'A', b'R', b'M', b'!'];
         let input = encode_lz_member_with_filter(&data, Rar50FilterKind::Arm).unwrap();
@@ -2587,6 +3023,22 @@ mod tests {
             second
         );
         assert!(solid.len() < standalone.len());
+    }
+
+    #[test]
+    fn solid_encoder_history_limit_follows_encode_options_dictionary() {
+        let mut encoder = Unpack50Encoder::with_options(
+            EncodeOptions::new(0).with_max_match_distance(DEFAULT_DICTIONARY_SIZE + 1024),
+        );
+        encoder.remember(&vec![0x41; DEFAULT_DICTIONARY_SIZE + 512]);
+
+        assert_eq!(encoder.history.len(), DEFAULT_DICTIONARY_SIZE + 512);
+
+        let mut capped =
+            Unpack50Encoder::with_options(EncodeOptions::new(0).with_max_match_distance(1024));
+        capped.remember(&vec![0x42; 4096]);
+
+        assert_eq!(capped.history.len(), 1024);
     }
 
     #[test]

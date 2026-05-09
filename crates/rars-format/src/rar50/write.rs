@@ -8,6 +8,8 @@ use rars_crypto::rar50::{Rar50Cipher, Rar50Keys};
 use rars_recovery::rar5::build_structural_inline_recovery_data;
 
 const MAX_MATCH_CANDIDATES_DEFAULT: usize = 256;
+const DEFAULT_RAR50_DICTIONARY_SIZE: u64 = 128 * 1024;
+const AUTO_DELTA_EDGE_SKIP: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -15,6 +17,7 @@ pub struct WriterOptions {
     pub target: crate::ArchiveVersion,
     pub features: crate::FeatureSet,
     pub compression_level: Option<u8>,
+    pub dictionary_size: Option<u64>,
 }
 
 impl WriterOptions {
@@ -23,11 +26,17 @@ impl WriterOptions {
             target,
             features,
             compression_level: None,
+            dictionary_size: None,
         }
     }
 
     pub const fn with_compression_level(mut self, level: u8) -> Self {
         self.compression_level = Some(level);
+        self
+    }
+
+    pub const fn with_dictionary_size(mut self, size: u64) -> Self {
+        self.dictionary_size = Some(size);
         self
     }
 }
@@ -38,6 +47,7 @@ impl Default for WriterOptions {
             target: crate::ArchiveVersion::Rar50,
             features: crate::FeatureSet::store_only(),
             compression_level: None,
+            dictionary_size: None,
         }
     }
 }
@@ -376,9 +386,11 @@ impl<'a> Rar50Writer<'a> {
                 feature: "RAR 5 mixed encrypted/plain archive comments",
             });
         }
-        let algorithm_version = rar50_algorithm_version(self.options.target)?;
+        let algorithm_version = rar50_algorithm_version(self.options)?;
         let compression_method = compression_method_for_level(self.options.compression_level)?;
-        let encode_options = encode_options_for_level(self.options.compression_level)?;
+        let dictionary_size = dictionary_size_for_options(self.options)?;
+        let encode_options =
+            encode_options_for_level(self.options.compression_level, dictionary_size)?;
 
         let mut resolved_members = Vec::with_capacity(self.members.len());
         match member_kind.unwrap_or(Rar50WriteMemberKind::Stored) {
@@ -486,17 +498,25 @@ impl<'a> Rar50Writer<'a> {
                         resolved_members.push(ResolvedRar50WriteMember::StoredCompressed(entry));
                         continue;
                     }
-                    let packed = if let Some(encoder) = solid_encoder.as_mut() {
-                        encoder
-                            .encode_member(entry.data, algorithm_version)
-                            .map_err(Error::from)?
-                    } else {
-                        encode_member_with_filter_policy(
+                    let (packed, solid_continuation) = if let Some(encoder) = solid_encoder.as_mut()
+                    {
+                        encode_with_solid_reset_policy(
+                            encoder,
                             entry.data,
                             algorithm_version,
-                            self.filter_policy,
                             encode_options,
+                            index,
                         )?
+                    } else {
+                        (
+                            encode_member_with_filter_policy(
+                                entry.data,
+                                algorithm_version,
+                                self.filter_policy,
+                                encode_options,
+                            )?,
+                            false,
+                        )
                     };
                     if should_store_compressed_payload(
                         entry.data,
@@ -511,7 +531,8 @@ impl<'a> Rar50Writer<'a> {
                             packed,
                             algorithm_version,
                             compression_method,
-                            solid_continuation: self.options.features.solid && index != 0,
+                            dictionary_size,
+                            solid_continuation,
                         });
                     }
                 }
@@ -676,13 +697,25 @@ impl<'a> Rar50Writer<'a> {
                         );
                         continue;
                     }
-                    let packed = if let Some(encoder) = solid_encoder.as_mut() {
-                        encoder
-                            .encode_member(entry.data, algorithm_version)
-                            .map_err(Error::from)?
+                    let (packed, solid_continuation) = if let Some(encoder) = solid_encoder.as_mut()
+                    {
+                        encode_with_solid_reset_policy(
+                            encoder,
+                            entry.data,
+                            algorithm_version,
+                            encode_options,
+                            index,
+                        )?
                     } else {
-                        encode_lz_member_with_options(entry.data, algorithm_version, encode_options)
-                            .map_err(Error::from)?
+                        (
+                            encode_lz_member_with_options(
+                                entry.data,
+                                algorithm_version,
+                                encode_options,
+                            )
+                            .map_err(Error::from)?,
+                            false,
+                        )
                     };
                     if should_store_compressed_payload(
                         entry.data,
@@ -704,7 +737,8 @@ impl<'a> Rar50Writer<'a> {
                             encrypted,
                             algorithm_version,
                             compression_method,
-                            solid_continuation: self.options.features.solid && index != 0,
+                            dictionary_size,
+                            solid_continuation,
                         });
                     }
                 }
@@ -782,6 +816,7 @@ enum ResolvedRar50WriteMember<'a> {
         packed: Vec<u8>,
         algorithm_version: u8,
         compression_method: u8,
+        dictionary_size: u64,
         solid_continuation: bool,
     },
     EncryptedStored {
@@ -801,6 +836,7 @@ enum ResolvedRar50WriteMember<'a> {
         encrypted: EncryptedStoredPayload,
         algorithm_version: u8,
         compression_method: u8,
+        dictionary_size: u64,
         solid_continuation: bool,
     },
 }
@@ -913,6 +949,7 @@ fn emit_resolved_writer_plan_pass(
                 packed,
                 algorithm_version,
                 compression_method,
+                dictionary_size,
                 solid_continuation,
             } => write_compressed_entry_payload(
                 &mut out,
@@ -920,6 +957,7 @@ fn emit_resolved_writer_plan_pass(
                 packed,
                 *algorithm_version,
                 *compression_method,
+                *dictionary_size,
                 *solid_continuation,
             )?,
             ResolvedRar50WriteMember::EncryptedStored { entry, encrypted } => {
@@ -968,6 +1006,7 @@ fn emit_resolved_writer_plan_pass(
                 encrypted,
                 algorithm_version,
                 compression_method,
+                dictionary_size,
                 solid_continuation,
             } => write_encrypted_compressed_entry_fragment_with_header_keys(
                 &mut out,
@@ -977,6 +1016,7 @@ fn emit_resolved_writer_plan_pass(
                     encrypted,
                     algorithm_version: *algorithm_version,
                     compression_method: *compression_method,
+                    dictionary_size: *dictionary_size,
                     solid_continuation: *solid_continuation,
                     split_before: false,
                     split_after: false,
@@ -1127,9 +1167,10 @@ fn write_compressed_volume_set_impl(
         ));
     }
 
-    let algorithm_version = rar50_algorithm_version(options.target)?;
+    let algorithm_version = rar50_algorithm_version(options)?;
     let compression_method = compression_method_for_level(options.compression_level)?;
-    let encode_options = encode_options_for_level(options.compression_level)?;
+    let dictionary_size = dictionary_size_for_options(options)?;
+    let encode_options = encode_options_for_level(options.compression_level, dictionary_size)?;
 
     let mut encoder = options
         .features
@@ -1142,13 +1183,20 @@ fn write_compressed_volume_set_impl(
             members.push(CompressedVolumeMember::Stored { entry_index: index });
             continue;
         }
-        let packed = if let Some(encoder) = encoder.as_mut() {
-            encoder
-                .encode_member(entry.data, algorithm_version)
-                .map_err(Error::from)?
+        let (packed, solid_continuation) = if let Some(encoder) = encoder.as_mut() {
+            encode_with_solid_reset_policy(
+                encoder,
+                entry.data,
+                algorithm_version,
+                encode_options,
+                index,
+            )?
         } else {
-            encode_lz_member_with_options(entry.data, algorithm_version, encode_options)
-                .map_err(Error::from)?
+            (
+                encode_lz_member_with_options(entry.data, algorithm_version, encode_options)
+                    .map_err(Error::from)?,
+                false,
+            )
         };
         if should_store_compressed_payload(
             entry.data,
@@ -1162,7 +1210,8 @@ fn write_compressed_volume_set_impl(
                 entry_index: index,
                 packed,
                 compression_method,
-                solid_continuation: options.features.solid && index != 0,
+                dictionary_size,
+                solid_continuation,
             });
         }
     }
@@ -1196,6 +1245,7 @@ fn write_compressed_volume_set_impl(
                 entry_index,
                 packed,
                 compression_method,
+                dictionary_size,
                 solid_continuation,
             } => {
                 writer.write_member(
@@ -1208,6 +1258,7 @@ fn write_compressed_volume_set_impl(
                                 data: &packed[start..end],
                                 algorithm_version,
                                 compression_method: *compression_method,
+                                dictionary_size: *dictionary_size,
                                 solid_continuation: *solid_continuation,
                                 split_before,
                                 split_after,
@@ -1325,9 +1376,10 @@ fn write_encrypted_compressed_volume_set_impl(
         ));
     }
 
-    let algorithm_version = rar50_algorithm_version(options.target)?;
+    let algorithm_version = rar50_algorithm_version(options)?;
     let compression_method = compression_method_for_level(options.compression_level)?;
-    let encode_options = encode_options_for_level(options.compression_level)?;
+    let dictionary_size = dictionary_size_for_options(options)?;
+    let encode_options = encode_options_for_level(options.compression_level, dictionary_size)?;
 
     let mut solid_encoder = options
         .features
@@ -1344,13 +1396,20 @@ fn write_encrypted_compressed_volume_set_impl(
             });
             continue;
         }
-        let packed = if let Some(encoder) = solid_encoder.as_mut() {
-            encoder
-                .encode_member(entry.data, algorithm_version)
-                .map_err(Error::from)?
+        let (packed, solid_continuation) = if let Some(encoder) = solid_encoder.as_mut() {
+            encode_with_solid_reset_policy(
+                encoder,
+                entry.data,
+                algorithm_version,
+                encode_options,
+                index,
+            )?
         } else {
-            encode_lz_member_with_options(entry.data, algorithm_version, encode_options)
-                .map_err(Error::from)?
+            (
+                encode_lz_member_with_options(entry.data, algorithm_version, encode_options)
+                    .map_err(Error::from)?,
+                false,
+            )
         };
         if should_store_compressed_payload(
             entry.data,
@@ -1369,7 +1428,8 @@ fn write_encrypted_compressed_volume_set_impl(
                 entry_index: index,
                 encrypted,
                 compression_method,
-                solid_continuation: options.features.solid && index != 0,
+                dictionary_size,
+                solid_continuation,
             });
         }
     }
@@ -1413,6 +1473,7 @@ fn write_encrypted_compressed_volume_set_impl(
                 entry_index,
                 encrypted,
                 compression_method,
+                dictionary_size,
                 solid_continuation,
             } => {
                 writer.write_member(
@@ -1426,6 +1487,7 @@ fn write_encrypted_compressed_volume_set_impl(
                                 encrypted,
                                 algorithm_version,
                                 compression_method: *compression_method,
+                                dictionary_size: *dictionary_size,
                                 solid_continuation: *solid_continuation,
                                 split_before,
                                 split_after,
@@ -1518,7 +1580,38 @@ fn should_store_compressed_payload(
     !solid && !matches!(policy, FilterPolicy::Explicit(_)) && packed.len() >= data.len()
 }
 
-fn encode_options_for_level(level: Option<u8>) -> Result<EncodeOptions> {
+fn encode_with_solid_reset_policy(
+    encoder: &mut Unpack50Encoder,
+    data: &[u8],
+    algorithm_version: u8,
+    options: EncodeOptions,
+    index: usize,
+) -> Result<(Vec<u8>, bool)> {
+    if index == 0 {
+        return encoder
+            .encode_member(data, algorithm_version)
+            .map(|packed| (packed, false))
+            .map_err(Error::from);
+    }
+
+    let mut continued = encoder.clone();
+    let continued_packed = continued
+        .encode_member(data, algorithm_version)
+        .map_err(Error::from)?;
+    let mut fresh = Unpack50Encoder::with_options(options);
+    let fresh_packed = fresh
+        .encode_member(data, algorithm_version)
+        .map_err(Error::from)?;
+    if fresh_packed.len() < continued_packed.len() {
+        *encoder = fresh;
+        Ok((fresh_packed, false))
+    } else {
+        *encoder = continued;
+        Ok((continued_packed, true))
+    }
+}
+
+fn encode_options_for_level(level: Option<u8>, dictionary_size: u64) -> Result<EncodeOptions> {
     let candidates = match level {
         None => MAX_MATCH_CANDIDATES_DEFAULT,
         Some(0) => 0,
@@ -1533,19 +1626,33 @@ fn encode_options_for_level(level: Option<u8>) -> Result<EncodeOptions> {
             ))
         }
     };
-    Ok(EncodeOptions::new(candidates).with_lazy_matching(matches!(level, None | Some(4..=5))))
+    let max_match_distance = usize::try_from(dictionary_size).map_err(|_| {
+        Error::InvalidHeader("RAR 5 dictionary size exceeds this platform's address space")
+    })?;
+    Ok(EncodeOptions::new(candidates)
+        .with_lazy_matching(matches!(level, None | Some(4..=5)))
+        .with_lazy_lookahead(if matches!(level, Some(5)) { 4 } else { 1 })
+        .with_max_match_distance(max_match_distance))
 }
 
 fn validate_compression_level(options: WriterOptions) -> Result<()> {
     compression_method_for_level(options.compression_level)?;
-    encode_options_for_level(options.compression_level).map(|_| ())
+    let dictionary_size = dictionary_size_for_options(options)?;
+    encode_options_for_level(options.compression_level, dictionary_size).map(|_| ())
 }
 
-fn rar50_algorithm_version(target: crate::ArchiveVersion) -> Result<u8> {
-    match target {
+fn rar50_algorithm_version(options: WriterOptions) -> Result<u8> {
+    match options.target {
         crate::ArchiveVersion::Rar50 => Ok(0),
-        crate::ArchiveVersion::Rar70 => Ok(0),
-        _ => Err(Error::UnsupportedVersion(target)),
+        crate::ArchiveVersion::Rar70 => {
+            let dictionary_size = dictionary_size_for_options(options)?;
+            if dictionary_size_fields(0, dictionary_size).is_ok() {
+                Ok(0)
+            } else {
+                Ok(1)
+            }
+        }
+        _ => Err(Error::UnsupportedVersion(options.target)),
     }
 }
 
@@ -1559,10 +1666,99 @@ fn compression_method_for_level(level: Option<u8>) -> Result<u8> {
     }
 }
 
-fn compression_info(algorithm_version: u8, method: u8, solid_continuation: bool) -> u64 {
-    u64::from(algorithm_version)
+fn dictionary_size_for_options(options: WriterOptions) -> Result<u64> {
+    let size = options
+        .dictionary_size
+        .unwrap_or(DEFAULT_RAR50_DICTIONARY_SIZE);
+    validate_dictionary_size(options.target, size)?;
+    Ok(size)
+}
+
+fn validate_dictionary_size(target: crate::ArchiveVersion, size: u64) -> Result<()> {
+    match target {
+        crate::ArchiveVersion::Rar50 => dictionary_size_fields(0, size).map(|_| ()),
+        crate::ArchiveVersion::Rar70 => dictionary_size_fields(0, size)
+            .or_else(|_| dictionary_size_fields(1, size))
+            .map(|_| ()),
+        _ => Err(Error::UnsupportedVersion(target)),
+    }
+}
+
+fn dictionary_size_fields(algorithm_version: u8, size: u64) -> Result<(u8, u8)> {
+    if size == 0 {
+        return Err(Error::InvalidHeader(
+            "RAR 5 dictionary size must be non-zero",
+        ));
+    }
+    match algorithm_version {
+        0 => {
+            if size < DEFAULT_RAR50_DICTIONARY_SIZE {
+                return Err(Error::InvalidHeader(
+                    "RAR 5 v0 dictionary size must be at least 128 KiB",
+                ));
+            }
+            if !size.is_multiple_of(DEFAULT_RAR50_DICTIONARY_SIZE) {
+                return Err(Error::InvalidHeader(
+                    "RAR 5 v0 dictionary size must be a power-of-two multiple of 128 KiB",
+                ));
+            }
+            let multiple = size / DEFAULT_RAR50_DICTIONARY_SIZE;
+            if !multiple.is_power_of_two() {
+                return Err(Error::InvalidHeader(
+                    "RAR 5 v0 dictionary size must be a power-of-two multiple of 128 KiB",
+                ));
+            }
+            let power = multiple.trailing_zeros();
+            if power > 15 {
+                return Err(Error::InvalidHeader(
+                    "RAR 5 v0 dictionary size exceeds 4 GiB",
+                ));
+            }
+            Ok((power as u8, 0))
+        }
+        1 => {
+            if !size.is_multiple_of(4096) {
+                return Err(Error::InvalidHeader(
+                    "RAR 7 dictionary size must be a multiple of 4 KiB",
+                ));
+            }
+            let mut units = size / 4096;
+            let mut power = 0u8;
+            while units > 63 {
+                if !units.is_multiple_of(2) || power == 31 {
+                    return Err(Error::InvalidHeader(
+                        "RAR 7 dictionary size is not encodable",
+                    ));
+                }
+                units /= 2;
+                power += 1;
+            }
+            if units < 32 {
+                return Err(Error::InvalidHeader(
+                    "RAR 7 dictionary size must be at least 128 KiB",
+                ));
+            }
+            Ok((power, (units - 32) as u8))
+        }
+        _ => Err(Error::InvalidHeader(
+            "RAR 5 unknown compression algorithm version",
+        )),
+    }
+}
+
+fn compression_info(
+    algorithm_version: u8,
+    method: u8,
+    dictionary_size: u64,
+    solid_continuation: bool,
+) -> Result<u64> {
+    let (dictionary_power, dictionary_fraction) =
+        dictionary_size_fields(algorithm_version, dictionary_size)?;
+    Ok(u64::from(algorithm_version)
         | (u64::from(method) << 7)
-        | solid_compression_flag(solid_continuation)
+        | (u64::from(dictionary_power) << 10)
+        | (u64::from(dictionary_fraction) << 15)
+        | solid_compression_flag(solid_continuation))
 }
 
 fn encode_member_with_auto_size_filter(
@@ -1583,6 +1779,20 @@ fn encode_member_with_auto_size_filter(
             best = packed;
         }
     }
+    for channels in 1..=4 {
+        if let Some(range) = auto_delta_filter_range(data, channels) {
+            let packed = encode_member_with_filter_spec(
+                data,
+                algorithm_version,
+                Rar50FilterSpec::range(FilterKind::Delta { channels }, range),
+                options,
+            )
+            .map_err(Error::from)?;
+            if packed.len() < best.len() {
+                best = packed;
+            }
+        }
+    }
     for range in auto_x86_filter_ranges(data, false) {
         let packed = encode_member_with_filter_spec(
             data,
@@ -1591,6 +1801,18 @@ fn encode_member_with_auto_size_filter(
             options,
         )
         .map_err(Error::from)?;
+        if packed.len() < best.len() {
+            best = packed;
+        }
+    }
+    let e8_ranges = disjoint_filter_ranges(auto_x86_filter_ranges(data, false));
+    if e8_ranges.len() > 1 {
+        let filters: Vec<_> = e8_ranges
+            .into_iter()
+            .map(|range| Rar50FilterSpec::range(FilterKind::E8, range))
+            .collect();
+        let packed = encode_member_with_filter_specs(data, algorithm_version, &filters, options)
+            .map_err(Error::from)?;
         if packed.len() < best.len() {
             best = packed;
         }
@@ -1607,7 +1829,45 @@ fn encode_member_with_auto_size_filter(
             best = packed;
         }
     }
+    let e8e9_ranges = disjoint_filter_ranges(auto_x86_filter_ranges(data, true));
+    if e8e9_ranges.len() > 1 {
+        let filters: Vec<_> = e8e9_ranges
+            .into_iter()
+            .map(|range| Rar50FilterSpec::range(FilterKind::E8E9, range))
+            .collect();
+        let packed = encode_member_with_filter_specs(data, algorithm_version, &filters, options)
+            .map_err(Error::from)?;
+        if packed.len() < best.len() {
+            best = packed;
+        }
+    }
     Ok(best)
+}
+
+fn auto_delta_filter_range(data: &[u8], channels: usize) -> Option<std::ops::Range<usize>> {
+    if channels == 0 || data.len() <= AUTO_DELTA_EDGE_SKIP * 2 + channels * 8 {
+        return None;
+    }
+    let start = AUTO_DELTA_EDGE_SKIP;
+    let end = data.len() - AUTO_DELTA_EDGE_SKIP;
+    let aligned_start = start + ((channels - start % channels) % channels);
+    let aligned_end = end - (end - aligned_start) % channels;
+    (aligned_start + channels * 8 <= aligned_end).then_some(aligned_start..aligned_end)
+}
+
+fn disjoint_filter_ranges(mut ranges: Vec<std::ops::Range<usize>>) -> Vec<std::ops::Range<usize>> {
+    ranges.sort_by_key(|range| (range.start, range.end));
+    let mut disjoint: Vec<std::ops::Range<usize>> = Vec::new();
+    for range in ranges {
+        if let Some(last) = disjoint.last_mut() {
+            if range.start <= last.end {
+                last.end = last.end.max(range.end);
+                continue;
+            }
+        }
+        disjoint.push(range);
+    }
+    disjoint
 }
 
 fn encode_member_with_filter(
@@ -1636,6 +1896,19 @@ fn encode_member_with_filter_spec(
     )
 }
 
+fn encode_member_with_filter_specs(
+    data: &[u8],
+    algorithm_version: u8,
+    filters: &[Rar50FilterSpec],
+    options: EncodeOptions,
+) -> rars_codec::Result<Vec<u8>> {
+    Unpack50Encoder::with_options(options).encode_member_with_filters(
+        data,
+        algorithm_version,
+        filters,
+    )
+}
+
 enum CompressedVolumeMember {
     Stored {
         entry_index: usize,
@@ -1644,6 +1917,7 @@ enum CompressedVolumeMember {
         entry_index: usize,
         packed: Vec<u8>,
         compression_method: u8,
+        dictionary_size: u64,
         solid_continuation: bool,
     },
 }
@@ -1657,6 +1931,7 @@ enum EncryptedCompressedVolumeMember {
         entry_index: usize,
         encrypted: EncryptedStoredPayload,
         compression_method: u8,
+        dictionary_size: u64,
         solid_continuation: bool,
     },
 }
@@ -2185,12 +2460,17 @@ fn write_compressed_entry_payload(
     packed: &[u8],
     algorithm_version: u8,
     compression_method: u8,
+    dictionary_size: u64,
     solid_continuation: bool,
 ) -> Result<()> {
     let mut extra = Vec::new();
     write_hash_record(&mut extra, entry.data);
-    let compression_info =
-        compression_info(algorithm_version, compression_method, solid_continuation);
+    let compression_info = compression_info(
+        algorithm_version,
+        compression_method,
+        dictionary_size,
+        solid_continuation,
+    )?;
     let specific = file_specific(
         entry.name,
         entry.data.len() as u64,
@@ -2216,6 +2496,7 @@ struct CompressedFragment<'a, 'b> {
     data: &'a [u8],
     algorithm_version: u8,
     compression_method: u8,
+    dictionary_size: u64,
     solid_continuation: bool,
     split_before: bool,
     split_after: bool,
@@ -2230,6 +2511,7 @@ fn write_compressed_entry_fragment(
         data,
         algorithm_version,
         compression_method,
+        dictionary_size,
         solid_continuation,
         split_before,
         split_after,
@@ -2239,8 +2521,12 @@ fn write_compressed_entry_fragment(
     if !split_after {
         write_hash_record(&mut extra, entry.data);
     }
-    let compression_info =
-        compression_info(algorithm_version, compression_method, solid_continuation);
+    let compression_info = compression_info(
+        algorithm_version,
+        compression_method,
+        dictionary_size,
+        solid_continuation,
+    )?;
     let specific = file_specific(
         entry.name,
         entry.data.len() as u64,
@@ -2447,6 +2733,7 @@ struct EncryptedCompressedFragment<'a, 'b> {
     encrypted: &'a EncryptedStoredPayload,
     algorithm_version: u8,
     compression_method: u8,
+    dictionary_size: u64,
     solid_continuation: bool,
     split_before: bool,
     split_after: bool,
@@ -2463,6 +2750,7 @@ fn write_encrypted_compressed_entry_fragment_with_header_keys(
         encrypted,
         algorithm_version,
         compression_method,
+        dictionary_size,
         solid_continuation,
         split_before,
         split_after,
@@ -2479,8 +2767,12 @@ fn write_encrypted_compressed_entry_fragment_with_header_keys(
         write_hash_record_with_value(&mut extra, encrypted.blake2sp_mac);
     }
 
-    let compression_info =
-        compression_info(algorithm_version, compression_method, solid_continuation);
+    let compression_info = compression_info(
+        algorithm_version,
+        compression_method,
+        dictionary_size,
+        solid_continuation,
+    )?;
     let specific = file_specific(
         entry.name,
         entry.data.len() as u64,
@@ -3145,6 +3437,93 @@ mod tests {
     }
 
     #[test]
+    fn writer_stamps_requested_rar50_dictionary_size() {
+        let data = b"RAR5 dictionary-size writer option fixture".repeat(64);
+        let options =
+            WriterOptions::new(crate::ArchiveVersion::Rar50, crate::FeatureSet::default())
+                .with_dictionary_size(512 * 1024);
+        let entries = [CompressedEntry {
+            name: b"dict.bin",
+            data: &data,
+            mtime: None,
+            attributes: 0x20,
+            host_os: 3,
+        }];
+        let archive = Rar50Writer::new(options)
+            .compressed_entries(&entries)
+            .finish()
+            .unwrap();
+
+        let parsed = Archive::parse(&archive).unwrap();
+        let info = parsed
+            .files()
+            .next()
+            .unwrap()
+            .decoded_compression_info()
+            .unwrap();
+        let extracted = collect_extract(&parsed).unwrap();
+
+        assert_eq!(info.algorithm_version, 0);
+        assert_eq!(info.dictionary_size, 512 * 1024);
+        assert_eq!(extracted[0].data, data);
+    }
+
+    #[test]
+    fn writer_uses_rar7_dictionary_fields_when_size_needs_v1_encoding() {
+        let data = b"RAR7 dictionary-size writer option fixture".repeat(64);
+        let options =
+            WriterOptions::new(crate::ArchiveVersion::Rar70, crate::FeatureSet::default())
+                .with_dictionary_size(192 * 1024);
+        let entries = [CompressedEntry {
+            name: b"dict7.bin",
+            data: &data,
+            mtime: None,
+            attributes: 0x20,
+            host_os: 3,
+        }];
+        let archive = Rar50Writer::new(options)
+            .compressed_entries(&entries)
+            .finish()
+            .unwrap();
+
+        let parsed = Archive::parse(&archive).unwrap();
+        let info = parsed
+            .files()
+            .next()
+            .unwrap()
+            .decoded_compression_info()
+            .unwrap();
+        let extracted = collect_extract(&parsed).unwrap();
+
+        assert_eq!(info.algorithm_version, 1);
+        assert_eq!(info.dictionary_size, 192 * 1024);
+        assert_eq!(extracted[0].data, data);
+    }
+
+    #[test]
+    fn writer_rejects_unencodable_rar50_dictionary_size() {
+        let options =
+            WriterOptions::new(crate::ArchiveVersion::Rar50, crate::FeatureSet::default())
+                .with_dictionary_size(192 * 1024);
+        let entries = [CompressedEntry {
+            name: b"bad.bin",
+            data: b"data data data data",
+            mtime: None,
+            attributes: 0x20,
+            host_os: 3,
+        }];
+
+        assert!(matches!(
+            Rar50Writer::new(options)
+                .compressed_entries(&entries)
+                .finish(),
+            Err(Error::InvalidHeader(
+                "RAR 5 v0 dictionary size must be a power-of-two multiple of 128 KiB"
+            ))
+        ));
+    }
+
+    #[test]
     fn auto_x86_filter_ranges_select_dense_opcode_clusters() {
         let mut data = vec![0u8; 100_000];
         data[1_000] = 0xe8;
@@ -3168,6 +3547,102 @@ mod tests {
         assert!(e8e9_ranges
             .iter()
             .any(|range| range.start <= 70_000 && range.end >= 70_197));
+    }
+
+    #[test]
+    fn auto_x86_filter_policy_can_emit_multiple_disjoint_ranges() {
+        let mut data = vec![0x41u8; 80_000];
+        for cluster_start in [8_000, 60_000] {
+            for index in 0..8 {
+                let pos = cluster_start + index * 64;
+                data[pos] = 0xe8;
+                data[pos + 1..pos + 5].copy_from_slice(&(0x2000u32 + index as u32).to_le_bytes());
+            }
+        }
+        let ranges = disjoint_filter_ranges(auto_x86_filter_ranges(&data, false));
+        let filters: Vec<_> = ranges
+            .into_iter()
+            .map(|range| Rar50FilterSpec::range(FilterKind::E8, range))
+            .collect();
+
+        let packed =
+            encode_member_with_filter_specs(&data, 0, &filters, EncodeOptions::default()).unwrap();
+        let mut decoder = rars_codec::rar50::Unpack50Decoder::new();
+        let output = decoder
+            .decode_member(
+                &packed,
+                0,
+                data.len(),
+                false,
+                rars_codec::rar50::DecodeMode::Lz,
+            )
+            .unwrap();
+
+        assert_eq!(filters.len(), 2);
+        assert_eq!(output, data);
+    }
+
+    #[test]
+    fn auto_delta_filter_range_skips_container_edges_and_aligns_channels() {
+        let data = vec![0u8; 512];
+
+        let range = auto_delta_filter_range(&data, 3).unwrap();
+
+        assert!(range.start >= AUTO_DELTA_EDGE_SKIP);
+        assert!(range.end <= data.len() - AUTO_DELTA_EDGE_SKIP);
+        assert_eq!(range.start % 3, 0);
+        assert_eq!((range.end - range.start) % 3, 0);
+        assert!(auto_delta_filter_range(&data[..80], 3).is_none());
+    }
+
+    #[test]
+    fn auto_filter_policy_considers_ranged_delta_candidates() {
+        let mut data = vec![0x55u8; AUTO_DELTA_EDGE_SKIP];
+        for sample in 0..256u16 {
+            let left = sample as u8;
+            let right = left.wrapping_add(1);
+            data.extend_from_slice(&[left, right]);
+        }
+        data.extend(std::iter::repeat_n(0xaa, AUTO_DELTA_EDGE_SKIP));
+        let options = EncodeOptions::default();
+
+        let plain = encode_lz_member_with_options(&data, 0, options).unwrap();
+        let ranged = encode_member_with_filter_spec(
+            &data,
+            0,
+            Rar50FilterSpec::range(
+                FilterKind::Delta { channels: 2 },
+                auto_delta_filter_range(&data, 2).unwrap(),
+            ),
+            options,
+        )
+        .unwrap();
+        let auto = encode_member_with_auto_size_filter(&data, 0, options).unwrap();
+
+        assert!(ranged.len() < plain.len());
+        assert_eq!(auto.len(), ranged.len());
+    }
+
+    #[test]
+    fn solid_reset_policy_chooses_smaller_of_continued_and_fresh_streams() {
+        let options = EncodeOptions::default();
+        let first = b"solid reset policy unrelated prefix data\n".repeat(32);
+        let second = b"second member second member second member\n".repeat(16);
+        let mut encoder = Unpack50Encoder::with_options(options);
+        encoder.encode_member(&first, 0).unwrap();
+
+        let mut continued = encoder.clone();
+        let continued_packed = continued.encode_member(&second, 0).unwrap();
+        let mut fresh = Unpack50Encoder::with_options(options);
+        let fresh_packed = fresh.encode_member(&second, 0).unwrap();
+        let expected_fresh = fresh_packed.len() < continued_packed.len();
+        let expected_len = continued_packed.len().min(fresh_packed.len());
+
+        let (packed, solid_continuation) =
+            encode_with_solid_reset_policy(&mut encoder, &second, 0, options, 1).unwrap();
+
+        assert_eq!(packed.len(), expected_len);
+        assert_eq!(solid_continuation, !expected_fresh);
     }
 
     #[test]
