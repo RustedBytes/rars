@@ -17,6 +17,7 @@ const STREAM_FLUSH_THRESHOLD: usize = 64 * 1024;
 const STREAM_HISTORY_LIMIT: usize = 64 * 1024 * 1024;
 const MAX_ENCODER_MATCH_OFFSET: usize = DEFAULT_DICTIONARY_SIZE;
 const MAX_ENCODER_MATCH_LENGTH: usize = 4096;
+const MAX_COMPRESSED_BLOCK_OUTPUT: usize = 4 * 1024 * 1024;
 const MATCH_HASH_BUCKETS: usize = 4096;
 const MAX_MATCH_CANDIDATES: usize = 256;
 
@@ -625,6 +626,50 @@ fn encode_lz_member_inner(
     initial_filters: &[EncodeFilter],
     options: EncodeOptions,
 ) -> Result<Vec<u8>> {
+    if data.len() > MAX_COMPRESSED_BLOCK_OUTPUT && initial_filters.is_empty() {
+        let mut out = Vec::new();
+        let mut block_history =
+            history[history.len().saturating_sub(options.max_match_distance)..].to_vec();
+        let mut chunks = data.chunks(MAX_COMPRESSED_BLOCK_OUTPUT).peekable();
+        while let Some(chunk) = chunks.next() {
+            let is_last = chunks.peek().is_none();
+            out.extend(encode_lz_block(
+                chunk,
+                &block_history,
+                algorithm_version,
+                &[],
+                options,
+                is_last,
+            )?);
+            block_history.extend_from_slice(chunk);
+            let keep_from = block_history
+                .len()
+                .saturating_sub(options.max_match_distance);
+            if keep_from != 0 {
+                block_history.drain(..keep_from);
+            }
+        }
+        return Ok(out);
+    }
+
+    encode_lz_block(
+        data,
+        history,
+        algorithm_version,
+        initial_filters,
+        options,
+        true,
+    )
+}
+
+fn encode_lz_block(
+    data: &[u8],
+    history: &[u8],
+    algorithm_version: u8,
+    initial_filters: &[EncodeFilter],
+    options: EncodeOptions,
+    is_last: bool,
+) -> Result<Vec<u8>> {
     let distance_size = match algorithm_version {
         0 => DISTANCE_TABLE_SIZE_50,
         1 => DISTANCE_TABLE_SIZE_70,
@@ -760,7 +805,7 @@ fn encode_lz_member_inner(
     }
 
     let payload_bits = writer.bit_pos;
-    encode_compressed_block(&writer.finish(), payload_bits, true, true)
+    encode_compressed_block(&writer.finish(), payload_bits, true, is_last)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -3042,6 +3087,25 @@ mod tests {
             second
         );
         assert!(solid.len() < standalone.len());
+    }
+
+    #[test]
+    fn large_lz_members_are_split_into_multiple_compressed_blocks() {
+        let data = vec![0u8; MAX_COMPRESSED_BLOCK_OUTPUT + 1];
+        let encoded = encode_lz_member_with_options(&data, 0, EncodeOptions::new(16)).unwrap();
+        let mut cursor = std::io::Cursor::new(encoded.as_slice());
+        let first = read_compressed_block(&mut cursor).unwrap();
+        let second = read_compressed_block(&mut cursor).unwrap();
+        let mut decoder = Unpack50Decoder::new();
+
+        assert!(!first.header.is_last);
+        assert!(second.header.is_last);
+        assert_eq!(
+            decoder
+                .decode_member(&encoded, 0, data.len(), false, DecodeMode::Lz)
+                .unwrap(),
+            data
+        );
     }
 
     #[test]
