@@ -3,8 +3,6 @@ use crate::ppmd::{PpmdByteReader, PpmdDecoder, PpmdEncoder};
 use crate::rarvm;
 use crate::{Error, Result};
 use rars_crc32::crc32;
-use std::cmp::Reverse;
-use std::collections::BinaryHeap;
 use std::io::{Read, Write};
 use std::ops::Range;
 
@@ -17,6 +15,7 @@ const TABLE_COUNT: usize = MAIN_COUNT + OFFSET_COUNT + LOW_OFFSET_COUNT + LENGTH
 const MAX_HISTORY: usize = 4 * 1024 * 1024;
 const INPUT_CHUNK: usize = 64 * 1024;
 const STREAM_CHUNK: usize = 1024 * 1024;
+const MAX_VM_FILTER_BLOCK_SIZE: usize = 128 * 1024;
 const MAX_VM_GLOBAL_DATA: usize = 0x2000;
 const MAX_VM_CODE_SIZE: usize = 64 * 1024;
 const MAX_VM_PROGRAMS: usize = 1024;
@@ -166,6 +165,52 @@ fn filtered_members(input: &[u8], filters: &[Rar29FilterSpec]) -> Result<Filtere
 struct FilteredMembers {
     data: Vec<u8>,
     records: Vec<OwnedVmFilterRecord>,
+}
+
+fn split_large_filter(input_len: usize, filter: Rar29FilterSpec) -> Result<Vec<Rar29FilterSpec>> {
+    let range = filter.range.clone().unwrap_or(0..input_len);
+    if range.start >= range.end || range.end > input_len {
+        return Err(Error::InvalidData("RAR 2.9 VM filter range is invalid"));
+    }
+    if range.len() <= MAX_VM_FILTER_BLOCK_SIZE {
+        return Ok(vec![filter]);
+    }
+
+    let chunk_size = match filter.kind {
+        Rar29FilterKind::Delta { channels } | Rar29FilterKind::Audio { channels } => {
+            if channels == 0 || channels > MAX_VM_FILTER_BLOCK_SIZE {
+                return Err(Error::InvalidData(
+                    "RAR 2.9 VM filter channel count is invalid",
+                ));
+            }
+            MAX_VM_FILTER_BLOCK_SIZE - (MAX_VM_FILTER_BLOCK_SIZE % channels)
+        }
+        Rar29FilterKind::Rgb { width, .. } => {
+            if width == 0 || width > MAX_VM_FILTER_BLOCK_SIZE {
+                return Err(Error::InvalidData(
+                    "RAR 2.9 RGB filter scanline width is invalid",
+                ));
+            }
+            MAX_VM_FILTER_BLOCK_SIZE - (MAX_VM_FILTER_BLOCK_SIZE % width)
+        }
+        Rar29FilterKind::E8 | Rar29FilterKind::E8E9 | Rar29FilterKind::Itanium => {
+            MAX_VM_FILTER_BLOCK_SIZE
+        }
+    };
+    if chunk_size == 0 {
+        return Err(Error::InvalidData(
+            "RAR 2.9 VM filter chunk size is invalid",
+        ));
+    }
+
+    let mut filters = Vec::new();
+    let mut start = range.start;
+    while start < range.end {
+        let end = (start + chunk_size).min(range.end);
+        filters.push(Rar29FilterSpec::range(filter.kind, start..end));
+        start = end;
+    }
+    Ok(filters)
 }
 
 struct OwnedVmFilterRecord {
@@ -393,15 +438,15 @@ impl Unpack29Encoder {
         input: &[u8],
         filter: Rar29FilterSpec,
     ) -> Result<Vec<u8>> {
-        let filtered = filtered_member(input, &filter)?;
-        let record = VmFilterRecord {
-            block_start: filtered.block_start,
-            block_size: filtered.block_size,
-            init_regs: &filtered.init_regs,
-            code: filtered.code,
-        };
-        let packed =
-            encode_member_with_initial_filter(&filtered.data, &self.history, record, self.options)?;
+        let filters = split_large_filter(input.len(), filter)?;
+        let filtered = filtered_members(input, &filters)?;
+        let records = encoded_filter_records(&filtered.records)?;
+        let packed = encode_member_with_initial_filters(
+            &filtered.data,
+            &self.history,
+            &records,
+            self.options,
+        )?;
         self.remember(input);
         Ok(packed)
     }
@@ -411,7 +456,11 @@ impl Unpack29Encoder {
         input: &[u8],
         filters: &[Rar29FilterSpec],
     ) -> Result<Vec<u8>> {
-        let filtered = filtered_members(input, filters)?;
+        let mut split_filters = Vec::new();
+        for filter in filters {
+            split_filters.extend(split_large_filter(input.len(), filter.clone())?);
+        }
+        let filtered = filtered_members(input, &split_filters)?;
         let records = encoded_filter_records(&filtered.records)?;
         let packed = encode_member_with_initial_filters(
             &filtered.data,
@@ -442,16 +491,6 @@ fn encode_member_with_options(
     options: EncodeOptions,
 ) -> Result<Vec<u8>> {
     encode_member_inner(input, history, &[], options)
-}
-
-fn encode_member_with_initial_filter(
-    input: &[u8],
-    history: &[u8],
-    filter: VmFilterRecord<'_>,
-    options: EncodeOptions,
-) -> Result<Vec<u8>> {
-    let records = vec![encode_vm_filter_record(filter)?];
-    encode_member_with_initial_filters(input, history, &records, options)
 }
 
 fn encode_member_with_initial_filters(
@@ -518,10 +557,10 @@ fn encode_member_inner(
     {
         low_offset_frequencies[0] = 1;
     }
-    let main_lengths = huffman_lengths_for_frequencies(&main_frequencies);
-    let offset_lengths = huffman_lengths_for_frequencies(&offset_frequencies);
-    let low_offset_lengths = huffman_lengths_for_frequencies(&low_offset_frequencies);
-    let length_lengths = huffman_lengths_for_frequencies(&length_frequencies);
+    let main_lengths = uniform_huffman_lengths_for_frequencies(&main_frequencies);
+    let offset_lengths = uniform_huffman_lengths_for_frequencies(&offset_frequencies);
+    let low_offset_lengths = uniform_huffman_lengths_for_frequencies(&low_offset_frequencies);
+    let length_lengths = uniform_huffman_lengths_for_frequencies(&length_frequencies);
     table_lengths[..MAIN_COUNT].copy_from_slice(&main_lengths);
     table_lengths[MAIN_COUNT..MAIN_COUNT + OFFSET_COUNT].copy_from_slice(&offset_lengths);
     table_lengths[MAIN_COUNT + OFFSET_COUNT..MAIN_COUNT + OFFSET_COUNT + LOW_OFFSET_COUNT]
@@ -1311,52 +1350,6 @@ fn huffman_bits_for_symbol_count(count: usize) -> u8 {
     match count {
         0 | 1 => 1,
         _ => usize::BITS as u8 - (count - 1).leading_zeros() as u8,
-    }
-}
-
-fn huffman_lengths_for_frequencies(frequencies: &[usize]) -> Vec<u8> {
-    let used_count = frequencies
-        .iter()
-        .filter(|&&frequency| frequency != 0)
-        .count();
-    if used_count <= 1 {
-        return uniform_huffman_lengths_for_frequencies(frequencies);
-    }
-
-    let mut lengths = vec![0u8; frequencies.len()];
-    let mut heap = BinaryHeap::new();
-    let mut order = 0usize;
-    for (symbol, &frequency) in frequencies.iter().enumerate() {
-        if frequency == 0 {
-            continue;
-        }
-        heap.push(Reverse((frequency, order, vec![symbol])));
-        order += 1;
-    }
-
-    while heap.len() > 1 {
-        let Reverse((left_frequency, _, mut left_symbols)) = heap
-            .pop()
-            .expect("frequency heap has a left node while merging");
-        let Reverse((right_frequency, _, mut right_symbols)) = heap
-            .pop()
-            .expect("frequency heap has a right node while merging");
-        for &symbol in left_symbols.iter().chain(right_symbols.iter()) {
-            lengths[symbol] += 1;
-        }
-        left_symbols.append(&mut right_symbols);
-        heap.push(Reverse((
-            left_frequency.saturating_add(right_frequency),
-            order,
-            left_symbols,
-        )));
-        order += 1;
-    }
-
-    if lengths.iter().any(|&length| length > 15) {
-        uniform_huffman_lengths_for_frequencies(frequencies)
-    } else {
-        lengths
     }
 }
 
@@ -2813,13 +2806,14 @@ mod tests {
     use std::ops::Range;
 
     use super::{
-        apply_standard_filter, best_match, encode_ppmd_tokens, encode_tokens,
-        huffman_lengths_for_frequencies, insert_match_position, itanium_decode, itanium_encode,
-        should_lazy_emit_literal, unpack29_decode, unpack29_encode_literals, unpack29_encode_ppmd,
+        apply_standard_filter, audio_encode, best_match, encode_ppmd_tokens, encode_tokens,
+        insert_match_position, itanium_decode, itanium_encode, should_lazy_emit_literal,
+        split_large_filter, unpack29_decode, unpack29_encode_literals, unpack29_encode_ppmd,
         unpack29_encode_ppmd_literals, unpack29_encode_ppmd_with_filter, BitWriter, EncodeOptions,
         EncodeToken, EncoderMatchState, Error, Huffman, PpmdEncodeToken, Rar29FilterKind,
         Rar29FilterSpec, Result, StandardFilter, Unpack29, Unpack29Encoder, VmFilter, VmProgram,
         VmProgramKind, MAIN_COUNT, MATCH_HASH_BUCKETS, MAX_MATCH_CANDIDATES,
+        MAX_VM_FILTER_BLOCK_SIZE, RAR3_AUDIO_FILTER_BYTECODE,
     };
 
     const COMPRESSED_TEXT: &[u8] = &[
@@ -3062,49 +3056,25 @@ mod tests {
     }
 
     #[test]
-    fn frequency_weighted_huffman_lengths_shorten_common_rar29_symbols() {
-        let mut frequencies = vec![1usize; 8];
-        frequencies[3] = 128;
-
-        let lengths = huffman_lengths_for_frequencies(&frequencies);
-
-        assert!(lengths[3] < lengths[0]);
-    }
-
-    #[test]
-    fn lz_encoder_uses_frequency_weighted_rar29_huffman_lengths() {
+    fn lz_encoder_uses_uniform_rar29_huffman_tables_for_external_decoder_compatibility() {
         let mut input = Vec::new();
         for byte in 0u8..120 {
             input.push(b'A');
             input.push(byte);
         }
-        let tokens = encode_tokens(&input, &[], EncodeOptions::default());
-        let mut frequencies = vec![0usize; MAIN_COUNT];
-        frequencies[256] = 1;
-        for token in tokens {
-            match token {
-                EncodeToken::Literal(byte) => frequencies[byte as usize] += 1,
-                EncodeToken::Match { length, offset } => {
-                    let encoded_length = length - super::match_length_adjustment(offset);
-                    let (slot, _) = super::length_slot_for_match(encoded_length).unwrap();
-                    frequencies[271 + slot] += 1;
-                }
-            }
-        }
+        let packed = Unpack29Encoder::new().encode_member(&input).unwrap();
+        let mut decoder = Unpack29::new();
+        decoder.bits.append(&packed);
+        decoder.read_tables().unwrap();
+        let main_lengths = &decoder.levels[..MAIN_COUNT];
+        let nonzero_lengths = main_lengths
+            .iter()
+            .copied()
+            .filter(|&length| length != 0)
+            .collect::<std::collections::BTreeSet<_>>();
 
-        let lengths = huffman_lengths_for_frequencies(&frequencies);
-
-        assert!(lengths[b'A' as usize] > 0);
-        assert!(lengths[256] > 0);
-        assert!(lengths[b'A' as usize] < lengths[256]);
-        assert_eq!(
-            unpack29_decode(
-                &Unpack29Encoder::new().encode_member(&input).unwrap(),
-                input.len()
-            )
-            .unwrap(),
-            input
-        );
+        assert_eq!(nonzero_lengths.len(), 1);
+        assert_eq!(unpack29_decode(&packed, input.len()).unwrap(), input);
     }
 
     #[test]
@@ -3412,6 +3382,44 @@ mod tests {
         let decoded = unpack29_decode(&packed, input.len()).unwrap();
 
         assert_eq!(decoded, input);
+    }
+
+    #[test]
+    fn audio_filter_bytecode_matches_builtin_transform() {
+        let channels = 2;
+        let input: Vec<u8> = (0..4096)
+            .map(|index| (index * 7 + index / channels) as u8)
+            .collect();
+        let encoded = audio_encode(&input, channels).unwrap();
+        let program = Program::parse(RAR3_AUDIO_FILTER_BYTECODE).unwrap();
+        let result = program
+            .execute(crate::rarvm::Invocation {
+                input: &encoded,
+                regs: [channels as u32, 0, 0, 0, 0, 0, 0],
+                global_data: &[],
+                file_offset: 0,
+                exec_count: 0,
+            })
+            .unwrap();
+
+        assert_eq!(result.output, input);
+    }
+
+    #[test]
+    fn large_audio_filters_are_split_to_rarvm_sized_blocks() {
+        let filters = split_large_filter(
+            MAX_VM_FILTER_BLOCK_SIZE * 2 + 123,
+            Rar29FilterSpec::whole(Rar29FilterKind::Audio { channels: 4 }),
+        )
+        .unwrap();
+
+        assert!(filters.len() > 1);
+        assert!(filters.iter().all(|filter| {
+            filter
+                .range
+                .as_ref()
+                .is_some_and(|range| range.len() <= MAX_VM_FILTER_BLOCK_SIZE)
+        }));
     }
 
     #[test]
