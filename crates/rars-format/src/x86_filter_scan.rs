@@ -90,3 +90,50 @@ fn push_x86_filter_range(
         ranges.push(range);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn returns_no_ranges_for_inputs_too_short_to_contain_a_call() {
+        for len in 0..=5 {
+            let data = vec![0xe8; len];
+            assert!(auto_x86_filter_ranges(&data, false).is_empty());
+            assert!(auto_x86_filter_ranges(&data, true).is_empty());
+        }
+    }
+
+    #[test]
+    fn drops_isolated_opcodes_that_never_form_a_cluster() {
+        let mut data = vec![0x41; 20_000];
+        data[100] = 0xe8;
+        data[10_000] = 0xe8;
+        assert!(auto_x86_filter_ranges(&data, false).is_empty());
+    }
+
+    #[test]
+    fn clamps_padded_range_to_buffer_bounds_at_both_ends() {
+        let mut data = vec![0x41u8; 30];
+        for pos in [0, 4, 8, 12] {
+            data[pos] = 0xe8;
+        }
+
+        let ranges = auto_x86_filter_ranges(&data, false);
+
+        assert_eq!(ranges, vec![0..30]);
+    }
+
+    #[test]
+    fn does_not_duplicate_a_span_range_already_emitted_for_a_cluster() {
+        let mut data = vec![0x41u8; 20_000];
+        for pos in [1024, 1050, 1090, 1130] {
+            data[pos] = 0xe8;
+        }
+
+        let ranges = auto_x86_filter_ranges(&data, false);
+
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0], 1008..1151);
+    }
+}
