@@ -1163,6 +1163,33 @@ fn writes_auto_filtered_compressed_rar50_archive_that_reader_extracts() {
 }
 
 #[test]
+fn auto_filtered_compressed_rar50_writer_accepts_empty_member() {
+    let entries = [rar50::CompressedEntry {
+        name: b"afile.txt",
+        data: b"",
+        mtime: Some(0x5a21_0028),
+        attributes: 0x20,
+        host_os: 3,
+    }];
+    let bytes = write_compressed_archive_with_filter_policy(
+        &entries,
+        rar50::WriterOptions::new(ArchiveVersion::Rar50, FeatureSet::store_only()),
+        FilterPolicy::AutoSize,
+    )
+    .unwrap();
+
+    let archive = Archive::parse(&bytes).unwrap();
+    let file = archive.files().next().unwrap();
+    assert_eq!(file.name, b"afile.txt");
+    assert!(file.is_stored());
+    assert_eq!(file.unpacked_size, 0);
+    assert_eq!(file.packed_size(), 0);
+    let extracted = collect_extract(&archive).unwrap();
+    assert_eq!(extracted[0].name, b"afile.txt");
+    assert!(extracted[0].data.is_empty());
+}
+
+#[test]
 fn writes_compressed_rar50_volume_set_that_reader_reassembles() {
     let payload = b"rar5 compressed split payload from rars\n".repeat(24);
     let entry = rar50::CompressedEntry {

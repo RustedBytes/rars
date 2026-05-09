@@ -231,6 +231,12 @@ fn encode_rar29_auto_filtered_member(
     lz_method: u8,
     include_ppmd: bool,
 ) -> Result<EncodedPayload> {
+    if data.is_empty() {
+        return Ok(EncodedPayload {
+            data: Vec::new(),
+            method: 0x30,
+        });
+    }
     let mut best = EncodedPayload {
         data: unpack29_encode_literals_with_options(data, options).map_err(Error::from)?,
         method: lz_method,

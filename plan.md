@@ -1,9 +1,6 @@
 # rars plan
 
 ## Hardening
-
-- Work through remaining wild-corpus extract failures: RAR29 PPMd escape
-  handling in `FarManager170.rar`.
 - Verify RAR 2.x `PROTECT_HEAD` parity semantics when the declared protected
   range extends past the recovery block. Add an oracle fixture if possible;
   either repair those overlap sectors correctly or document the unsupported

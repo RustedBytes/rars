@@ -2,7 +2,10 @@ use crate::{Error, Result};
 
 const MAX_FREQ: u32 = 124;
 const MIN_MODEL_CONTEXTS: usize = 1;
-const PPMD_CONTEXT_BYTES: usize = 64;
+// Compatibility cap for the virtual PPMd suballocator. RAR stores context
+// nodes in a compact allocator; using the Rust Context struct size here would
+// force model restarts earlier than compatible decoders.
+const PPMD_CONTEXT_BYTES: usize = 16;
 const BIN_SCALE: u32 = 1 << 14;
 const INT_BITS: u32 = 7;
 const PERIOD_BITS: u8 = 7;

@@ -1766,6 +1766,9 @@ fn encode_member_with_auto_size_filter(
     algorithm_version: u8,
     options: EncodeOptions,
 ) -> Result<Vec<u8>> {
+    if data.is_empty() {
+        return encode_lz_member_with_options(data, algorithm_version, options).map_err(Error::from);
+    }
     let mut best =
         encode_lz_member_with_options(data, algorithm_version, options).map_err(Error::from)?;
     let mut candidates = vec![FilterKind::E8, FilterKind::E8E9, FilterKind::Arm];

@@ -1694,6 +1694,51 @@ fn writes_rar29_old_style_comments_that_reader_decodes() {
 }
 
 #[test]
+fn writes_rar29_archive_comment_with_empty_auto_members() {
+    let mut features = FeatureSet::store_only();
+    features.archive_comment = true;
+    let entries = [
+        FileEntry {
+            name: b"file1.txt",
+            data: b"",
+            file_time: 0x5a21_0000,
+            file_attr: 0x20,
+            host_os: 3,
+            password: None,
+            file_comment: None,
+        },
+        FileEntry {
+            name: b"file2.txt",
+            data: b"",
+            file_time: 0x5a21_0000,
+            file_attr: 0x20,
+            host_os: 3,
+            password: None,
+            file_comment: None,
+        },
+    ];
+
+    let bytes = write_compressed_archive_with_comment(
+        &entries,
+        WriterOptions::new(ArchiveVersion::Rar29, features),
+        Some(b"RARcomment"),
+    )
+    .unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+
+    assert_eq!(
+        archive.archive_comment().unwrap().as_deref(),
+        Some(b"RARcomment".as_slice())
+    );
+    let files: Vec<_> = archive.files().collect();
+    assert_eq!(files.len(), 2);
+    assert!(files.iter().all(|file| file.method == 0x30));
+    let extracted = collect_extract(&archive).unwrap();
+    assert_eq!(extracted.len(), 2);
+    assert!(extracted.iter().all(|entry| entry.data.is_empty()));
+}
+
+#[test]
 fn writes_rar3_newsub_archive_comment_that_reader_decodes() {
     for target in [ArchiveVersion::Rar30, ArchiveVersion::Rar40] {
         let mut features = FeatureSet::store_only();
@@ -5066,6 +5111,39 @@ fn extracts_rar300_solid_ppmd_archive() {
     assert_eq!(extracted[1].data, expected_b);
     assert_eq!(crc32(&extracted[0].data), 0x14284201);
     assert_eq!(crc32(&extracted[1].data), 0xca4cac47);
+}
+
+#[test]
+fn extracts_wild_solid_ppmd_farmanager_archive() {
+    let bytes = std::fs::read(fixture("ppmd/farmanager170.rar")).unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let opened = Rc::new(RefCell::new(Vec::<Vec<u8>>::new()));
+
+    assert!(archive.main.is_solid());
+    assert!(archive
+        .files()
+        .any(|file| file.unp_ver >= 29 && file.method == 0x35));
+
+    let result = archive.extract_to(ArchiveReadOptions::default(), {
+        let opened = Rc::clone(&opened);
+        move |meta| {
+            opened.borrow_mut().push(meta.name.clone());
+            if meta.name == b"Far.exe" {
+                return Err(Error::InvalidHeader("stopped after PPMd regression target"));
+            }
+            Ok(Box::new(std::io::sink()))
+        }
+    });
+
+    assert!(matches!(
+        result,
+        Err(Error::InvalidHeader("stopped after PPMd regression target"))
+    ));
+    let opened = opened.borrow();
+    assert!(opened
+        .iter()
+        .any(|name| name == b"Addons\\Shell\\FARHere.inf"));
+    assert!(opened.iter().any(|name| name == b"Far.exe"));
 }
 
 #[test]
