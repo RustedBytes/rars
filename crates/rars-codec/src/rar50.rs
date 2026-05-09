@@ -1462,10 +1462,16 @@ impl Unpack50Decoder {
         }
 
         if output.len() == output_size {
+            let history_output = if mode.applies_filters() && !filters.is_empty() {
+                Some(output.clone())
+            } else {
+                None
+            };
             if mode.applies_filters() {
                 apply_filters(&mut output, &filters)?;
             }
-            self.history.extend_from_slice(&output);
+            self.history
+                .extend_from_slice(history_output.as_deref().unwrap_or(&output));
             if self.history.len() > dictionary_size {
                 let discard = self.history.len() - dictionary_size;
                 self.history.drain(..discard);

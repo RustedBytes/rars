@@ -3840,7 +3840,12 @@ fn skips_rar50_redirection_entries_when_extracting() {
 
 #[test]
 fn extracts_wild_rar50_solid_archives_with_redundant_filter_records() {
-    for fixture_name in ["wild/rarfile_solid.rar", "wild/rarfile_solid_qo.rar"] {
+    for fixture_name in [
+        "wild/rarfile_solid.rar",
+        "wild/rarfile_solid_qo.rar",
+        "wild/libarchive_solid.rar",
+        "wild/libarchive_multiple_files_solid.rar",
+    ] {
         let bytes = std::fs::read(fixture(fixture_name)).unwrap();
         let archive = Archive::parse(&bytes).unwrap();
 

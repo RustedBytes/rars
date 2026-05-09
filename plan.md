@@ -2,9 +2,9 @@
 
 ## Hardening
 
-- Work through remaining wild-corpus extract failures that current `rar712`
-  accepts: RAR29 PPMd escape handling in `FarManager170.rar`, libarchive RAR5
-  solid filter/checksum mismatches, and the RAR5 loop/truncated-input fixture.
+- Work through remaining wild-corpus extract failures: RAR29 PPMd escape
+  handling in `FarManager170.rar`, and the RAR5 loop/truncated-input fixture
+  after checking whether current RAR rejects it as malformed.
 - Verify RAR 2.x `PROTECT_HEAD` parity semantics when the declared protected
   range extends past the recovery block. Add an oracle fixture if possible;
   either repair those overlap sectors correctly or document the unsupported
