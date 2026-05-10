@@ -29,9 +29,10 @@
   `m1..m4` LZ-filter auto policy are present.
   Remaining work is deeper filter-block boundary tuning and match-finder
   strategy against WinRAR 2.90/3.x/4.x oracles.
-- Improve RAR20/RAR29 audio-filter policy after correctness is stable. Wild
-  recompression still shows sizable audio-filter regressions, especially the
-  Unpack20/Unpack30 `BoatModernEnglish` fixtures.
+- Improve RAR20/RAR29 audio-filter policy after correctness is stable. RAR29
+  auto now gates AUDIO candidates with a cheap PCM-shape test before paying for
+  full filter encoding; remaining work is Unpack20 audio-token writing and
+  oracle-guided tuning for the `BoatModernEnglish` fixtures.
 - Reintroduce RAR29/RAR30/RAR40 frequency-weighted Huffman lengths only with
   independent decoder-oracle coverage. The current writer deliberately uses
   uniform LZ Huffman tables after weighted Main tables produced streams that

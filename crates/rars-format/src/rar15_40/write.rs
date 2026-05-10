@@ -14,6 +14,7 @@ const AUTO_DELTA_EDGE_SKIP: usize = 64;
 const MIN_STORE_FALLBACK_SIZE: usize = 1024;
 const RAR29_LARGE_TEXT_PPMD_THRESHOLD: usize = 16 * 1024 * 1024;
 const RAR29_TEXT_SAMPLE_SIZE: usize = 8192;
+const RAR29_AUDIO_SAMPLE_SIZE: usize = 8192;
 const RAR29_MAX_MATCH_CANDIDATES_DEFAULT: usize = 256;
 const RAR15_ALIGN_OVERFLOW: &str = "RAR 1.5 block size overflows usize";
 
@@ -321,14 +322,16 @@ fn encode_rar29_auto_filtered_member(
             )?,
             method: lz_method,
         });
-        candidates.push(EncodedPayload {
-            data: encode_rar29_filtered_member(
-                data,
-                FilterSpec::whole(FilterKind::Audio { channels }),
-                options,
-            )?,
-            method: lz_method,
-        });
+        if is_audio_filter_candidate(data, channels) {
+            candidates.push(EncodedPayload {
+                data: encode_rar29_filtered_member(
+                    data,
+                    FilterSpec::whole(FilterKind::Audio { channels }),
+                    options,
+                )?,
+                method: lz_method,
+            });
+        }
     }
     for channels in 1..=4 {
         if let Some(range) = auto_delta_filter_range(data, channels) {
@@ -402,6 +405,43 @@ fn text_sample_offsets(len: usize) -> [usize; 3] {
         len.saturating_sub(RAR29_TEXT_SAMPLE_SIZE) / 2,
         len.saturating_sub(RAR29_TEXT_SAMPLE_SIZE),
     ]
+}
+
+fn is_audio_filter_candidate(data: &[u8], channels: usize) -> bool {
+    if channels == 0 || channels > 4 || data.len() < channels * 64 {
+        return false;
+    }
+
+    let mut total_delta = 0usize;
+    let mut small_delta = 0usize;
+    let mut compared = 0usize;
+    for start in text_sample_offsets(data.len()) {
+        let end = start
+            .saturating_add(RAR29_AUDIO_SAMPLE_SIZE)
+            .min(data.len());
+        let aligned_start = start + ((channels - start % channels) % channels);
+        if aligned_start + channels >= end {
+            continue;
+        }
+        for channel in 0..channels {
+            let mut previous = None;
+            let mut index = aligned_start + channel;
+            while index < end {
+                let byte = data[index];
+                if let Some(previous) = previous {
+                    let delta = usize::from(byte.abs_diff(previous));
+                    let delta = delta.min(256 - delta);
+                    total_delta += delta;
+                    small_delta += usize::from(delta <= 8);
+                    compared += 1;
+                }
+                previous = Some(byte);
+                index += channels;
+            }
+        }
+    }
+
+    compared != 0 && total_delta <= compared * 24 && small_delta * 100 >= compared * 55
 }
 
 fn auto_delta_filter_range(data: &[u8], channels: usize) -> Option<std::ops::Range<usize>> {
@@ -1745,8 +1785,8 @@ mod tests {
     use super::{
         auto_delta_filter_range, auto_x86_filter_ranges, disjoint_filter_ranges,
         encode_rar29_auto_filtered_member, encode_rar29_filtered_member,
-        encode_rar29_filtered_members, rar29_encode_options_for_options, FilterKind, FilterSpec,
-        AUTO_DELTA_EDGE_SKIP, RAR29_LARGE_TEXT_PPMD_THRESHOLD,
+        encode_rar29_filtered_members, is_audio_filter_candidate, rar29_encode_options_for_options,
+        FilterKind, FilterSpec, AUTO_DELTA_EDGE_SKIP, RAR29_LARGE_TEXT_PPMD_THRESHOLD,
     };
     use crate::{ArchiveVersion, FeatureSet};
     use rars_codec::rar29::{unpack29_decode, EncodeOptions};
@@ -1814,6 +1854,37 @@ mod tests {
         let data = b"fn main() {\n    println!(\"rar ppmd text candidate\");\n}\n".repeat(256);
 
         assert!(super::is_auto_ppmd_candidate(&data));
+    }
+
+    #[test]
+    fn audio_filter_candidate_accepts_interleaved_pcm_like_payloads() {
+        let mut data = Vec::new();
+        for sample in 0..4096i16 {
+            let left = sample.wrapping_mul(3).wrapping_add(200);
+            let right = sample.wrapping_mul(3).wrapping_sub(200);
+            data.extend_from_slice(&left.to_le_bytes());
+            data.extend_from_slice(&right.to_le_bytes());
+        }
+
+        assert!(is_audio_filter_candidate(&data, 4));
+        assert!(!is_audio_filter_candidate(&data, 3));
+    }
+
+    #[test]
+    fn audio_filter_candidate_rejects_high_entropy_binary_payloads() {
+        let mut state = 0xfeed_faceu32;
+        let data: Vec<_> = (0..16_384)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state as u8
+            })
+            .collect();
+
+        for channels in 1..=4 {
+            assert!(!is_audio_filter_candidate(&data, channels));
+        }
     }
 
     #[test]
