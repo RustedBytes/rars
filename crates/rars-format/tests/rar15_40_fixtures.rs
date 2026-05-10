@@ -1943,6 +1943,72 @@ fn writes_literal_compressed_rar20_archive_that_reader_extracts() {
 }
 
 #[test]
+fn rar20_writer_uses_audio_block_for_pcm_like_payload_when_smaller() {
+    let mut payload = Vec::new();
+    for sample in 0..8192i16 {
+        let left = sample.wrapping_mul(3).wrapping_add(200);
+        let right = sample.wrapping_mul(3).wrapping_sub(200);
+        payload.extend_from_slice(&left.to_le_bytes());
+        payload.extend_from_slice(&right.to_le_bytes());
+    }
+    let lz_packed = rars_codec::rar20::unpack20_encode_literals(&payload).unwrap();
+    let entries = [FileEntry {
+        name: b"rar20-audio.wav",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+
+    let bytes = write_compressed_archive(
+        &entries,
+        WriterOptions::new(ArchiveVersion::Rar20, FeatureSet::store_only()),
+    )
+    .unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let file = archive.files().next().unwrap();
+
+    assert_eq!(file.unp_ver, 20);
+    assert_eq!(file.method, 0x33);
+    assert!(file.pack_size < lz_packed.len() as u64);
+    assert_eq!(collect_extract(&archive).unwrap()[0].data, payload);
+}
+
+#[test]
+fn rar20_writer_uses_audio_block_for_boat_modern_english_fixture() {
+    let source = std::fs::read(fixture("rar250/unpack20_audio_text.rar")).unwrap();
+    let source_archive = Archive::parse(&source).unwrap();
+    let source_entries = collect_extract(&source_archive).unwrap();
+    let payload = &source_entries[0].data;
+    let lz_packed = rars_codec::rar20::unpack20_encode_literals(payload).unwrap();
+    let entries = [FileEntry {
+        name: b"BoatModernEnglish.wav",
+        data: payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+
+    let bytes = write_compressed_archive(
+        &entries,
+        WriterOptions::new(ArchiveVersion::Rar20, FeatureSet::store_only()),
+    )
+    .unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let file = archive.files().next().unwrap();
+
+    assert_eq!(file.unp_ver, 20);
+    assert_eq!(file.method, 0x33);
+    assert!(file.pack_size < lz_packed.len() as u64);
+    assert!(file.pack_size < file.unp_size / 2);
+    assert_eq!(collect_extract(&archive).unwrap()[0].data, *payload);
+}
+
+#[test]
 fn rar20_writer_stamps_requested_method_levels() {
     let payload = b"rar20 level method payload alpha beta gamma\n".repeat(64);
     let entries = [FileEntry {

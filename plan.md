@@ -31,8 +31,9 @@
   strategy against WinRAR 2.90/3.x/4.x oracles.
 - Improve RAR20/RAR29 audio-filter policy after correctness is stable. RAR29
   auto now gates AUDIO candidates with a cheap PCM-shape test before paying for
-  full filter encoding; remaining work is Unpack20 audio-token writing and
-  oracle-guided tuning for the `BoatModernEnglish` fixtures.
+  full filter encoding, and RAR20 can emit frequency-weighted audio blocks when
+  they beat LZ. Remaining work is oracle-guided tuning for the
+  `BoatModernEnglish` fixtures and other wild audio regressions.
 - Reintroduce RAR29/RAR30/RAR40 frequency-weighted Huffman lengths only with
   independent decoder-oracle coverage. The current writer deliberately uses
   uniform LZ Huffman tables after weighted Main tables produced streams that

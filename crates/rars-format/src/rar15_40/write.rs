@@ -2,7 +2,7 @@ use super::*;
 use crate::io_util::align16 as checked_align16;
 use crate::x86_filter_scan::auto_x86_filter_ranges;
 use rars_codec::rar13::{unpack15_encode, Unpack15Encoder};
-use rars_codec::rar20::{unpack20_encode_literals, Unpack20Encoder};
+use rars_codec::rar20::{unpack20_encode_auto, Unpack20Encoder};
 use rars_codec::rar29::{
     unpack29_encode_literals, unpack29_encode_literals_with_options, unpack29_encode_ppmd,
     unpack29_encode_ppmd_with_filter, EncodeOptions as Rar29EncodeOptions, Unpack29Encoder,
@@ -987,7 +987,7 @@ fn encode_compressed_payload(
             encoder.encode_member(data).map_err(Error::from)
         }
         (ArchiveVersion::Rar15, None) => unpack15_encode(data).map_err(Error::from),
-        (ArchiveVersion::Rar20, None) => unpack20_encode_literals(data).map_err(Error::from),
+        (ArchiveVersion::Rar20, None) => unpack20_encode_auto(data).map_err(Error::from),
         (ArchiveVersion::Rar20, Some(SolidEncoder::Rar20(encoder))) => {
             encoder.encode_member(data).map_err(Error::from)
         }

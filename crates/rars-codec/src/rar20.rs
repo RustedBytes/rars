@@ -1,4 +1,6 @@
 use crate::{Error, Result};
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::io::{Read, Write};
 
 const MAIN_COUNT: usize = 298;
@@ -42,6 +44,21 @@ pub fn unpack20_decode(input: &[u8], output_size: usize) -> Result<Vec<u8>> {
 
 pub fn unpack20_encode_literals(input: &[u8]) -> Result<Vec<u8>> {
     encode_member(input, &[], None)
+}
+
+pub fn unpack20_encode_auto(input: &[u8]) -> Result<Vec<u8>> {
+    let lz = unpack20_encode_literals(input)?;
+    let mut best = lz;
+    for channels in 1..=MAX_CHANNELS {
+        if input.len() < channels * 64 {
+            continue;
+        }
+        let audio = encode_audio_member(input, channels)?;
+        if audio.len() < best.len() {
+            best = audio;
+        }
+    }
+    Ok(best)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -386,6 +403,235 @@ fn level_code_lengths(_symbols: &[usize], literal_len: u8) -> [u8; LEVEL_COUNT] 
     lengths[0] = 1;
     lengths[literal_len as usize] = 1;
     lengths
+}
+
+fn encode_audio_member(input: &[u8], channels: usize) -> Result<Vec<u8>> {
+    if channels == 0 || channels > MAX_CHANNELS {
+        return Err(Error::InvalidData("RAR 2.0 audio channel count is invalid"));
+    }
+    let deltas = audio_encode(input, channels)?;
+    let mut levels = vec![0u8; AUDIO_COUNT * channels];
+    for channel in 0..channels {
+        let mut frequencies = [0usize; AUDIO_COUNT];
+        for index in (channel..deltas.len()).step_by(channels) {
+            frequencies[deltas[index] as usize] += 1;
+        }
+        let channel_lengths = huffman_lengths_for_frequencies(&frequencies);
+        for (symbol, len) in channel_lengths.into_iter().enumerate() {
+            levels[channel * AUDIO_COUNT + symbol] = len;
+        }
+    }
+
+    let level_symbols = encode_audio_table_level_symbols(&levels);
+    let level_lengths = level_code_lengths_for_symbols(&level_symbols);
+    let level_codes = canonical_codes(&level_lengths)?;
+    let mut bits = BitWriter::default();
+    bits.write_bits(0b10, 2); // audio block, do not keep previous tables.
+    bits.write_bits((channels - 1) as u32, 2);
+    for &len in &level_lengths {
+        bits.write_bits(len as u32, 4);
+    }
+    for symbol in level_symbols {
+        let code = level_codes[symbol].ok_or(Error::InvalidData(
+            "RAR 2.0 encoder missing audio-level Huffman code",
+        ))?;
+        bits.write_bits(code.code as u32, code.len);
+        match symbol {
+            17 => bits.write_bits(0, 3),
+            18 => bits.write_bits(127, 7),
+            _ => {}
+        }
+    }
+
+    for channel in 0..channels {
+        let table = &levels[channel * AUDIO_COUNT..(channel + 1) * AUDIO_COUNT];
+        validate_audio_table(table)?;
+    }
+    let audio_codes = (0..channels)
+        .map(|channel| canonical_codes(&levels[channel * AUDIO_COUNT..(channel + 1) * AUDIO_COUNT]))
+        .collect::<Result<Vec<_>>>()?;
+    for (index, &delta) in deltas.iter().enumerate() {
+        let channel = index % channels;
+        let code = audio_codes[channel][delta as usize].ok_or(Error::InvalidData(
+            "RAR 2.0 encoder missing audio Huffman code",
+        ))?;
+        bits.write_bits(code.code as u32, code.len);
+    }
+    Ok(bits.finish())
+}
+
+fn encode_audio_table_level_symbols(levels: &[u8]) -> Vec<usize> {
+    levels.iter().map(|&len| len as usize).collect()
+}
+
+fn level_code_lengths_for_symbols(symbols: &[usize]) -> [u8; LEVEL_COUNT] {
+    let mut used = [false; LEVEL_COUNT];
+    for &symbol in symbols {
+        used[symbol] = true;
+    }
+    let used_count = used.iter().filter(|&&used| used).count();
+    let len = huffman_bits_for_symbol_count(used_count);
+    let mut lengths = [0u8; LEVEL_COUNT];
+    for (symbol, is_used) in used.into_iter().enumerate() {
+        if is_used {
+            lengths[symbol] = len;
+        }
+    }
+    lengths
+}
+
+fn validate_audio_table(lengths: &[u8]) -> Result<()> {
+    let mut count = [0u16; 16];
+    for &len in lengths {
+        if len > 15 {
+            return Err(Error::InvalidData("RAR 2.0 Huffman length is too large"));
+        }
+        if len != 0 {
+            count[len as usize] += 1;
+        }
+    }
+    validate_huffman_counts(&count)
+}
+
+fn audio_encode(input: &[u8], channels: usize) -> Result<Vec<u8>> {
+    if channels == 0 || channels > MAX_CHANNELS {
+        return Err(Error::InvalidData("RAR 2.0 audio channel count is invalid"));
+    }
+    let mut states = [AudioState::default(); MAX_CHANNELS];
+    let mut channel_delta = 0i32;
+    let mut deltas = Vec::with_capacity(input.len());
+    for (index, &byte) in input.iter().enumerate() {
+        let channel = index % channels;
+        let state = &mut states[channel];
+        state.byte_count = state.byte_count.wrapping_add(1);
+        state.d4 = state.d3;
+        state.d3 = state.d2;
+        state.d2 = state.last_delta - state.d1;
+        state.d1 = state.last_delta;
+
+        let predicted = 8 * state.last_char
+            + state.k[0] * state.d1
+            + state.k[1] * state.d2
+            + state.k[2] * state.d3
+            + state.k[3] * state.d4
+            + state.k[4] * channel_delta;
+        let predicted = (predicted >> 3) & 0xff;
+        let delta = (predicted as u8).wrapping_sub(byte);
+
+        let d = (delta as i8 as i32) << 3;
+        state.dif[0] = state.dif[0].wrapping_add(d.unsigned_abs());
+        state.dif[1] = state.dif[1].wrapping_add((d - state.d1).unsigned_abs());
+        state.dif[2] = state.dif[2].wrapping_add((d + state.d1).unsigned_abs());
+        state.dif[3] = state.dif[3].wrapping_add((d - state.d2).unsigned_abs());
+        state.dif[4] = state.dif[4].wrapping_add((d + state.d2).unsigned_abs());
+        state.dif[5] = state.dif[5].wrapping_add((d - state.d3).unsigned_abs());
+        state.dif[6] = state.dif[6].wrapping_add((d + state.d3).unsigned_abs());
+        state.dif[7] = state.dif[7].wrapping_add((d - state.d4).unsigned_abs());
+        state.dif[8] = state.dif[8].wrapping_add((d + state.d4).unsigned_abs());
+        state.dif[9] = state.dif[9].wrapping_add((d - channel_delta).unsigned_abs());
+        state.dif[10] = state.dif[10].wrapping_add((d + channel_delta).unsigned_abs());
+
+        channel_delta = (byte.wrapping_sub(state.last_char as u8)) as i8 as i32;
+        state.last_delta = channel_delta;
+        state.last_char = byte as i32;
+
+        if state.byte_count & 0x1f == 0 {
+            let mut min_dif = state.dif[0];
+            let mut num_min_dif = 0usize;
+            state.dif[0] = 0;
+            for diff_index in 1..state.dif.len() {
+                if state.dif[diff_index] < min_dif {
+                    min_dif = state.dif[diff_index];
+                    num_min_dif = diff_index;
+                }
+                state.dif[diff_index] = 0;
+            }
+            match num_min_dif {
+                1 if state.k[0] >= -16 => state.k[0] -= 1,
+                2 if state.k[0] < 16 => state.k[0] += 1,
+                3 if state.k[1] >= -16 => state.k[1] -= 1,
+                4 if state.k[1] < 16 => state.k[1] += 1,
+                5 if state.k[2] >= -16 => state.k[2] -= 1,
+                6 if state.k[2] < 16 => state.k[2] += 1,
+                7 if state.k[3] >= -16 => state.k[3] -= 1,
+                8 if state.k[3] < 16 => state.k[3] += 1,
+                9 if state.k[4] >= -16 => state.k[4] -= 1,
+                10 if state.k[4] < 16 => state.k[4] += 1,
+                _ => {}
+            }
+        }
+
+        deltas.push(delta);
+    }
+    Ok(deltas)
+}
+
+fn huffman_lengths_for_frequencies<const N: usize>(frequencies: &[usize; N]) -> [u8; N] {
+    let used_count = frequencies
+        .iter()
+        .filter(|&&frequency| frequency != 0)
+        .count();
+    if used_count <= 1 {
+        return uniform_huffman_lengths_for_frequencies(frequencies);
+    }
+
+    let mut lengths = [0u8; N];
+    let mut heap = BinaryHeap::new();
+    let mut order = 0usize;
+    for (symbol, &frequency) in frequencies.iter().enumerate() {
+        if frequency == 0 {
+            continue;
+        }
+        heap.push(Reverse((frequency, order, vec![symbol])));
+        order += 1;
+    }
+
+    while heap.len() > 1 {
+        let Reverse((left_frequency, _, mut left_symbols)) = heap
+            .pop()
+            .expect("frequency heap has a left node while merging");
+        let Reverse((right_frequency, _, mut right_symbols)) = heap
+            .pop()
+            .expect("frequency heap has a right node while merging");
+        for &symbol in left_symbols.iter().chain(right_symbols.iter()) {
+            lengths[symbol] += 1;
+        }
+        left_symbols.append(&mut right_symbols);
+        heap.push(Reverse((
+            left_frequency.saturating_add(right_frequency),
+            order,
+            left_symbols,
+        )));
+        order += 1;
+    }
+
+    if lengths.iter().any(|&length| length > 15) {
+        uniform_huffman_lengths_for_frequencies(frequencies)
+    } else {
+        lengths
+    }
+}
+
+fn uniform_huffman_lengths_for_frequencies<const N: usize>(frequencies: &[usize; N]) -> [u8; N] {
+    let used_count = frequencies
+        .iter()
+        .filter(|&&frequency| frequency != 0)
+        .count();
+    let uniform_length = huffman_bits_for_symbol_count(used_count);
+    let mut lengths = [0u8; N];
+    for (symbol, &frequency) in frequencies.iter().enumerate() {
+        if frequency != 0 {
+            lengths[symbol] = uniform_length;
+        }
+    }
+    lengths
+}
+
+fn huffman_bits_for_symbol_count(count: usize) -> u8 {
+    match count {
+        0 | 1 => 1,
+        _ => usize::BITS as u8 - (count - 1).leading_zeros() as u8,
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1199,6 +1445,26 @@ mod tests {
     }
 
     #[test]
+    fn audio_encoder_round_trips_interleaved_pcm_like_payload() {
+        let input = interleaved_pcm_like_payload();
+        let packed = super::encode_audio_member(&input, 4).unwrap();
+        let decoded = unpack20_decode(&packed, input.len()).unwrap();
+
+        assert_eq!(decoded, input);
+    }
+
+    #[test]
+    fn auto_encoder_uses_audio_when_it_beats_lz() {
+        let input = interleaved_pcm_like_payload();
+        let lz = unpack20_encode_literals(&input).unwrap();
+        let auto = super::unpack20_encode_auto(&input).unwrap();
+        let decoded = unpack20_decode(&auto, input.len()).unwrap();
+
+        assert!(auto.len() < lz.len());
+        assert_eq!(decoded, input);
+    }
+
+    #[test]
     fn decodes_back_to_back_fresh_audio_blocks() {
         // No real RAR 2.x encoder we tested emits a mid-stream `audio_block,
         // !keep_tables` transition; reference encoders always either keep the
@@ -1218,6 +1484,17 @@ mod tests {
 
     fn expected_text() -> Vec<u8> {
         b"Hello text not audio.\r\n".repeat(100)
+    }
+
+    fn interleaved_pcm_like_payload() -> Vec<u8> {
+        let mut input = Vec::new();
+        for sample in 0..8192i16 {
+            let left = sample.wrapping_mul(3).wrapping_add(200);
+            let right = sample.wrapping_mul(3).wrapping_sub(200);
+            input.extend_from_slice(&left.to_le_bytes());
+            input.extend_from_slice(&right.to_le_bytes());
+        }
+        input
     }
 
     fn synthetic_audio_block(samples: usize) -> Vec<u8> {
