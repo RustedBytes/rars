@@ -2,10 +2,7 @@
 
 ## Review 5 Batches
 
-1. Project hygiene:
-   - Add fuzz targets for RAR50 LZ decode, recovery parsing/repair, and AES
-     decrypt/KDF paths.
-2. Larger refactor:
+1. Larger refactor:
    - Split `rar50/write.rs` into focused modules such as filter policy, match
      search, and volume layout after the concrete review fixes are landed.
 

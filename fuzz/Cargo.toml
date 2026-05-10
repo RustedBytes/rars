@@ -13,6 +13,9 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 rars = { path = "../crates/rars" }
 rars-codec = { path = "../crates/rars-codec" }
+rars-crypto = { path = "../crates/rars-crypto" }
+rars-format = { path = "../crates/rars-format" }
+rars-recovery = { path = "../crates/rars-recovery" }
 
 [[bin]]
 name = "archive_parse"
@@ -38,6 +41,27 @@ bench = false
 [[bin]]
 name = "rarvm_parse_execute"
 path = "fuzz_targets/rarvm_parse_execute.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "unpack50_decode"
+path = "fuzz_targets/unpack50_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rar5_recovery"
+path = "fuzz_targets/rar5_recovery.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rar50_crypto"
+path = "fuzz_targets/rar50_crypto.rs"
 test = false
 doc = false
 bench = false

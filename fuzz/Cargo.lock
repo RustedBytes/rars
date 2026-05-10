@@ -222,6 +222,9 @@ dependencies = [
  "libfuzzer-sys",
  "rars",
  "rars-codec",
+ "rars-crypto",
+ "rars-format",
+ "rars-recovery",
 ]
 
 [[package]]
