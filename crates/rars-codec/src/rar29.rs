@@ -131,11 +131,11 @@ pub fn unpack29_encode_literals_with_options(
 }
 
 pub fn unpack29_encode_ppmd_literals(input: &[u8]) -> Result<Vec<u8>> {
-    encode_ppmd_member(input, false, None)
+    encode_ppmd_member(input, false, &[])
 }
 
 pub fn unpack29_encode_ppmd(input: &[u8]) -> Result<Vec<u8>> {
-    encode_ppmd_member(input, true, None)
+    encode_ppmd_member(input, true, &[])
 }
 
 pub fn unpack29_encode_ppmd_with_filter(input: &[u8], filter: Rar29FilterSpec) -> Result<Vec<u8>> {
@@ -154,15 +154,10 @@ fn encode_ppmd_filtered_member(
     filter: Rar29FilterSpec,
     lz_escapes: bool,
 ) -> Result<Vec<u8>> {
-    let filtered = filtered_member(input, &filter)?;
-    let record = VmFilterRecord {
-        block_start: filtered.block_start,
-        block_size: filtered.block_size,
-        init_regs: &filtered.init_regs,
-        code: filtered.code,
-    };
-    let record = encode_vm_filter_record(record)?;
-    encode_ppmd_member(&filtered.data, lz_escapes, Some(&record))
+    let filters = split_large_filter(input.len(), filter)?;
+    let filtered = filtered_members(input, &filters)?;
+    let records = encoded_filter_records(&filtered.records)?;
+    encode_ppmd_member(&filtered.data, lz_escapes, &records)
 }
 
 fn filtered_members(input: &[u8], filters: &[Rar29FilterSpec]) -> Result<FilteredMembers> {
@@ -225,15 +220,6 @@ fn split_large_filter(input_len: usize, filter: Rar29FilterSpec) -> Result<Vec<R
     if range.len() <= chunk_size {
         return Ok(vec![filter]);
     }
-    if matches!(
-        filter.kind,
-        Rar29FilterKind::Delta { .. } | Rar29FilterKind::Audio { .. }
-    ) {
-        return Ok(vec![Rar29FilterSpec::range(
-            filter.kind,
-            range.start..range.start + chunk_size,
-        )]);
-    }
     if chunk_size == 0 {
         return Err(Error::InvalidData(
             "RAR 2.9 VM filter chunk size is invalid",
@@ -260,15 +246,15 @@ struct OwnedVmFilterRecord {
 fn encode_ppmd_member(
     input: &[u8],
     lz_escapes: bool,
-    initial_filter: Option<&[u8]>,
+    initial_filters: &[Vec<u8>],
 ) -> Result<Vec<u8>> {
-    encode_ppmd_block(input, lz_escapes, initial_filter)
+    encode_ppmd_block(input, lz_escapes, initial_filters)
 }
 
 fn encode_ppmd_block(
     input: &[u8],
     lz_escapes: bool,
-    initial_filter: Option<&[u8]>,
+    initial_filters: &[Vec<u8>],
 ) -> Result<Vec<u8>> {
     const PPMD_ORDER: usize = 8;
     const PPMD_DICTIONARY_MB: u8 = 25;
@@ -278,7 +264,7 @@ fn encode_ppmd_block(
     out.push(0x80 | 0x20 | ((PPMD_ORDER as u8) - 1));
     out.push(PPMD_DICTIONARY_MB - 1);
     let mut encoder = PpmdEncoder::new(PPMD_ORDER, PPMD_ESC, usize::from(PPMD_DICTIONARY_MB))?;
-    if let Some(record) = initial_filter {
+    for record in initial_filters {
         encoder.encode_vm_filter_record(record)?;
     }
     for token in encode_ppmd_tokens(input, lz_escapes) {
@@ -765,10 +751,6 @@ struct VmFilterRecord<'a> {
     block_size: usize,
     init_regs: &'a [(usize, u32)],
     code: &'a [u8],
-}
-
-fn encode_vm_filter_record(record: VmFilterRecord<'_>) -> Result<Vec<u8>> {
-    encode_vm_filter_record_inner(record, 0, true)
 }
 
 fn encode_vm_filter_record_inner(
@@ -3470,27 +3452,43 @@ mod tests {
     }
 
     #[test]
-    fn large_audio_filters_are_capped_to_rarvm_safe_block() {
+    fn large_audio_filters_are_split_into_rarvm_safe_blocks() {
         let filters = split_large_filter(
             MAX_VM_FILTER_BLOCK_SIZE * 2 + 123,
             Rar29FilterSpec::whole(Rar29FilterKind::Audio { channels: 4 }),
         )
         .unwrap();
 
-        assert_eq!(filters.len(), 1);
+        assert_eq!(filters.len(), 3);
         assert_eq!(filters[0].range, Some(0..MAX_VM_AUDIO_FILTER_BLOCK_SIZE));
+        assert_eq!(
+            filters[1].range,
+            Some(MAX_VM_AUDIO_FILTER_BLOCK_SIZE..MAX_VM_AUDIO_FILTER_BLOCK_SIZE * 2)
+        );
+        assert_eq!(
+            filters[2].range,
+            Some(MAX_VM_AUDIO_FILTER_BLOCK_SIZE * 2..MAX_VM_FILTER_BLOCK_SIZE * 2 + 123)
+        );
     }
 
     #[test]
-    fn large_delta_filters_are_capped_to_one_rarvm_safe_block() {
+    fn large_delta_filters_are_split_into_rarvm_safe_blocks() {
         let filters = split_large_filter(
             MAX_VM_FILTER_BLOCK_SIZE * 2 + 123,
             Rar29FilterSpec::whole(Rar29FilterKind::Delta { channels: 4 }),
         )
         .unwrap();
 
-        assert_eq!(filters.len(), 1);
+        assert_eq!(filters.len(), 3);
         assert_eq!(filters[0].range, Some(0..MAX_VM_DELTA_FILTER_BLOCK_SIZE));
+        assert_eq!(
+            filters[1].range,
+            Some(MAX_VM_DELTA_FILTER_BLOCK_SIZE..MAX_VM_DELTA_FILTER_BLOCK_SIZE * 2)
+        );
+        assert_eq!(
+            filters[2].range,
+            Some(MAX_VM_DELTA_FILTER_BLOCK_SIZE * 2..MAX_VM_FILTER_BLOCK_SIZE * 2 + 123)
+        );
     }
 
     #[test]
@@ -3525,6 +3523,28 @@ mod tests {
         let packed =
             encode_with_filter_range(&input, Rar29FilterKind::Audio { channels: 2 }, start..end)
                 .unwrap();
+        let decoded = unpack29_decode(&packed, input.len()).unwrap();
+
+        assert_eq!(decoded, input);
+    }
+
+    #[test]
+    fn encoder_emits_multiple_rar29_audio_vm_filter_records_for_large_ranges() {
+        let input: Vec<u8> = (0..(MAX_VM_AUDIO_FILTER_BLOCK_SIZE * 2 + 64))
+            .map(|index| (index * 7 + index / 3 + index / 257) as u8)
+            .collect();
+        let packed = encode_with_filter(&input, Rar29FilterKind::Audio { channels: 4 }).unwrap();
+        let decoded = unpack29_decode(&packed, input.len()).unwrap();
+
+        assert_eq!(decoded, input);
+    }
+
+    #[test]
+    fn encoder_emits_multiple_rar29_delta_vm_filter_records_for_large_ranges() {
+        let input: Vec<u8> = (0..(MAX_VM_DELTA_FILTER_BLOCK_SIZE * 2 + 64))
+            .map(|index| (index * 11 + index / 5 + index / 251) as u8)
+            .collect();
+        let packed = encode_with_filter(&input, Rar29FilterKind::Delta { channels: 4 }).unwrap();
         let decoded = unpack29_decode(&packed, input.len()).unwrap();
 
         assert_eq!(decoded, input);

@@ -29,10 +29,6 @@
   `m1..m4` LZ-filter auto policy are present.
   Remaining work is deeper filter-block boundary tuning and match-finder
   strategy against WinRAR 2.90/3.x/4.x oracles.
-- Implement proper multi-record RARVM scheduling for RAR29/RAR30/RAR40
-  writers. DELTA and AUDIO currently filter only a single VM-safe prefix
-  because larger or adjacent generated records need correct program/global-state
-  scheduling to remain acceptable to period WinRAR decoders.
 - Improve RAR20/RAR29 audio-filter policy after correctness is stable. Wild
   recompression still shows sizable audio-filter regressions, especially the
   Unpack20/Unpack30 `BoatModernEnglish` fixtures.

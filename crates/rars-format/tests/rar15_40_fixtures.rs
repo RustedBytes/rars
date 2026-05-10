@@ -1190,6 +1190,64 @@ fn generated_rar29_segmented_audio_filtered_archive_round_trips() {
 }
 
 #[test]
+fn generated_rar29_large_delta_filter_uses_multiple_vm_records() {
+    let payload: Vec<u8> = (0..240_064)
+        .map(|index| (index * 11 + index / 5 + index / 251) as u8)
+        .collect();
+    let entries = [FileEntry {
+        name: b"rar29-large-delta-filtered.bin",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+
+    let bytes = write_rar29_filter(
+        &entries,
+        WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only()),
+        FilterKind::Delta { channels: 4 },
+    );
+    let archive = Archive::parse(&bytes).unwrap();
+    let file = archive.files().next().unwrap();
+
+    assert_eq!(file.unp_ver, 29);
+    assert_eq!(file.method, 0x33);
+    let extracted = collect_extract(&archive).unwrap();
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
+fn generated_rar29_large_audio_filter_uses_multiple_redeclared_vm_records() {
+    let payload: Vec<u8> = (0..240_064)
+        .map(|index| (index * 7 + index / 3 + index / 257) as u8)
+        .collect();
+    let entries = [FileEntry {
+        name: b"rar29-large-audio-filtered.bin",
+        data: &payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+
+    let bytes = write_rar29_filter(
+        &entries,
+        WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only()),
+        FilterKind::Audio { channels: 4 },
+    );
+    let archive = Archive::parse(&bytes).unwrap();
+    let file = archive.files().next().unwrap();
+
+    assert_eq!(file.unp_ver, 29);
+    assert_eq!(file.method, 0x33);
+    let extracted = collect_extract(&archive).unwrap();
+    assert_eq!(extracted[0].data, payload);
+}
+
+#[test]
 #[ignore = "requires WinRAR/UnRAR 3.00 Wine prefix"]
 fn reference_unrar300_accepts_rar29_segmented_filter_records() {
     let Some(reference) = reference_unrar300() else {
