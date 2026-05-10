@@ -5,7 +5,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -33,6 +33,15 @@ fn scratch(name: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!("rars-cli-{name}-{nonce}"));
     fs::create_dir_all(&path).unwrap();
     path
+}
+
+fn dos_time(year: u32, month: u32, day: u32, hour: u32, minute: u32, second: u32) -> u32 {
+    ((year - 1980) << 25)
+        | (month << 21)
+        | (day << 16)
+        | (hour << 11)
+        | (minute << 5)
+        | (second / 2)
 }
 
 fn rars() -> Command {
@@ -510,6 +519,127 @@ fn rejects_output_path_that_is_existing_symlink() {
         "{stderr}"
     );
     assert_eq!(fs::read(&target).unwrap(), b"do not overwrite\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn create_and_extract_preserve_mtime_and_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = scratch("metadata-roundtrip");
+    let source = dir.join("metadata.txt");
+    let archive = dir.join("metadata.rar");
+    let out_dir = dir.join("out");
+    let source_mtime = UNIX_EPOCH + Duration::from_secs(1_700_000_002);
+    fs::write(&source, b"metadata roundtrip\n").unwrap();
+    fs::set_permissions(&source, fs::Permissions::from_mode(0o640)).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&source)
+        .unwrap()
+        .set_modified(source_mtime)
+        .unwrap();
+
+    let create = rars()
+        .args(["a", "--format", "rar50", "--store"])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(create.status.success(), "stderr: {}", stderr(&create));
+
+    let archive = rars::ArchiveReader::read_path(&archive).unwrap();
+    let members: Vec<_> = archive.members().collect();
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0].meta.file_time, Some(1_700_000_002));
+    assert_eq!(members[0].meta.file_attr & 0o777, 0o640);
+
+    let extract = rars()
+        .arg("x")
+        .arg(dir.join("metadata.rar"))
+        .arg(&out_dir)
+        .output()
+        .unwrap();
+    assert!(extract.status.success(), "stderr: {}", stderr(&extract));
+    let extracted = out_dir.join("metadata.txt");
+    assert_eq!(fs::read(&extracted).unwrap(), b"metadata roundtrip\n");
+    let extracted_meta = fs::metadata(&extracted).unwrap();
+    assert_eq!(extracted_meta.permissions().mode() & 0o777, 0o640);
+    assert_eq!(
+        extracted_meta
+            .modified()
+            .unwrap()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        1_700_000_002
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn extract_restores_directory_mtime_after_child_files() {
+    let dir = scratch("directory-metadata");
+    let archive = dir.join("directory.rar");
+    let out_dir = dir.join("out");
+    let directory_time = dos_time(2021, 5, 6, 7, 8, 10);
+    let file_time = dos_time(2024, 1, 2, 3, 4, 6);
+    let bytes = write_stored_archive(
+        &[
+            StoredEntry {
+                name: b"subdir",
+                data: b"",
+                file_time: directory_time,
+                file_attr: 0x10,
+                password: None,
+                file_comment: None,
+            },
+            StoredEntry {
+                name: b"subdir/child.txt",
+                data: b"child data\n",
+                file_time,
+                file_attr: 0x20,
+                password: None,
+                file_comment: None,
+            },
+        ],
+        WriterOptions::default(),
+    )
+    .unwrap();
+    fs::write(&archive, bytes).unwrap();
+
+    let extract = rars()
+        .arg("x")
+        .arg(&archive)
+        .arg(&out_dir)
+        .output()
+        .unwrap();
+    assert!(extract.status.success(), "stderr: {}", stderr(&extract));
+    assert_eq!(
+        fs::read(out_dir.join("subdir/child.txt")).unwrap(),
+        b"child data\n"
+    );
+
+    assert_eq!(
+        fs::metadata(out_dir.join("subdir"))
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        1_620_284_890
+    );
+    assert_eq!(
+        fs::metadata(out_dir.join("subdir/child.txt"))
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        1_704_164_646
+    );
 }
 
 #[test]

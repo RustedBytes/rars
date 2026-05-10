@@ -8,8 +8,8 @@ use rars::rar15_40::{
     WriterOptions as Rar15WriterOptions,
 };
 use rars::{
-    extract_volumes_to, Archive as DetectedArchive, ArchiveReadOptions, ArchiveReader,
-    ArchiveVersion, Error, ExtractedEntryMeta, FeatureSet,
+    extract_volumes_to, Archive as DetectedArchive, ArchiveFamily, ArchiveReadOptions,
+    ArchiveReader, ArchiveVersion, Error, ExtractedEntryMeta, FeatureSet,
 };
 use rars_crc32::crc32;
 use std::env;
@@ -19,13 +19,14 @@ use std::io::IsTerminal;
 use std::num::ParseIntError;
 use std::path::{Component, Path, PathBuf};
 use std::string::FromUtf8Error;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 type CliResult<T> = std::result::Result<T, CliError>;
 
 const ADD_USAGE: &str =
     "usage: rars a [--password <password>|--password-file <path>] --format <rar14|rar15|rar20|rar29|rar30|rar40|rar50|rar70> [--store] [--level <0..5>] [--dict-size <bytes|k|m|g>] [--solid] [--encrypt-headers] [--quick-open] [--comment <text>] [--archive-name <name>] [--file-comment <text>] [--recovery-percent <1..100>] [--volume-size <bytes|k|m|g>] [--ppmd|--auto-filter|--delta-filter <channels>|--e8-filter|--e8e9-filter|--itanium-filter|--rgb-filter <width>|--audio-filter <channels>|--arm-filter] <archive> <files...>";
 const DOS_DIRECTORY_ATTR: u8 = 0x10;
+const DOS_ARCHIVE_ATTR: u8 = 0x20;
 const RAR50_SIGNATURE: &[u8] = b"Rar!\x1a\x07\x01\x00";
 const RAR50_STRUCTURAL_RR_WARNING: &str =
     "warning: RAR 5 recovery writer emits validation-ready RR metadata; WinRAR recovery layout matching is not expected";
@@ -394,11 +395,18 @@ fn cmd_extract(args: &[String]) -> CliResult<()> {
         let archive = read_archive_path_prompting(&paths[0], &mut password)?;
         ensure_password_for_extract(&archive, &mut password)?;
         warn_rar50_redirections(&archive);
-        let mut names = Vec::new();
+        let family = archive.family();
+        let mut outputs = Vec::new();
         archive
             .extract_to(password.as_deref(), |meta| {
-                names.push(meta.name.clone());
-                open_output_writer(&out_dir, meta)
+                let (path, writer) = open_output_writer(&out_dir, meta)?;
+                outputs.push(ExtractedOutput {
+                    name: meta.name.clone(),
+                    path,
+                    meta: meta.clone(),
+                    family,
+                });
+                Ok(writer)
             })
             .map_err(|err| {
                 classify_rars_error(err, |err| {
@@ -408,8 +416,14 @@ fn cmd_extract(args: &[String]) -> CliResult<()> {
                     )
                 })
             })?;
-        for name in &names {
-            println!("x {}", String::from_utf8_lossy(name));
+        restore_output_metadata(&outputs).map_err(|err| {
+            CliError::general(format!(
+                "failed to restore extracted metadata under '{}': {err}",
+                out_dir.display()
+            ))
+        })?;
+        for output in &outputs {
+            println!("x {}", String::from_utf8_lossy(&output.name));
         }
     } else {
         let archives = parse_archives_prompting(&paths, &mut password)?;
@@ -417,18 +431,34 @@ fn cmd_extract(args: &[String]) -> CliResult<()> {
         for archive in &archives {
             warn_rar50_redirections(archive);
         }
-        let mut names = Vec::new();
+        let family = archives
+            .first()
+            .map(DetectedArchive::family)
+            .ok_or("no archive parts provided")?;
+        let mut outputs = Vec::new();
         extract_volumes_to(&archives, password.as_deref(), |meta| {
-            names.push(meta.name.clone());
-            open_output_writer(&out_dir, meta)
+            let (path, writer) = open_output_writer(&out_dir, meta)?;
+            outputs.push(ExtractedOutput {
+                name: meta.name.clone(),
+                path,
+                meta: meta.clone(),
+                family,
+            });
+            Ok(writer)
         })
         .map_err(|err| {
             classify_rars_error(err, |err| {
                 format!("failed to extract volume set '{}': {err}", paths.join(", "))
             })
         })?;
-        for name in &names {
-            println!("x {}", String::from_utf8_lossy(name));
+        restore_output_metadata(&outputs).map_err(|err| {
+            CliError::general(format!(
+                "failed to restore extracted metadata under '{}': {err}",
+                out_dir.display()
+            ))
+        })?;
+        for output in &outputs {
+            println!("x {}", String::from_utf8_lossy(&output.name));
         }
     }
     Ok(())
@@ -1167,8 +1197,8 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                     Ok(rars::rar50::StoredEntry {
                         name: &entry.name,
                         data: &entry.data,
-                        mtime: Some(0),
-                        attributes: u64::from(entry.file_attr),
+                        mtime: entry.unix_mtime,
+                        attributes: rar50_file_attr(entry),
                         host_os: 3,
                     })
                 })
@@ -1199,8 +1229,8 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                         let entry = rars::rar50::EncryptedStoredEntry {
                             name: &entry.name,
                             data: &entry.data,
-                            mtime: Some(0),
-                            attributes: u64::from(entry.file_attr),
+                            mtime: entry.unix_mtime,
+                            attributes: rar50_file_attr(entry),
                             host_os: 3,
                             password,
                         };
@@ -1215,8 +1245,8 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                             .map(|entry| rars::rar50::EncryptedCompressedEntry {
                                 name: &entry.name,
                                 data: &entry.data,
-                                mtime: Some(0),
-                                attributes: u64::from(entry.file_attr),
+                                mtime: entry.unix_mtime,
+                                attributes: rar50_file_attr(entry),
                                 host_os: 3,
                                 password,
                             })
@@ -1242,8 +1272,8 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                             .map(|entry| rars::rar50::CompressedEntry {
                                 name: &entry.name,
                                 data: &entry.data,
-                                mtime: Some(0),
-                                attributes: u64::from(entry.file_attr),
+                                mtime: entry.unix_mtime,
+                                attributes: rar50_file_attr(entry),
                                 host_os: 3,
                             })
                             .collect();
@@ -1279,8 +1309,8 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                     .map(|entry| rars::rar50::EncryptedStoredEntry {
                         name: &entry.name,
                         data: &entry.data,
-                        mtime: Some(0),
-                        attributes: u64::from(entry.file_attr),
+                        mtime: entry.unix_mtime,
+                        attributes: rar50_file_attr(entry),
                         host_os: 3,
                         password,
                     })
@@ -1330,8 +1360,8 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                         .map(|entry| rars::rar50::EncryptedCompressedEntry {
                             name: &entry.name,
                             data: &entry.data,
-                            mtime: Some(0),
-                            attributes: u64::from(entry.file_attr),
+                            mtime: entry.unix_mtime,
+                            attributes: rar50_file_attr(entry),
                             host_os: 3,
                             password,
                         })
@@ -1395,8 +1425,8 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                         .map(|entry| rars::rar50::CompressedEntry {
                             name: &entry.name,
                             data: &entry.data,
-                            mtime: Some(0),
-                            attributes: u64::from(entry.file_attr),
+                            mtime: entry.unix_mtime,
+                            attributes: rar50_file_attr(entry),
                             host_os: 3,
                         })
                         .collect();
@@ -1483,8 +1513,8 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                     let entry = Rar15StoredEntry {
                         name: &entry.name,
                         data: &entry.data,
-                        file_time: 0,
-                        file_attr: u32::from(entry.file_attr),
+                        file_time: entry.dos_mtime,
+                        file_attr: rar15_file_attr(entry),
                         host_os: 3,
                         password: entry.password.as_deref(),
                         file_comment: None,
@@ -1494,8 +1524,8 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                     let entry = Rar15FileEntry {
                         name: &entry.name,
                         data: &entry.data,
-                        file_time: 0,
-                        file_attr: u32::from(entry.file_attr),
+                        file_time: entry.dos_mtime,
+                        file_attr: rar15_file_attr(entry),
                         host_os: 3,
                         password: entry.password.as_deref(),
                         file_comment: None,
@@ -1521,8 +1551,8 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                     entries.push(Rar15StoredEntry {
                         name: &entry.name,
                         data: &entry.data,
-                        file_time: 0,
-                        file_attr: u32::from(entry.file_attr),
+                        file_time: entry.dos_mtime,
+                        file_attr: rar15_file_attr(entry),
                         host_os: 3,
                         password: entry.password.as_deref(),
                         file_comment: file_comment.as_deref(),
@@ -1549,8 +1579,8 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                     entries.push(Rar15FileEntry {
                         name: &entry.name,
                         data: &entry.data,
-                        file_time: 0,
-                        file_attr: u32::from(entry.file_attr),
+                        file_time: entry.dos_mtime,
+                        file_attr: rar15_file_attr(entry),
                         host_os: 3,
                         password: entry.password.as_deref(),
                         file_comment: None,
@@ -1605,8 +1635,8 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                     entries.push(Rar15FileEntry {
                         name: &entry.name,
                         data: &entry.data,
-                        file_time: 0,
-                        file_attr: u32::from(entry.file_attr),
+                        file_time: entry.dos_mtime,
+                        file_attr: rar15_file_attr(entry),
                         host_os: 3,
                         password: entry.password.as_deref(),
                         file_comment: file_comment.as_deref(),
@@ -1638,7 +1668,7 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                     let entry = FileEntry {
                         name: &entry.name,
                         data: &entry.data,
-                        file_time: 0,
+                        file_time: entry.dos_mtime,
                         file_attr: entry.file_attr,
                         password: entry.password.as_deref(),
                         file_comment: file_comment.as_deref(),
@@ -1648,7 +1678,7 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                     let entry = Rar13StoredEntry {
                         name: &entry.name,
                         data: &entry.data,
-                        file_time: 0,
+                        file_time: entry.dos_mtime,
                         file_attr: entry.file_attr,
                         password: entry.password.as_deref(),
                         file_comment: file_comment.as_deref(),
@@ -1671,7 +1701,7 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                     .map(|entry| FileEntry {
                         name: &entry.name,
                         data: &entry.data,
-                        file_time: 0,
+                        file_time: entry.dos_mtime,
                         file_attr: entry.file_attr,
                         password: entry.password.as_deref(),
                         file_comment: file_comment.as_deref(),
@@ -1688,7 +1718,7 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                     .map(|entry| Rar13StoredEntry {
                         name: &entry.name,
                         data: &entry.data,
-                        file_time: 0,
+                        file_time: entry.dos_mtime,
                         file_attr: entry.file_attr,
                         password: entry.password.as_deref(),
                         file_comment: file_comment.as_deref(),
@@ -1800,6 +1830,94 @@ fn current_filetime() -> u64 {
         .saturating_add(FILETIME_UNIX_EPOCH_SECONDS)
         .saturating_mul(FILETIME_TICKS_PER_SECOND);
     seconds.saturating_add(u64::from(duration.subsec_nanos() / 100))
+}
+
+fn source_unix_mtime(metadata: &fs::Metadata) -> Option<u32> {
+    metadata
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u32::try_from(duration.as_secs()).ok())
+}
+
+fn source_dos_mtime(metadata: &fs::Metadata) -> u32 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(system_time_to_dos_time)
+        .unwrap_or(0)
+}
+
+fn system_time_to_dos_time(time: SystemTime) -> Option<u32> {
+    let seconds = time.duration_since(UNIX_EPOCH).ok()?.as_secs();
+    let days = i64::try_from(seconds / 86_400).ok()?;
+    let seconds_of_day = seconds % 86_400;
+    let (year, month, day) = civil_from_days(days);
+    if !(1980..=2107).contains(&year) {
+        return None;
+    }
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+    Some(
+        ((u32::try_from(year - 1980).ok()?) << 25)
+            | (month << 21)
+            | (day << 16)
+            | ((hour as u32) << 11)
+            | ((minute as u32) << 5)
+            | ((second as u32) / 2),
+    )
+}
+
+fn dos_time_to_system_time(time: u32) -> Option<SystemTime> {
+    if time == 0 {
+        return None;
+    }
+    let second = (time & 0x1f) * 2;
+    let minute = (time >> 5) & 0x3f;
+    let hour = (time >> 11) & 0x1f;
+    let day = (time >> 16) & 0x1f;
+    let month = (time >> 21) & 0x0f;
+    let year = 1980 + i32::try_from((time >> 25) & 0x7f).ok()?;
+    if month == 0 || month > 12 || day == 0 || day > 31 || hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+    let days = days_from_civil(year, month, day);
+    let seconds = u64::try_from(days)
+        .ok()?
+        .checked_mul(86_400)?
+        .checked_add(u64::from(hour) * 3_600 + u64::from(minute) * 60 + u64::from(second))?;
+    Some(UNIX_EPOCH + Duration::from_secs(seconds))
+}
+
+fn unix_seconds_to_system_time(seconds: u32) -> Option<SystemTime> {
+    (seconds != 0).then_some(UNIX_EPOCH + Duration::from_secs(u64::from(seconds)))
+}
+
+fn civil_from_days(days_since_unix_epoch: i64) -> (i32, u32, u32) {
+    let z = days_since_unix_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    let year = y + i64::from(month <= 2);
+    (year as i32, month as u32, day as u32)
+}
+
+fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
+    let year = i64::from(year) - i64::from(month <= 2);
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let yoe = year - era * 400;
+    let month = i64::from(month);
+    let day = i64::from(day);
+    let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
 }
 
 fn volume_part_path(first_path: &Path, index: usize) -> CliResult<PathBuf> {
@@ -2006,19 +2124,72 @@ fn read_file(path: &Path, role: &str) -> CliResult<Vec<u8>> {
 fn open_output_writer(
     out_dir: &Path,
     entry: &ExtractedEntryMeta,
-) -> rars::Result<Box<dyn std::io::Write>> {
+) -> rars::Result<(PathBuf, Box<dyn std::io::Write>)> {
     let rel = output_relative_path(&entry.name)
         .map_err(|_| Error::InvalidHeader("unsafe archive path"))?;
     let mut out_path = checked_output_path(out_dir, &rel)?;
     if entry.is_directory {
         fs::create_dir_all(&out_path)?;
-        return Ok(Box::new(std::io::sink()));
+        return Ok((out_path, Box::new(std::io::sink())));
     }
     if let Some(parent) = out_path.parent() {
         fs::create_dir_all(parent)?;
     }
     out_path = checked_output_path(out_dir, &rel)?;
-    Ok(Box::new(create_output_file(&out_path)?))
+    Ok((out_path.clone(), Box::new(create_output_file(&out_path)?)))
+}
+
+struct ExtractedOutput {
+    name: Vec<u8>,
+    path: PathBuf,
+    meta: ExtractedEntryMeta,
+    family: ArchiveFamily,
+}
+
+fn restore_output_metadata(outputs: &[ExtractedOutput]) -> std::io::Result<()> {
+    for output in outputs.iter().filter(|output| !output.meta.is_directory) {
+        if let Some(time) = extracted_system_time(output.family, output.meta.file_time) {
+            set_modified_time(&output.path, time)?;
+        }
+        set_extracted_permissions(&output.path, output.meta.file_attr)?;
+    }
+    for output in outputs.iter().filter(|output| output.meta.is_directory) {
+        set_extracted_permissions(&output.path, output.meta.file_attr)?;
+        if let Some(time) = extracted_system_time(output.family, output.meta.file_time) {
+            set_modified_time(&output.path, time)?;
+        }
+    }
+    Ok(())
+}
+
+fn extracted_system_time(family: ArchiveFamily, file_time: u32) -> Option<SystemTime> {
+    match family {
+        ArchiveFamily::Rar13 | ArchiveFamily::Rar15To40 => dos_time_to_system_time(file_time),
+        ArchiveFamily::Rar50Plus => unix_seconds_to_system_time(file_time),
+        _ => None,
+    }
+}
+
+fn set_modified_time(path: &Path, time: SystemTime) -> std::io::Result<()> {
+    File::open(path)?.set_modified(time)
+}
+
+#[cfg(unix)]
+fn set_extracted_permissions(path: &Path, file_attr: u64) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if file_attr & 0o170000 != 0 {
+        fs::set_permissions(
+            path,
+            fs::Permissions::from_mode(u32::try_from(file_attr & 0o777).unwrap_or(0o644)),
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_extracted_permissions(_path: &Path, _file_attr: u64) -> std::io::Result<()> {
+    Ok(())
 }
 
 fn checked_output_path(out_dir: &Path, rel: &Path) -> rars::Result<PathBuf> {
@@ -2112,6 +2283,9 @@ struct OwnedInput {
     name: Vec<u8>,
     data: Vec<u8>,
     file_attr: u8,
+    unix_mode: Option<u32>,
+    unix_mtime: Option<u32>,
+    dos_mtime: u32,
     password: Option<Vec<u8>>,
 }
 
@@ -2127,23 +2301,58 @@ fn read_inputs(paths: &[String], password: Option<&[u8]>) -> CliResult<Vec<Owned
             .to_vec();
         let meta = fs::metadata(path)
             .map_err(|err| format!("failed to stat input '{}': {err}", path.display()))?;
+        let unix_mtime = source_unix_mtime(&meta);
+        let dos_mtime = source_dos_mtime(&meta);
+        let unix_mode = source_unix_mode(&meta);
         if meta.is_dir() {
             out.push(OwnedInput {
                 name,
                 data: Vec::new(),
                 file_attr: 0x10,
+                unix_mode,
+                unix_mtime,
+                dos_mtime,
                 password: None,
             });
         } else {
             out.push(OwnedInput {
                 name,
                 data: read_file(path, "input")?,
-                file_attr: 0x20,
+                file_attr: DOS_ARCHIVE_ATTR,
+                unix_mode,
+                unix_mtime,
+                dos_mtime,
                 password: password.map(|p| p.to_vec()),
             });
         }
     }
     Ok(out)
+}
+
+#[cfg(unix)]
+fn source_unix_mode(metadata: &fs::Metadata) -> Option<u32> {
+    use std::os::unix::fs::PermissionsExt;
+
+    Some(metadata.permissions().mode())
+}
+
+#[cfg(not(unix))]
+fn source_unix_mode(_metadata: &fs::Metadata) -> Option<u32> {
+    None
+}
+
+fn rar15_file_attr(entry: &OwnedInput) -> u32 {
+    entry
+        .unix_mode
+        .unwrap_or_else(|| u32::from(entry.file_attr))
+}
+
+fn rar50_file_attr(entry: &OwnedInput) -> u64 {
+    u64::from(
+        entry
+            .unix_mode
+            .unwrap_or_else(|| u32::from(entry.file_attr)),
+    )
 }
 
 fn usage() {

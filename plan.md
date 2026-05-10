@@ -2,32 +2,28 @@
 
 ## Review 5 Batches
 
-1. CLI metadata round-trip:
-   - Preserve source mtimes when creating archives with `rars a`.
-   - Restore archived mtimes and POSIX permissions during `rars x`.
-   - Add CLI coverage for create/extract metadata fidelity.
-2. RAR3 crypto error surface:
+1. RAR3 crypto error surface:
    - Add a typed `Error::Rar30Crypto` path or otherwise stop mapping body
      decrypt failures to `InvalidHeader`.
    - Cover corrupt/unaligned encrypted member data with an error-context test.
-3. Small hygiene:
+2. Small hygiene:
    - Update README coverage instructions to use `scripts/coverage.py`.
    - Close out the stale RARVM OOM fuzz artifact with an explicit note or
      regression check.
    - Add visible diagnostics for ignored oracle tests that skip because
      environment variables are unset.
-4. API cleanup:
+3. API cleanup:
    - Document lossy name accessors and add byte-preserving name accessors where
      the public API currently nudges callers toward `name_lossy()`.
    - Replace repeated RAR50 writer `unreachable!` mixed-member guards with a
      helper that returns a format error.
    - Share the duplicated heap-merge Huffman-length helper between RAR20 and
      RAR50.
-5. Project hygiene:
+4. Project hygiene:
    - Add a minimal workspace lint policy and CI workflow for test+clippy.
    - Add fuzz targets for RAR50 LZ decode, recovery parsing/repair, and AES
      decrypt/KDF paths.
-6. Larger refactor:
+5. Larger refactor:
    - Split `rar50/write.rs` into focused modules such as filter policy, match
      search, and volume layout after the concrete review fixes are landed.
 
