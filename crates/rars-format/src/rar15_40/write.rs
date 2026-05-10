@@ -452,9 +452,11 @@ fn write_rar29_filtered_archive(
     } else {
         None
     };
-    for (index, entry) in entries.iter().enumerate() {
+    let mut solid_run_has_member = false;
+    for entry in entries {
         let payload = encode(entry)?;
-        let solid_continuation = options.features.solid && index != 0;
+        let solid_continuation =
+            options.features.solid && payload.method != 0x30 && solid_run_has_member;
         if let Some(password) = header_password {
             write_header_encrypted_compressed_entry(
                 &mut out,
@@ -476,6 +478,7 @@ fn write_rar29_filtered_archive(
                 solid_continuation,
             )?;
         }
+        solid_run_has_member = payload.method != 0x30;
     }
     Ok(out)
 }
