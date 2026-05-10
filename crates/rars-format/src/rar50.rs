@@ -269,6 +269,13 @@ pub struct ExtractedEntryMeta {
 }
 
 impl FileHeader {
+    pub fn name_bytes(&self) -> &[u8] {
+        &self.name
+    }
+
+    /// Returns the file name with invalid UTF-8 replaced for display only.
+    ///
+    /// Use [`Self::name_bytes`] when exact archive bytes matter.
     pub fn name_lossy(&self) -> String {
         String::from_utf8_lossy(&self.name).into_owned()
     }
@@ -1808,5 +1815,39 @@ mod tests {
                 "RAR 5 file redirection record has trailing bytes"
             ))
         ));
+    }
+
+    #[test]
+    fn file_header_name_bytes_preserve_non_utf8_names() {
+        let file = FileHeader {
+            block: BlockHeader {
+                header_crc: 0,
+                header_size: 0,
+                header_type: HEAD_FILE,
+                flags: 0,
+                extra_area_size: None,
+                data_size: Some(0),
+                offset: 0,
+                header_range: 0..0,
+                data_range: 0..0,
+            },
+            file_flags: 0,
+            unpacked_size: 0,
+            attributes: 0,
+            mtime: None,
+            data_crc32: None,
+            compression_info: 0,
+            host_os: 0,
+            name: vec![0xff, b'.', b'b', b'i', b'n'],
+            hash: None,
+            redirection: None,
+            service_data: None,
+            encrypted: false,
+            encryption: None,
+            crypto: None,
+        };
+
+        assert_eq!(file.name_bytes(), [0xff, b'.', b'b', b'i', b'n']);
+        assert_eq!(file.name_lossy(), "\u{fffd}.bin");
     }
 }

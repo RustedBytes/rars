@@ -530,6 +530,13 @@ impl Archive {
 }
 
 impl Entry {
+    pub fn name_bytes(&self) -> &[u8] {
+        &self.name
+    }
+
+    /// Returns the entry name with invalid UTF-8 replaced for display only.
+    ///
+    /// Use [`Self::name_bytes`] when exact archive bytes matter.
     pub fn name_lossy(&self) -> String {
         String::from_utf8_lossy(&self.name).into_owned()
     }
@@ -1562,6 +1569,7 @@ mod tests {
         let archive = Archive::parse(&bytes).unwrap();
         assert_eq!(archive.main.flags, 0x80);
         assert_eq!(archive.entries.len(), 2);
+        assert_eq!(archive.entries[0].name_bytes(), b"README.md");
         assert_eq!(archive.entries[0].name_lossy(), "README.md");
         let extracted = collect_extract(&archive, None).unwrap();
         assert_eq!(extracted[0].data, b"hello rar 1.3");

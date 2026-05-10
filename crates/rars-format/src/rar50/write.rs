@@ -407,9 +407,7 @@ impl<'a> Rar50Writer<'a> {
                     validate_options(self.options)?;
                 }
                 for member in self.members {
-                    let Rar50WriteMember::Stored(entry) = member else {
-                        unreachable!("mixed member kinds are rejected above")
-                    };
+                    let entry = member.into_stored(self.options.target)?;
                     validate_entry(&entry)?;
                     resolved_members.push(ResolvedRar50WriteMember::Stored(entry));
                 }
@@ -438,9 +436,7 @@ impl<'a> Rar50Writer<'a> {
                 }
                 validate_file_service_options(self.options)?;
                 for member in self.members {
-                    let Rar50WriteMember::StoredWithServices(entry) = member else {
-                        unreachable!("mixed member kinds are rejected above")
-                    };
+                    let entry = member.into_stored_with_services(self.options.target)?;
                     validate_entry(&entry.entry)?;
                     for service in entry.services {
                         validate_file_service(service)?;
@@ -490,9 +486,7 @@ impl<'a> Rar50Writer<'a> {
                     .solid
                     .then(|| Unpack50Encoder::with_options(encode_options));
                 for (index, member) in self.members.into_iter().enumerate() {
-                    let Rar50WriteMember::Compressed(entry) = member else {
-                        unreachable!("mixed member kinds are rejected above")
-                    };
+                    let entry = member.into_compressed(self.options.target)?;
                     validate_compressed_entry(&entry)?;
                     if compression_method == 0 {
                         resolved_members.push(ResolvedRar50WriteMember::StoredCompressed(entry));
@@ -561,10 +555,9 @@ impl<'a> Rar50Writer<'a> {
                     let password = header_encryption_password(
                         self.members
                             .iter()
-                            .filter_map(|member| match member {
-                                Rar50WriteMember::EncryptedStored(entry) => Some(entry.password),
-                                _ => None,
-                            })
+                            .map(|member| member.encrypted_stored_password(self.options.target))
+                            .collect::<Result<Vec<_>>>()?
+                            .into_iter()
                             .chain(
                                 self.encrypted_archive_comment
                                     .iter()
@@ -577,9 +570,7 @@ impl<'a> Rar50Writer<'a> {
                     None
                 };
                 for member in self.members {
-                    let Rar50WriteMember::EncryptedStored(entry) = member else {
-                        unreachable!("mixed member kinds are rejected above")
-                    };
+                    let entry = member.into_encrypted_stored(self.options.target)?;
                     validate_encrypted_entry(&entry)?;
                     let encrypted = encrypted_stored_payload(entry.data, entry.password)?;
                     resolved_members
@@ -610,25 +601,20 @@ impl<'a> Rar50Writer<'a> {
                 }
                 validate_encrypted_file_service_options(self.options)?;
                 let header_keys = if self.options.features.header_encryption {
-                    let password =
-                        header_encryption_password(self.members.iter().flat_map(|member| {
-                            match member {
-                                Rar50WriteMember::EncryptedStoredWithServices(entry) => {
-                                    std::iter::once(entry.entry.password).chain(
-                                        entry.services.iter().map(|service| service.password),
-                                    )
-                                }
-                                _ => unreachable!("mixed member kinds are rejected above"),
-                            }
-                        }))?;
+                    let mut passwords = Vec::new();
+                    for member in &self.members {
+                        let entry =
+                            member.encrypted_stored_with_services_ref(self.options.target)?;
+                        passwords.push(entry.entry.password);
+                        passwords.extend(entry.services.iter().map(|service| service.password));
+                    }
+                    let password = header_encryption_password(passwords.into_iter())?;
                     Some(header_encryption_keys(password)?)
                 } else {
                     None
                 };
                 for member in self.members {
-                    let Rar50WriteMember::EncryptedStoredWithServices(entry) = member else {
-                        unreachable!("mixed member kinds are rejected above")
-                    };
+                    let entry = member.into_encrypted_stored_with_services(self.options.target)?;
                     validate_encrypted_entry(&entry.entry)?;
                     for service in entry.services {
                         validate_encrypted_file_service(service)?;
@@ -661,12 +647,9 @@ impl<'a> Rar50Writer<'a> {
                     let password = header_encryption_password(
                         self.members
                             .iter()
-                            .filter_map(|member| match member {
-                                Rar50WriteMember::EncryptedCompressed(entry) => {
-                                    Some(entry.password)
-                                }
-                                _ => None,
-                            })
+                            .map(|member| member.encrypted_compressed_password(self.options.target))
+                            .collect::<Result<Vec<_>>>()?
+                            .into_iter()
                             .chain(
                                 self.encrypted_archive_comment
                                     .iter()
@@ -683,9 +666,7 @@ impl<'a> Rar50Writer<'a> {
                     .solid
                     .then(|| Unpack50Encoder::with_options(encode_options));
                 for (index, member) in self.members.into_iter().enumerate() {
-                    let Rar50WriteMember::EncryptedCompressed(entry) = member else {
-                        unreachable!("mixed member kinds are rejected above")
-                    };
+                    let entry = member.into_encrypted_compressed(self.options.target)?;
                     validate_encrypted_compressed_entry(&entry)?;
                     if compression_method == 0 {
                         let encrypted = encrypted_stored_payload(entry.data, entry.password)?;
@@ -776,7 +757,7 @@ enum Rar50WriteMember<'a> {
     EncryptedCompressed(EncryptedCompressedEntry<'a>),
 }
 
-impl Rar50WriteMember<'_> {
+impl<'a> Rar50WriteMember<'a> {
     fn kind(self) -> Rar50WriteMemberKind {
         match self {
             Self::Stored(_) => Rar50WriteMemberKind::Stored,
@@ -788,6 +769,91 @@ impl Rar50WriteMember<'_> {
             }
             Self::EncryptedCompressed(_) => Rar50WriteMemberKind::EncryptedCompressed,
         }
+    }
+
+    fn into_stored(self, target: crate::ArchiveVersion) -> Result<StoredEntry<'a>> {
+        match self {
+            Self::Stored(entry) => Ok(entry),
+            _ => Err(mixed_member_plan_error(target)),
+        }
+    }
+
+    fn into_stored_with_services(
+        self,
+        target: crate::ArchiveVersion,
+    ) -> Result<StoredEntryWithServices<'a>> {
+        match self {
+            Self::StoredWithServices(entry) => Ok(entry),
+            _ => Err(mixed_member_plan_error(target)),
+        }
+    }
+
+    fn into_compressed(self, target: crate::ArchiveVersion) -> Result<CompressedEntry<'a>> {
+        match self {
+            Self::Compressed(entry) => Ok(entry),
+            _ => Err(mixed_member_plan_error(target)),
+        }
+    }
+
+    fn into_encrypted_stored(
+        self,
+        target: crate::ArchiveVersion,
+    ) -> Result<EncryptedStoredEntry<'a>> {
+        match self {
+            Self::EncryptedStored(entry) => Ok(entry),
+            _ => Err(mixed_member_plan_error(target)),
+        }
+    }
+
+    fn into_encrypted_stored_with_services(
+        self,
+        target: crate::ArchiveVersion,
+    ) -> Result<EncryptedStoredEntryWithServices<'a>> {
+        match self {
+            Self::EncryptedStoredWithServices(entry) => Ok(entry),
+            _ => Err(mixed_member_plan_error(target)),
+        }
+    }
+
+    fn into_encrypted_compressed(
+        self,
+        target: crate::ArchiveVersion,
+    ) -> Result<EncryptedCompressedEntry<'a>> {
+        match self {
+            Self::EncryptedCompressed(entry) => Ok(entry),
+            _ => Err(mixed_member_plan_error(target)),
+        }
+    }
+
+    fn encrypted_stored_password(&self, target: crate::ArchiveVersion) -> Result<&'a [u8]> {
+        match self {
+            Self::EncryptedStored(entry) => Ok(entry.password),
+            _ => Err(mixed_member_plan_error(target)),
+        }
+    }
+
+    fn encrypted_stored_with_services_ref(
+        &self,
+        target: crate::ArchiveVersion,
+    ) -> Result<&EncryptedStoredEntryWithServices<'a>> {
+        match self {
+            Self::EncryptedStoredWithServices(entry) => Ok(entry),
+            _ => Err(mixed_member_plan_error(target)),
+        }
+    }
+
+    fn encrypted_compressed_password(&self, target: crate::ArchiveVersion) -> Result<&'a [u8]> {
+        match self {
+            Self::EncryptedCompressed(entry) => Ok(entry.password),
+            _ => Err(mixed_member_plan_error(target)),
+        }
+    }
+}
+
+fn mixed_member_plan_error(target: crate::ArchiveVersion) -> Error {
+    Error::UnsupportedFeature {
+        version: target,
+        feature: "RAR 5 mixed stored/compressed writer plan",
     }
 }
 
@@ -3796,5 +3862,38 @@ mod tests {
         let options = WriterOptions::default();
         assert_eq!(options.target, crate::ArchiveVersion::Rar50);
         assert_eq!(options.features, crate::FeatureSet::store_only());
+    }
+
+    #[test]
+    fn writer_rejects_mixed_member_kinds_without_panicking() {
+        let stored = [StoredEntry {
+            name: b"stored.txt",
+            data: b"stored",
+            mtime: None,
+            attributes: 0x20,
+            host_os: 3,
+        }];
+        let compressed = [CompressedEntry {
+            name: b"compressed.txt",
+            data: b"compressed compressed compressed",
+            mtime: None,
+            attributes: 0x20,
+            host_os: 3,
+        }];
+        let result = Rar50Writer::new(WriterOptions::new(
+            crate::ArchiveVersion::Rar50,
+            crate::FeatureSet::store_only(),
+        ))
+        .stored_entries(&stored)
+        .compressed_entries(&compressed)
+        .finish();
+
+        assert!(matches!(
+            result,
+            Err(Error::UnsupportedFeature {
+                version: crate::ArchiveVersion::Rar50,
+                feature: "RAR 5 mixed stored/compressed writer plan",
+            })
+        ));
     }
 }

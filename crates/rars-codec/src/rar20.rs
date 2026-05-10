@@ -1,6 +1,4 @@
-use crate::{Error, Result};
-use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+use crate::{huffman, Error, Result};
 use std::io::{Read, Write};
 
 const MAIN_COUNT: usize = 298;
@@ -574,63 +572,8 @@ fn audio_encode(input: &[u8], channels: usize) -> Result<Vec<u8>> {
 }
 
 fn huffman_lengths_for_frequencies<const N: usize>(frequencies: &[usize; N]) -> [u8; N] {
-    let used_count = frequencies
-        .iter()
-        .filter(|&&frequency| frequency != 0)
-        .count();
-    if used_count <= 1 {
-        return uniform_huffman_lengths_for_frequencies(frequencies);
-    }
-
     let mut lengths = [0u8; N];
-    let mut heap = BinaryHeap::new();
-    let mut order = 0usize;
-    for (symbol, &frequency) in frequencies.iter().enumerate() {
-        if frequency == 0 {
-            continue;
-        }
-        heap.push(Reverse((frequency, order, vec![symbol])));
-        order += 1;
-    }
-
-    while heap.len() > 1 {
-        let Reverse((left_frequency, _, mut left_symbols)) = heap
-            .pop()
-            .expect("frequency heap has a left node while merging");
-        let Reverse((right_frequency, _, mut right_symbols)) = heap
-            .pop()
-            .expect("frequency heap has a right node while merging");
-        for &symbol in left_symbols.iter().chain(right_symbols.iter()) {
-            lengths[symbol] += 1;
-        }
-        left_symbols.append(&mut right_symbols);
-        heap.push(Reverse((
-            left_frequency.saturating_add(right_frequency),
-            order,
-            left_symbols,
-        )));
-        order += 1;
-    }
-
-    if lengths.iter().any(|&length| length > 15) {
-        uniform_huffman_lengths_for_frequencies(frequencies)
-    } else {
-        lengths
-    }
-}
-
-fn uniform_huffman_lengths_for_frequencies<const N: usize>(frequencies: &[usize; N]) -> [u8; N] {
-    let used_count = frequencies
-        .iter()
-        .filter(|&&frequency| frequency != 0)
-        .count();
-    let uniform_length = huffman_bits_for_symbol_count(used_count);
-    let mut lengths = [0u8; N];
-    for (symbol, &frequency) in frequencies.iter().enumerate() {
-        if frequency != 0 {
-            lengths[symbol] = uniform_length;
-        }
-    }
+    lengths.copy_from_slice(&huffman::lengths_for_frequencies(frequencies, 15));
     lengths
 }
 

@@ -259,6 +259,13 @@ pub struct ExtractedEntryMeta {
 }
 
 impl FileHeader {
+    pub fn name_bytes(&self) -> &[u8] {
+        &self.name
+    }
+
+    /// Returns the file name with invalid UTF-8 replaced for display only.
+    ///
+    /// Use [`Self::name_bytes`] when exact archive bytes matter.
     pub fn name_lossy(&self) -> String {
         String::from_utf8_lossy(&self.name).into_owned()
     }
@@ -739,6 +746,13 @@ impl FileHeader {
 }
 
 impl NewSubHeader {
+    pub fn name_bytes(&self) -> &[u8] {
+        self.file.name_bytes()
+    }
+
+    /// Returns the service-block name with invalid UTF-8 replaced for display only.
+    ///
+    /// Use [`Self::name_bytes`] when exact archive bytes matter.
     pub fn name_lossy(&self) -> String {
         self.file.name_lossy()
     }
@@ -2453,6 +2467,7 @@ mod tests {
         header.host_os = 3;
         header.file_time = 0x5a21_0000;
 
+        assert_eq!(header.name_bytes(), b"r\xc3\xa9sum\xc3\xa9.txt");
         assert_eq!(header.name_lossy(), "résumé.txt");
         let meta = header.metadata();
         assert_eq!(meta.name, header.name);

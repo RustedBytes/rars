@@ -38,6 +38,20 @@ pub struct ExtractedEntryMeta {
     pub is_directory: bool,
 }
 
+impl ExtractedEntryMeta {
+    /// Raw entry name bytes as stored by the archive family.
+    pub fn name_bytes(&self) -> &[u8] {
+        &self.name
+    }
+
+    /// Returns the entry name with invalid UTF-8 replaced for display only.
+    ///
+    /// Use [`Self::name_bytes`] when exact archive bytes matter.
+    pub fn name_lossy(&self) -> String {
+        String::from_utf8_lossy(&self.name).into_owned()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 /// Common member view plus family-specific detail.
@@ -76,6 +90,20 @@ pub struct ArchiveMemberMeta {
     pub is_split_before: bool,
     /// Whether the member continues into the next volume.
     pub is_split_after: bool,
+}
+
+impl ArchiveMemberMeta {
+    /// Raw member name bytes as stored by the archive family.
+    pub fn name_bytes(&self) -> &[u8] {
+        &self.name
+    }
+
+    /// Returns the member name with invalid UTF-8 replaced for display only.
+    ///
+    /// Use [`Self::name_bytes`] when exact archive bytes matter.
+    pub fn name_lossy(&self) -> String {
+        String::from_utf8_lossy(&self.name).into_owned()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -589,6 +617,19 @@ mod tests {
             .join(name)
     }
 
+    #[test]
+    fn extracted_entry_meta_exposes_raw_and_lossy_names() {
+        let meta = ExtractedEntryMeta {
+            name: vec![0xff, b'.', b't', b'x', b't'],
+            file_time: 0,
+            file_attr: 0,
+            is_directory: false,
+        };
+
+        assert_eq!(meta.name_bytes(), [0xff, b'.', b't', b'x', b't']);
+        assert_eq!(meta.name_lossy(), "\u{fffd}.txt");
+    }
+
     impl Write for CollectWriter {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
             self.data.borrow_mut().extend_from_slice(buf);
@@ -892,6 +933,8 @@ mod tests {
         assert_eq!(members.len(), 1);
         assert_eq!(members[0].meta.family, ArchiveFamily::Rar13);
         assert_eq!(members[0].meta.name, b"old.txt");
+        assert_eq!(members[0].meta.name_bytes(), b"old.txt");
+        assert_eq!(members[0].meta.name_lossy(), "old.txt");
         assert_eq!(members[0].meta.packed_size, b"old rar member".len() as u64);
         assert_eq!(
             members[0].meta.unpacked_size,
