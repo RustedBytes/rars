@@ -1716,7 +1716,10 @@ fn reference_rar_accepts_rar50_acl_and_stream_file_service_records() {
     fs::write(&path, bytes).unwrap();
     let output = match Command::new("rar").arg("t").arg(&path).output() {
         Ok(output) => output,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("skipping reference test: local `rar` command is not installed");
+            return;
+        }
         Err(error) => panic!("failed to run rar: {error}"),
     };
     if std::env::var_os("RARS_KEEP_REFERENCE_ARCHIVE").is_none() {
@@ -1734,8 +1737,12 @@ fn reference_rar_accepts_rar50_acl_and_stream_file_service_records() {
 #[test]
 #[ignore = "requires RARS_RAR50_LARGE_STREAM_FIXTURE pointing at an external >512 MiB sparse unfiltered RAR5 fixture"]
 fn external_sparse_rar50_large_member_streams_to_sink() {
-    let path = std::env::var_os("RARS_RAR50_LARGE_STREAM_FIXTURE")
-        .expect("set RARS_RAR50_LARGE_STREAM_FIXTURE to an external sparse RAR5 fixture");
+    let Some(path) = std::env::var_os("RARS_RAR50_LARGE_STREAM_FIXTURE") else {
+        eprintln!(
+            "skipping reference test: set RARS_RAR50_LARGE_STREAM_FIXTURE to an external sparse RAR5 fixture"
+        );
+        return;
+    };
     let archive = Archive::parse_path(path).unwrap();
     let largest = archive
         .files()

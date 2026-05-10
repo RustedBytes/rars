@@ -55,7 +55,7 @@ Generate a local coverage report:
 
 ```sh
 rustup component add llvm-tools-preview
-./scripts/coverage.sh
+./scripts/coverage.py
 ```
 
 The script prints a line-coverage summary, saves it to

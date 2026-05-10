@@ -3715,7 +3715,10 @@ mod tests {
         fs::write(&path, archive).unwrap();
         let output = match Command::new("rar").arg("t").arg(&path).output() {
             Ok(output) => output,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("skipping reference test: local `rar` command is not installed");
+                return;
+            }
             Err(error) => panic!("failed to run rar: {error}"),
         };
         if std::env::var_os("RARS_KEEP_REFERENCE_ARCHIVE").is_none() {
@@ -3770,7 +3773,10 @@ mod tests {
         fs::write(&path, archive).unwrap();
         let output = match Command::new("rar").arg("t").arg(&path).output() {
             Ok(output) => output,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("skipping reference test: local `rar` command is not installed");
+                return;
+            }
             Err(error) => panic!("failed to run rar: {error}"),
         };
         if std::env::var_os("RARS_KEEP_REFERENCE_ARCHIVE").is_none() {

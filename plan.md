@@ -2,24 +2,18 @@
 
 ## Review 5 Batches
 
-1. Small hygiene:
-   - Update README coverage instructions to use `scripts/coverage.py`.
-   - Close out the stale RARVM OOM fuzz artifact with an explicit note or
-     regression check.
-   - Add visible diagnostics for ignored oracle tests that skip because
-     environment variables are unset.
-2. API cleanup:
+1. API cleanup:
    - Document lossy name accessors and add byte-preserving name accessors where
      the public API currently nudges callers toward `name_lossy()`.
    - Replace repeated RAR50 writer `unreachable!` mixed-member guards with a
      helper that returns a format error.
    - Share the duplicated heap-merge Huffman-length helper between RAR20 and
      RAR50.
-3. Project hygiene:
+2. Project hygiene:
    - Add a minimal workspace lint policy and CI workflow for test+clippy.
    - Add fuzz targets for RAR50 LZ decode, recovery parsing/repair, and AES
      decrypt/KDF paths.
-4. Larger refactor:
+3. Larger refactor:
    - Split `rar50/write.rs` into focused modules such as filter policy, match
      search, and volume layout after the concrete review fixes are landed.
 
@@ -86,7 +80,7 @@
   `reference-rar5-writer.sh`, `reference-rar5-recovery-repair.sh`,
   `reference-rar29-rarvm-writer.sh`, `reference-rar3-aes-writer.sh`, and
   `reference-rar70-large-dict.sh`.
-- Run `./scripts/coverage.sh` periodically.
+- Run `./scripts/coverage.py` periodically.
 
 ## Deferred
 

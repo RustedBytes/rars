@@ -5,6 +5,7 @@ const MEMORY_MASK: u32 = 0x3ffff;
 const GLOBAL_BASE: usize = 0x3c000;
 const SYSTEM_GLOBAL_SIZE: usize = 64;
 const MAX_USER_GLOBAL: usize = 0x2000 - SYSTEM_GLOBAL_SIZE;
+const MAX_STATIC_DATA: usize = MEMORY_SIZE - GLOBAL_BASE;
 const MAX_INSTRUCTIONS: usize = 25_000_000;
 const FLAG_C: u32 = 1;
 const FLAG_Z: u32 = 2;
@@ -110,6 +111,9 @@ impl Program {
                 .checked_add(1)
                 .ok_or(Error::InvalidData("RARVM static data size overflows"))?
                 as usize;
+            if size > MAX_STATIC_DATA {
+                return Err(Error::InvalidData("RARVM static data is too large"));
+            }
             for _ in 0..size {
                 static_data.push(bits.read_bits(8)? as u8);
             }
@@ -1628,7 +1632,17 @@ mod tests {
     #[test]
     fn parse_rejects_huge_static_data_size_without_preallocating() {
         let err = Program::parse(&[0xff, 0xff, 0xff, 0xff, 0, 0]).unwrap_err();
-        assert_eq!(err, Error::NeedMoreInput);
+        assert_eq!(err, Error::InvalidData("RARVM static data is too large"));
+    }
+
+    #[test]
+    fn parse_rejects_static_data_larger_than_vm_memory() {
+        let mut bits = BitWriter::new();
+        bits.write_bits(1, 1);
+        write_vm_number(&mut bits, MAX_STATIC_DATA as u32);
+
+        let err = Program::parse(&with_xor(bits.finish())).unwrap_err();
+        assert_eq!(err, Error::InvalidData("RARVM static data is too large"));
     }
 
     fn instr(opcode: Opcode, byte_mode: bool, operands: Vec<Operand>) -> Instruction {
