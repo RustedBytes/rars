@@ -108,18 +108,18 @@ fn encode_member(
     }
 
     let tokens = encode_tokens(input, history);
-    let mut used_literals = [false; 256];
-    let mut used_match_slots = [false; LENGTH_COUNT];
+    let mut used_main_symbols = [false; MAIN_COUNT];
     for token in &tokens {
         match *token {
-            EncodeToken::Literal(byte) => used_literals[byte as usize] = true,
+            EncodeToken::Literal(byte) => used_main_symbols[byte as usize] = true,
+            EncodeToken::RepeatLast => used_main_symbols[256] = true,
             EncodeToken::Match { length, offset } => {
                 let encoded_length = length.checked_sub(match_length_adjustment(offset)).ok_or(
                     Error::InvalidData("RAR 2.0 adjusted match length underflows"),
                 )?;
                 let (slot, _) = length_slot_for_match(encoded_length)?;
                 offset_slot_for_match(offset)?;
-                used_match_slots[slot] = true;
+                used_main_symbols[270 + slot] = true;
             }
         }
     }
@@ -134,9 +134,7 @@ fn encode_member(
                 used_offset_slots[slot] = true;
             }
         }
-        let literal_count = used_literals.iter().filter(|&&used| used).count();
-        let main_symbol_count = literal_count
-            + used_match_slots.iter().filter(|&&used| used).count()
+        let main_symbol_count = used_main_symbols.iter().filter(|&&used| used).count()
             + used_offset_slots.iter().filter(|&&used| used).count();
         literal_code_len(main_symbol_count)?
     };
@@ -145,6 +143,7 @@ fn encode_member(
         for len in &mut table_lengths[..256] {
             *len = literal_len;
         }
+        table_lengths[256] = literal_len;
         for len in &mut table_lengths[270..270 + LENGTH_COUNT] {
             *len = literal_len;
         }
@@ -152,14 +151,9 @@ fn encode_member(
             *len = literal_len;
         }
     } else {
-        for (symbol, used) in used_literals.iter().enumerate() {
+        for (symbol, used) in used_main_symbols.iter().enumerate() {
             if *used {
                 table_lengths[symbol] = literal_len;
-            }
-        }
-        for (slot, used) in used_match_slots.iter().enumerate() {
-            if *used {
-                table_lengths[270 + slot] = literal_len;
             }
         }
         let mut used_offset_slots = [false; OFFSET_COUNT];
@@ -208,6 +202,12 @@ fn encode_member(
                 ))?;
                 bits.write_bits(code.code as u32, code.len);
             }
+            EncodeToken::RepeatLast => {
+                let code = main_codes[256].ok_or(Error::InvalidData(
+                    "RAR 2.0 encoder missing repeat-last Huffman code",
+                ))?;
+                bits.write_bits(code.code as u32, code.len);
+            }
             EncodeToken::Match { length, offset } => {
                 let encoded_length = length.checked_sub(match_length_adjustment(offset)).ok_or(
                     Error::InvalidData("RAR 2.0 adjusted match length underflows"),
@@ -250,6 +250,7 @@ impl FixedEncodeTable {
 #[derive(Debug, Clone, Copy)]
 enum EncodeToken {
     Literal(u8),
+    RepeatLast,
     Match { length: usize, offset: usize },
 }
 
@@ -266,9 +267,15 @@ fn encode_tokens(input: &[u8], history: &[u8]) -> Vec<EncodeToken> {
 
     let mut pos = history.len();
     let end = combined.len();
+    let mut last_match = None;
     while pos < end {
         if let Some((length, offset)) = best_match(&combined, pos, end, &buckets) {
-            tokens.push(EncodeToken::Match { length, offset });
+            if last_match == Some((length, offset)) {
+                tokens.push(EncodeToken::RepeatLast);
+            } else {
+                tokens.push(EncodeToken::Match { length, offset });
+                last_match = Some((length, offset));
+            }
             for history_pos in pos..pos + length {
                 insert_match_position(&combined, history_pos, &mut buckets);
             }
@@ -1569,6 +1576,19 @@ mod tests {
         let packed = unpack20_encode_literals(&input).unwrap();
 
         assert!(packed.len() < input.len() / 2);
+        assert_eq!(unpack20_decode(&packed, input.len()).unwrap(), input);
+    }
+
+    #[test]
+    fn encoder_emits_rar20_repeat_last_matches_for_regular_streams() {
+        let input = b"\x00\x01\x02\x03".repeat(4096);
+        let tokens = encode_tokens(&input, &[]);
+        let packed = unpack20_encode_literals(&input).unwrap();
+
+        assert!(tokens
+            .iter()
+            .any(|token| matches!(token, EncodeToken::RepeatLast)));
+        assert!(packed.len() < input.len() / 8);
         assert_eq!(unpack20_decode(&packed, input.len()).unwrap(), input);
     }
 

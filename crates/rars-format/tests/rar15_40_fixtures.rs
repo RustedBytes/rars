@@ -2009,6 +2009,38 @@ fn rar20_writer_uses_audio_block_for_boat_modern_english_fixture() {
 }
 
 #[test]
+fn rar20_writer_uses_repeat_last_for_regular_pcm_fixture() {
+    let source = std::fs::read(fixture("rar250/AUDIO.RAR")).unwrap();
+    let source_archive = Archive::parse(&source).unwrap();
+    let source_file = source_archive.files().next().unwrap();
+    let source_entries = collect_extract(&source_archive).unwrap();
+    let payload = &source_entries[0].data;
+    let entries = [FileEntry {
+        name: b"PCM_LR.WAV",
+        data: payload,
+        file_time: 0x5a21_0000,
+        file_attr: 0x20,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+
+    let bytes = write_compressed_archive(
+        &entries,
+        WriterOptions::new(ArchiveVersion::Rar20, FeatureSet::store_only()),
+    )
+    .unwrap();
+    let archive = Archive::parse(&bytes).unwrap();
+    let file = archive.files().next().unwrap();
+
+    assert_eq!(file.unp_ver, 20);
+    assert_eq!(file.method, 0x33);
+    assert!(file.pack_size < file.unp_size / 8);
+    assert!(file.pack_size < source_file.pack_size * 2);
+    assert_eq!(collect_extract(&archive).unwrap()[0].data, *payload);
+}
+
+#[test]
 fn rar20_writer_stamps_requested_method_levels() {
     let payload = b"rar20 level method payload alpha beta gamma\n".repeat(64);
     let entries = [FileEntry {

@@ -10,19 +10,21 @@
 ## Compression Work
 
 - Keep an eye on RAR29 PPMd/LZSS conversion in wild recompression. The known
-  libarchive PPMd/LZSS and multi-LZSS outliers now recompress to valid,
-  compact archives after preserving RAR4 dictionary bits, preventing level-3
-  LZ recompress from silently switching to PPMd, and using period-compatible
-  PPMd LZ escape lengths.
+  libarchive PPMd/LZSS outlier now recompresses to valid, compact archives
+  after preserving RAR4 dictionary bits, preventing level-3 LZ recompress from
+  silently switching to PPMd, and using period-compatible PPMd LZ escape
+  lengths. `test_read_format_rar_multi_lzss_blocks.rar` is wire-correct and
+  compact with `m5`/auto/PPMd, but method-preserving `m3` LZ recompress remains
+  a ratio outlier.
 - Revisit RAR 1.4 old-distance token emission with DOS RAR 1.402 oracle
   coverage. The writer currently avoids that compatibility-sensitive
   vocabulary and relies on repeat-last, short-LZ, and long-LZ matches.
 - Improve RAR 1.4 compressed-writer quality after the DOS compatibility path
   is stable: match selection, safe old-distance reuse, and text-heavy corpus
   tuning.
-- Add WinRAR 2.90 oracle coverage before enabling RAR20 repeat-distance,
-  old-distance, short-distance, or audio writer tokens. The current writer
-  deliberately emits only literals and fresh LZ matches.
+- Add WinRAR 2.90 oracle coverage before enabling RAR20 old-distance or
+  short-distance writer tokens. The current RAR20 writer emits literals, fresh
+  LZ matches, repeat-last matches, and audio blocks when they beat LZ.
 - Tune RAR29/RAR30/RAR40 lower-level policy: `m5` is already strong, and
   cost-aware lazy lookahead, repeat-distance candidates, dictionary-bounded
   match search, multi-range x86 filtering, ranged Delta filtering, and
@@ -32,8 +34,9 @@
 - Improve RAR20/RAR29 audio-filter policy after correctness is stable. RAR29
   auto now gates AUDIO candidates with a cheap PCM-shape test before paying for
   full filter encoding, and RAR20 can emit frequency-weighted audio blocks when
-  they beat LZ. Remaining work is oracle-guided tuning for the
-  `BoatModernEnglish` fixtures and other wild audio regressions.
+  they beat LZ. The `BoatModernEnglish` RAR20 fixture is no longer a regression;
+  remaining work is oracle-guided tuning for hybrid audio/LZ switching on PCM
+  fixtures and other wild audio regressions.
 - Reintroduce RAR29/RAR30/RAR40 frequency-weighted Huffman lengths only with
   independent decoder-oracle coverage. The current writer deliberately uses
   uniform LZ Huffman tables after weighted Main tables produced streams that
