@@ -1085,6 +1085,20 @@ mod tests {
     }
 
     #[test]
+    fn decrypting_reader_reports_rar30_body_crypto_errors_without_header_context() {
+        let error = super::map_rar30_crypto_error(Rar30Error::UnalignedInput);
+        assert!(matches!(
+            error,
+            Error::Rar30Crypto(Rar30Error::UnalignedInput)
+        ));
+        assert_eq!(error.to_string(), "RAR 3.x AES input is not block aligned");
+
+        let mapped =
+            file(b"encrypted.bin", FHD_PASSWORD).map_encrypted_payload_error(Some(b"pw"), error);
+        assert_eq!(mapped, Error::WrongPasswordOrCorruptData);
+    }
+
+    #[test]
     fn pending_split_refs_packed_size_rejects_missing_volume_or_file() {
         let f = file(b"a.txt", FHD_SPLIT_AFTER);
         let pending = PendingSplitRefs::new(&f, 9, 0);

@@ -568,6 +568,7 @@ impl FileHeader {
             | Error::Codec(_)
             | Error::Rar3Recovery(_)
             | Error::Rar5Recovery(_)
+            | Error::Rar30Crypto(_)
             | Error::Rar50Crypto(_)
             | Error::CrcMismatch { .. }
             | Error::Crc32Mismatch { .. }
@@ -1635,13 +1636,7 @@ impl EncryptedHeaderCipherCache {
 }
 
 fn map_rar30_crypto_error(error: Rar30Error) -> Error {
-    match error {
-        Rar30Error::NonUtf8Password => Error::InvalidHeader("RAR 3.x password is not UTF-8"),
-        Rar30Error::UnalignedInput => {
-            Error::InvalidHeader("RAR 3.x AES input is not block aligned")
-        }
-        _ => Error::InvalidHeader("RAR 3.x crypto error"),
-    }
+    Error::from(error)
 }
 
 fn decrypt_encrypted_header_at(

@@ -74,6 +74,7 @@ pub enum Error {
     Codec(rars_codec::Error),
     Rar3Recovery(rars_recovery::rar3::Error),
     Rar5Recovery(rars_recovery::rar5::Error),
+    Rar30Crypto(rars_crypto::rar30::Error),
     Rar50Crypto(rars_crypto::rar50::Error),
 }
 
@@ -142,6 +143,7 @@ impl std::fmt::Display for Error {
             Self::Codec(error) => write!(f, "{}", display_codec_error(error)),
             Self::Rar3Recovery(error) => write!(f, "{}", display_rar3_recovery_error(error)),
             Self::Rar5Recovery(error) => write!(f, "{}", display_rar5_recovery_error(error)),
+            Self::Rar30Crypto(error) => write!(f, "{}", display_rar30_crypto_error(error)),
             Self::Rar50Crypto(error) => write!(f, "{}", display_rar50_crypto_error(error)),
         }
     }
@@ -164,6 +166,7 @@ impl std::error::Error for Error {
             Self::Codec(source) => Some(source),
             Self::Rar3Recovery(source) => Some(source),
             Self::Rar5Recovery(source) => Some(source),
+            Self::Rar30Crypto(source) => Some(source),
             Self::Rar50Crypto(source) => Some(source),
             Self::Io(source) => Some(source.source()),
             _ => None,
@@ -203,6 +206,12 @@ impl From<rars_recovery::rar5::Error> for Error {
 impl From<rars_recovery::rar3::Error> for Error {
     fn from(error: rars_recovery::rar3::Error) -> Self {
         Self::Rar3Recovery(error)
+    }
+}
+
+impl From<rars_crypto::rar30::Error> for Error {
+    fn from(error: rars_crypto::rar30::Error) -> Self {
+        Self::Rar30Crypto(error)
     }
 }
 
@@ -249,6 +258,14 @@ fn display_rar3_recovery_error(error: &rars_recovery::rar3::Error) -> &'static s
         }
         rars_recovery::rar3::Error::DecodeFailed => "RAR 3 recovery decode failed",
         _ => "RAR 3 recovery error",
+    }
+}
+
+fn display_rar30_crypto_error(error: &rars_crypto::rar30::Error) -> &'static str {
+    match error {
+        rars_crypto::rar30::Error::NonUtf8Password => "RAR 3.x password is not UTF-8",
+        rars_crypto::rar30::Error::UnalignedInput => "RAR 3.x AES input is not block aligned",
+        _ => "RAR 3.x crypto error",
     }
 }
 
@@ -401,6 +418,21 @@ mod tests {
         assert_eq!(
             std::error::Error::source(&error).map(ToString::to_string),
             Some("RAR 3 recovery decode failed".to_string())
+        );
+    }
+
+    #[test]
+    fn rar30_crypto_errors_remain_in_source_chain() {
+        let error = Error::from(rars_crypto::rar30::Error::UnalignedInput);
+
+        assert!(matches!(
+            error,
+            Error::Rar30Crypto(rars_crypto::rar30::Error::UnalignedInput)
+        ));
+        assert_eq!(error.to_string(), "RAR 3.x AES input is not block aligned");
+        assert_eq!(
+            std::error::Error::source(&error).map(ToString::to_string),
+            Some("RAR 3.x AES input is not block aligned".to_string())
         );
     }
 
