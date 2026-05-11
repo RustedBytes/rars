@@ -1,17 +1,21 @@
 # rars plan
 
-## Review 5 Batches
-
-1. Larger refactor:
-   - Split `rar50/write.rs` into focused modules such as filter policy, match
-     search, and volume layout after the concrete review fixes are landed.
-
 ## Hardening
 - Verify RAR 2.x `PROTECT_HEAD` parity semantics when the declared protected
   range extends past the recovery block. Add an oracle fixture if possible;
   either repair those overlap sectors correctly or document the unsupported
   layout explicitly.
 - Add adversarial PPMd fixtures as corpus bugs appear.
+- Add a workspace lint policy. Keep it local for now; CI remains deferred
+  until the rate of change drops.
+- Make nested error display exhaustive or delegate to `Display` on inner error
+  enums so new codec/crypto/recovery variants cannot silently collapse to a
+  generic message.
+- Add remaining fuzz targets for RAR 3.x recovery records and RAR 3.x AES
+  streams. Existing fuzz targets cover archive parsing, Unpack29, PPMd,
+  RARVM, Unpack50, RAR5 recovery, and RAR50 crypto.
+- Replace CLI data fan-out panics with ordinary errors where the archive family
+  was already parsed successfully.
 
 ## Compression Work
 
@@ -60,6 +64,8 @@
   default benchmark corpus still emits RAR5-compatible streams.
 - Refine non-zero `--level` mappings for RAR13/RAR15 after the bench
   harness reports which policy differences matter.
+- Route RAR20 and RAR50 frequency-based Huffman length generation through the
+  shared codec helper instead of keeping local heap-merge implementations.
 
 ## Optional Oracles
 
@@ -74,7 +80,11 @@
 ## Deferred
 
 - Split `rars-cli/src/main.rs` into command modules when the CLI is next edited
-  heavily.
+  heavily. When doing that split, consolidate usage text, flag parsing, and
+  CLI failure-mode tests so help and parser behaviour cannot drift apart.
+- Tighten `Rar50Writer`'s archive-comment state so plain and encrypted archive
+  comments are represented as one mutually exclusive value instead of two
+  `Option` fields checked at finish time.
 - Define legacy byte-encoding policy for RAR3 passwords and archive names.
   Avoid silent `from_utf8_lossy` derivation; either reject non-UTF-8 bytes
   clearly or implement the intended legacy byte-to-wide/code-page mapping.
