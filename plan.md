@@ -64,8 +64,6 @@
   default benchmark corpus still emits RAR5-compatible streams.
 - Refine non-zero `--level` mappings for RAR13/RAR15 after the bench
   harness reports which policy differences matter.
-- Route RAR20 and RAR50 frequency-based Huffman length generation through the
-  shared codec helper instead of keeping local heap-merge implementations.
 
 ## Optional Oracles
 

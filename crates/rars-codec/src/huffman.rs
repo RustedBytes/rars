@@ -45,7 +45,16 @@ pub(crate) fn lengths_for_frequencies(frequencies: &[usize], max_bits: u8) -> Ve
     }
 }
 
-fn uniform_lengths_for_frequencies(frequencies: &[usize]) -> Vec<u8> {
+pub(crate) fn lengths_for_frequency_array<const N: usize>(
+    frequencies: &[usize; N],
+    max_bits: u8,
+) -> [u8; N] {
+    let mut lengths = [0u8; N];
+    lengths.copy_from_slice(&lengths_for_frequencies(frequencies, max_bits));
+    lengths
+}
+
+pub(crate) fn uniform_lengths_for_frequencies(frequencies: &[usize]) -> Vec<u8> {
     let used_count = frequencies
         .iter()
         .filter(|&&frequency| frequency != 0)
@@ -57,7 +66,7 @@ fn uniform_lengths_for_frequencies(frequencies: &[usize]) -> Vec<u8> {
         .collect()
 }
 
-fn bits_for_symbol_count(count: usize) -> u8 {
+pub(crate) fn bits_for_symbol_count(count: usize) -> u8 {
     match count {
         0 | 1 => 1,
         _ => usize::BITS as u8 - (count - 1).leading_zeros() as u8,

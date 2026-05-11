@@ -421,7 +421,7 @@ fn encode_audio_member(input: &[u8], channels: usize) -> Result<Vec<u8>> {
         for index in (channel..deltas.len()).step_by(channels) {
             frequencies[deltas[index] as usize] += 1;
         }
-        let channel_lengths = huffman_lengths_for_frequencies(&frequencies);
+        let channel_lengths = huffman::lengths_for_frequency_array(&frequencies, 15);
         for (symbol, len) in channel_lengths.into_iter().enumerate() {
             levels[channel * AUDIO_COUNT + symbol] = len;
         }
@@ -475,7 +475,7 @@ fn level_code_lengths_for_symbols(symbols: &[usize]) -> [u8; LEVEL_COUNT] {
         used[symbol] = true;
     }
     let used_count = used.iter().filter(|&&used| used).count();
-    let len = huffman_bits_for_symbol_count(used_count);
+    let len = huffman::bits_for_symbol_count(used_count);
     let mut lengths = [0u8; LEVEL_COUNT];
     for (symbol, is_used) in used.into_iter().enumerate() {
         if is_used {
@@ -569,19 +569,6 @@ fn audio_encode(input: &[u8], channels: usize) -> Result<Vec<u8>> {
         deltas.push(delta);
     }
     Ok(deltas)
-}
-
-fn huffman_lengths_for_frequencies<const N: usize>(frequencies: &[usize; N]) -> [u8; N] {
-    let mut lengths = [0u8; N];
-    lengths.copy_from_slice(&huffman::lengths_for_frequencies(frequencies, 15));
-    lengths
-}
-
-fn huffman_bits_for_symbol_count(count: usize) -> u8 {
-    match count {
-        0 | 1 => 1,
-        _ => usize::BITS as u8 - (count - 1).leading_zeros() as u8,
-    }
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -1,4 +1,5 @@
 use crate::filters::{self, DeltaErrorMessages, FilterOp};
+use crate::huffman;
 use crate::ppmd::{PpmdByteReader, PpmdDecoder, PpmdEncoder};
 use crate::rarvm;
 use crate::{Error, Result};
@@ -587,10 +588,10 @@ fn encode_member_inner(
     {
         low_offset_frequencies[0] = 1;
     }
-    let main_lengths = uniform_huffman_lengths_for_frequencies(&main_frequencies);
-    let offset_lengths = uniform_huffman_lengths_for_frequencies(&offset_frequencies);
-    let low_offset_lengths = uniform_huffman_lengths_for_frequencies(&low_offset_frequencies);
-    let length_lengths = uniform_huffman_lengths_for_frequencies(&length_frequencies);
+    let main_lengths = huffman::uniform_lengths_for_frequencies(&main_frequencies);
+    let offset_lengths = huffman::uniform_lengths_for_frequencies(&offset_frequencies);
+    let low_offset_lengths = huffman::uniform_lengths_for_frequencies(&low_offset_frequencies);
+    let length_lengths = huffman::uniform_lengths_for_frequencies(&length_frequencies);
     table_lengths[..MAIN_COUNT].copy_from_slice(&main_lengths);
     table_lengths[MAIN_COUNT..MAIN_COUNT + OFFSET_COUNT].copy_from_slice(&offset_lengths);
     table_lengths[MAIN_COUNT + OFFSET_COUNT..MAIN_COUNT + OFFSET_COUNT + LOW_OFFSET_COUNT]
@@ -1374,25 +1375,6 @@ fn offset_slot_for_match(offset: usize) -> Result<(usize, usize)> {
     Err(Error::InvalidData("RAR 2.9 match offset is too large"))
 }
 
-fn huffman_bits_for_symbol_count(count: usize) -> u8 {
-    match count {
-        0 | 1 => 1,
-        _ => usize::BITS as u8 - (count - 1).leading_zeros() as u8,
-    }
-}
-
-fn uniform_huffman_lengths_for_frequencies(frequencies: &[usize]) -> Vec<u8> {
-    let used_count = frequencies
-        .iter()
-        .filter(|&&frequency| frequency != 0)
-        .count();
-    let uniform_length = huffman_bits_for_symbol_count(used_count);
-    frequencies
-        .iter()
-        .map(|&frequency| if frequency == 0 { 0 } else { uniform_length })
-        .collect()
-}
-
 fn encode_table_level_symbols(lengths: &[u8; TABLE_COUNT]) -> Vec<usize> {
     lengths.iter().map(|&len| len as usize).collect()
 }
@@ -1405,7 +1387,7 @@ fn level_code_lengths(symbols: &[usize]) -> [u8; LEVEL_COUNT] {
         .filter(|&symbol| symbol < 16)
         .collect::<std::collections::BTreeSet<_>>()
         .len();
-    let len = huffman_bits_for_symbol_count(used_count);
+    let len = huffman::bits_for_symbol_count(used_count);
     for &symbol in symbols {
         if symbol < 16 {
             lengths[symbol] = len;

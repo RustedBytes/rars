@@ -434,7 +434,7 @@ pub fn encode_literal_only(data: &[u8], algorithm_version: u8) -> Result<Vec<u8>
     };
     let present = literal_presence(data);
     let literal_count = present.iter().filter(|&&used| used).count();
-    let literal_length = huffman_bits_for_symbol_count(literal_count);
+    let literal_length = huffman::bits_for_symbol_count(literal_count);
     for (symbol, used) in present.into_iter().enumerate() {
         if used {
             lengths.main[symbol] = literal_length;
@@ -813,10 +813,10 @@ fn encode_lz_block(
         }
     }
 
-    lengths.main = huffman_lengths_for_frequencies(&main_frequencies);
-    lengths.distance = huffman_lengths_for_frequencies(&distance_frequencies);
-    lengths.length = huffman_lengths_for_frequencies(&length_frequencies);
-    lengths.align = huffman_lengths_for_frequencies(&align_frequencies);
+    lengths.main = huffman::lengths_for_frequencies(&main_frequencies, 15);
+    lengths.distance = huffman::lengths_for_frequencies(&distance_frequencies, 15);
+    lengths.length = huffman::lengths_for_frequencies(&length_frequencies, 15);
+    lengths.align = huffman::lengths_for_frequencies(&align_frequencies, 15);
 
     let main_table = HuffmanTable::from_lengths(&lengths.main)?;
     let distance_table = HuffmanTable::from_lengths(&lengths.distance)?;
@@ -1343,17 +1343,6 @@ fn literal_presence(data: &[u8]) -> [bool; 256] {
         present[byte as usize] = true;
     }
     present
-}
-
-fn huffman_bits_for_symbol_count(count: usize) -> u8 {
-    match count {
-        0 | 1 => 1,
-        _ => usize::BITS as u8 - (count - 1).leading_zeros() as u8,
-    }
-}
-
-fn huffman_lengths_for_frequencies(frequencies: &[usize]) -> Vec<u8> {
-    huffman::lengths_for_frequencies(frequencies, 15)
 }
 
 #[derive(Debug, Clone)]
@@ -2697,7 +2686,7 @@ mod tests {
         let mut frequencies = vec![1usize; 24];
         frequencies[3] = 1024;
 
-        let lengths = huffman_lengths_for_frequencies(&frequencies);
+        let lengths = huffman::lengths_for_frequencies(&frequencies, 15);
 
         assert!(lengths[3] < lengths[0]);
         assert!(lengths.iter().all(|&length| length <= 15));
