@@ -4812,6 +4812,38 @@ fn parses_rar250_protect_head_recovery_record() {
         protect.data_range.len(),
         protect.total_blocks as usize * 2 + protect.rec_sectors as usize * 512
     );
+    assert_eq!(
+        protect.total_blocks as usize,
+        protect.block.offset.div_ceil(512)
+    );
+    assert_eq!(protect.block.offset % 512, 59);
+}
+
+#[test]
+fn rar250_protect_head_declares_final_sector_that_overlaps_record() {
+    for (path, rec_sectors) in [
+        ("rar250_protect_head_rr1.rar", 1),
+        ("rar250_protect_head_rr5.rar", 5),
+    ] {
+        let bytes = std::fs::read(fixture(path)).unwrap();
+        let archive = Archive::parse(&bytes).unwrap();
+        let protect = archive.protect_records().next().unwrap();
+
+        assert_eq!(protect.rec_sectors, rec_sectors);
+        assert_ne!(protect.block.offset % 512, 0);
+        assert_eq!(
+            protect.total_blocks as usize,
+            protect.block.offset.div_ceil(512)
+        );
+        assert_eq!(
+            protect.total_blocks as usize,
+            protect.block.offset / 512 + 1
+        );
+        assert_eq!(
+            protect.data_range.len(),
+            protect.total_blocks as usize * 2 + protect.rec_sectors as usize * 512
+        );
+    }
 }
 
 #[test]

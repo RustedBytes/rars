@@ -1690,12 +1690,7 @@ mod tests {
             target_name: b"target".to_vec(),
         });
         let volumes = vec![archive_with_blocks(vec![Block::File(redirect)], Vec::new())];
-        extract_volumes_to(
-            &volumes,
-            crate::ArchiveReadOptions::default(),
-            never_open,
-        )
-        .unwrap();
+        extract_volumes_to(&volumes, crate::ArchiveReadOptions::default(), never_open).unwrap();
     }
 
     #[test]

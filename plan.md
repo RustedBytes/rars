@@ -1,10 +1,6 @@
 # rars plan
 
 ## Hardening
-- Verify RAR 2.x `PROTECT_HEAD` parity semantics when the declared protected
-  range extends past the recovery block. Add an oracle fixture if possible;
-  either repair those overlap sectors correctly or document the unsupported
-  layout explicitly.
 - Add adversarial PPMd fixtures as corpus bugs appear.
 
 ## Compression Work

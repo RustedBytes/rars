@@ -1352,10 +1352,9 @@ fn repair_protect_head_bytes(
     }
     let tags = &recovery_data[..tag_len];
     let parity = &recovery_data[tag_len..];
-    // RAR 2.x may declare a final sector that overlaps the PROTECT_HEAD
-    // record itself. The stable repairable prefix is the complete 512-byte
-    // sectors before the recovery block; the declared layout is still used to
-    // split the tag and parity areas.
+    // RAR 2.50 records may declare a final sector that starts before
+    // PROTECT_HEAD but overlaps the recovery block. Only complete sectors
+    // before the recovery block are safely repairable.
     let repairable_blocks = declared_blocks.min(protect.block.offset / 512);
 
     let mut damaged = Vec::new();
