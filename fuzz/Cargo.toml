@@ -60,8 +60,22 @@ doc = false
 bench = false
 
 [[bin]]
+name = "rar3_recovery"
+path = "fuzz_targets/rar3_recovery.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "rar50_crypto"
 path = "fuzz_targets/rar50_crypto.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rar30_crypto"
+path = "fuzz_targets/rar30_crypto.rs"
 test = false
 doc = false
 bench = false
