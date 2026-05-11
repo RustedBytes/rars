@@ -6,8 +6,6 @@
   either repair those overlap sectors correctly or document the unsupported
   layout explicitly.
 - Add adversarial PPMd fixtures as corpus bugs appear.
-- Add a workspace lint policy. Keep it local for now; CI remains deferred
-  until the rate of change drops.
 - Make nested error display exhaustive or delegate to `Display` on inner error
   enums so new codec/crypto/recovery variants cannot silently collapse to a
   generic message.

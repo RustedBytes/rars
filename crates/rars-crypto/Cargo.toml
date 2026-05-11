@@ -12,6 +12,9 @@ documentation.workspace = true
 keywords.workspace = true
 categories = ["cryptography"]
 
+[lints]
+workspace = true
+
 [package.metadata.docs.rs]
 all-features = true
 

@@ -35,3 +35,12 @@ rars-recovery = { version = "0.1.0", path = "crates/rars-recovery" }
 rpassword = "7"
 sha1 = "0.10"
 sha2 = "0.10"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
