@@ -1420,4 +1420,141 @@ mod tests {
         let second = session.codec_for(&f).unwrap() as *const CodecState;
         assert_eq!(first, second);
     }
+
+    #[test]
+    fn decoder_session_decode_file_data_dispatches_to_stored_path_for_each_codec_version() {
+        let payload = b"decode_file_data stored dispatch".to_vec();
+        let crc = super::super::crc32(&payload);
+        for unp_ver in [15u8, 20, 26, 29] {
+            let mut entry = file(b"a.txt", 0);
+            entry.unp_ver = unp_ver;
+            entry.pack_size = payload.len() as u64;
+            entry.unp_size = payload.len() as u64;
+            entry.packed_range = 0..payload.len();
+            entry.file_crc = crc;
+
+            let archive =
+                archive_with_source(vec![Block::File(entry.clone())], payload.clone());
+            let mut session = DecoderSession::new(false);
+            let data = session
+                .decode_file_data(&archive, &entry)
+                .unwrap_or_else(|err| panic!("decode for unp_ver {unp_ver}: {err:?}"));
+            assert_eq!(data, payload, "unp_ver {unp_ver} payload mismatch");
+        }
+    }
+
+    #[test]
+    fn decrypting_reader_works_through_boxed_inner_reader() {
+        let plain = *b"0123456789abcdefRAR2 block two!!";
+        let mut encrypted = plain;
+        Rar20Cipher::new(b"pw")
+            .encrypt_in_place(&mut encrypted)
+            .unwrap();
+        let inner: Box<dyn Read> = Box::new(Cursor::new(encrypted.to_vec()));
+        let reader = DecryptingReader::new(inner, 20, b"pw", None).unwrap();
+        let out = read_in_small_chunks(reader);
+
+        assert_eq!(out, plain);
+    }
+
+    #[test]
+    fn decrypting_reader_boxed_inner_rejects_non_block_aligned_eof() {
+        let mut payload = vec![0u8; 32];
+        Rar20Cipher::new(b"pw")
+            .encrypt_in_place(&mut payload[..16])
+            .unwrap();
+        // 23 bytes of trailing data (not a multiple of 16) — should error at EOF.
+        payload.truncate(23);
+        let inner: Box<dyn Read> = Box::new(Cursor::new(payload));
+        let mut reader = DecryptingReader::new(inner, 20, b"pw", None).unwrap();
+        let mut buf = [0u8; 64];
+        let err = loop {
+            match reader.read(&mut buf) {
+                Ok(0) => panic!("expected non-block-aligned data error"),
+                Ok(_) => continue,
+                Err(err) => break err,
+            }
+        };
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn extract_volumes_to_assembles_encrypted_stored_split_across_two_volumes() {
+        let payload: &[u8] = b"twenty-byte payload!"; // exactly 20 bytes
+        let unpacked_len = payload.len();
+        assert_eq!(unpacked_len, 20);
+        let padded_len = (unpacked_len + 15) & !15; // 32
+        let mut encrypted = vec![0u8; padded_len];
+        encrypted[..unpacked_len].copy_from_slice(payload);
+        Rar20Cipher::new(b"pw")
+            .encrypt_in_place(&mut encrypted)
+            .unwrap();
+        let split = 13usize;
+        let crc = super::super::crc32(payload);
+
+        let mut first = file(b"split.bin", FHD_PASSWORD | FHD_SPLIT_AFTER);
+        first.unp_ver = 20;
+        first.pack_size = split as u64;
+        first.unp_size = unpacked_len as u64;
+        first.packed_range = 0..split;
+        first.file_crc = crc;
+
+        let mut second = file(b"split.bin", FHD_PASSWORD | FHD_SPLIT_BEFORE);
+        second.unp_ver = 20;
+        second.pack_size = (padded_len - split) as u64;
+        second.unp_size = unpacked_len as u64;
+        second.packed_range = 0..(padded_len - split);
+        second.file_crc = crc;
+
+        let volumes = vec![
+            archive_with_source(vec![Block::File(first)], encrypted[..split].to_vec()),
+            archive_with_source(vec![Block::File(second)], encrypted[split..].to_vec()),
+        ];
+
+        let capture = Capture::default();
+        extract_volumes_to(
+            &volumes,
+            crate::ArchiveReadOptions::with_password(b"pw"),
+            capture.opener(),
+        )
+        .unwrap();
+
+        assert_eq!(capture.bytes.borrow().as_slice(), payload);
+    }
+
+    #[test]
+    fn extract_volumes_to_rejects_encrypted_stored_split_when_padded_size_disagrees() {
+        let unpacked_len = 20usize;
+        // Two volumes total only 30 bytes, but expected_packed_len == 32.
+        let payload = [0u8; 30];
+
+        let mut first = file(b"split.bin", FHD_PASSWORD | FHD_SPLIT_AFTER);
+        first.unp_ver = 20;
+        first.pack_size = 13;
+        first.unp_size = unpacked_len as u64;
+        first.packed_range = 0..13;
+
+        let mut second = file(b"split.bin", FHD_PASSWORD | FHD_SPLIT_BEFORE);
+        second.unp_ver = 20;
+        second.pack_size = 17;
+        second.unp_size = unpacked_len as u64;
+        second.packed_range = 0..17;
+
+        let volumes = vec![
+            archive_with_source(vec![Block::File(first)], payload[..13].to_vec()),
+            archive_with_source(vec![Block::File(second)], payload[13..].to_vec()),
+        ];
+
+        let capture = Capture::default();
+        let err = extract_volumes_to(
+            &volumes,
+            crate::ArchiveReadOptions::with_password(b"pw"),
+            capture.opener(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidHeader(msg) if msg.contains("wrong reassembled size")),
+            "expected wrong reassembled size error, got {err:?}"
+        );
+    }
 }
