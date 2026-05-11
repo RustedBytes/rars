@@ -1433,8 +1433,7 @@ mod tests {
             entry.packed_range = 0..payload.len();
             entry.file_crc = crc;
 
-            let archive =
-                archive_with_source(vec![Block::File(entry.clone())], payload.clone());
+            let archive = archive_with_source(vec![Block::File(entry.clone())], payload.clone());
             let mut session = DecoderSession::new(false);
             let data = session
                 .decode_file_data(&archive, &entry)

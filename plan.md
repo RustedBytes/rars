@@ -14,8 +14,6 @@
 - Add remaining fuzz targets for RAR 3.x recovery records and RAR 3.x AES
   streams. Existing fuzz targets cover archive parsing, Unpack29, PPMd,
   RARVM, Unpack50, RAR5 recovery, and RAR50 crypto.
-- Replace CLI data fan-out panics with ordinary errors where the archive family
-  was already parsed successfully.
 
 ## Compression Work
 

@@ -169,11 +169,8 @@ fn cmd_info(args: &[String]) -> CliResult<()> {
 
     for path in paths {
         let archive = read_archive_path_prompting(&path, &mut password)?;
-        println!(
-            "{path}: {:?} at offset {}",
-            archive.family(),
-            archive.sfx_offset()
-        );
+        let family = archive.family();
+        println!("{path}: {:?} at offset {}", family, archive.sfx_offset());
         match archive {
             DetectedArchive::Rar13(archive) => {
                 println!(
@@ -324,7 +321,11 @@ fn cmd_info(args: &[String]) -> CliResult<()> {
                     );
                 }
             }
-            _ => unreachable!("archive family was parsed but is not handled by info output"),
+            _ => {
+                return Err(CliError::general(format!(
+                    "archive family {family:?} is not handled by info output"
+                )));
+            }
         }
     }
 
