@@ -1513,4 +1513,365 @@ mod tests {
             data_range,
         }
     }
+
+    fn split_fragment_file(name: &[u8], hfl_flags: u64) -> FileHeader {
+        FileHeader {
+            block: empty_block(HEAD_FILE, hfl_flags, 0..0),
+            file_flags: 0,
+            unpacked_size: 0,
+            attributes: 0x20,
+            mtime: None,
+            data_crc32: None,
+            compression_info: 0,
+            host_os: 2,
+            name: name.to_vec(),
+            hash: None,
+            redirection: None,
+            service_data: None,
+            encrypted: false,
+            encryption: None,
+            crypto: None,
+        }
+    }
+
+    fn archive_with_blocks(blocks: Vec<Block>, source: Vec<u8>) -> Archive {
+        let bytes: Arc<[u8]> = Arc::from(source.into_boxed_slice());
+        Archive {
+            sfx_offset: 0,
+            main: MainHeader {
+                block: empty_block(1, 0, 0..0),
+                archive_flags: 0,
+                volume_number: None,
+                extras: Vec::new(),
+            },
+            blocks,
+            source: ArchiveSource::Memory(bytes),
+        }
+    }
+
+    fn never_open(_meta: &ExtractedEntryMeta) -> Result<Box<dyn Write>> {
+        panic!("open should not be invoked for this test");
+    }
+
+    #[test]
+    fn extract_volumes_to_rejects_volume_state_violations() {
+        let empty: Vec<Archive> = Vec::new();
+        assert!(matches!(
+            extract_volumes_to(&empty, crate::ArchiveReadOptions::default(), never_open),
+            Err(Error::InvalidHeader(_))
+        ));
+
+        let only_continuation = vec![archive_with_blocks(
+            vec![Block::File(split_fragment_file(b"a.txt", HFL_SPLIT_BEFORE))],
+            Vec::new(),
+        )];
+        assert!(matches!(
+            extract_volumes_to(
+                &only_continuation,
+                crate::ArchiveReadOptions::default(),
+                never_open,
+            ),
+            Err(Error::InvalidHeader(_))
+        ));
+
+        let interrupted = vec![archive_with_blocks(
+            vec![
+                Block::File(split_fragment_file(b"a.txt", HFL_SPLIT_AFTER)),
+                Block::File(plain_file(b"other.txt", b"", None)),
+            ],
+            Vec::new(),
+        )];
+        assert!(matches!(
+            extract_volumes_to(
+                &interrupted,
+                crate::ArchiveReadOptions::default(),
+                never_open,
+            ),
+            Err(Error::InvalidHeader(_))
+        ));
+
+        let incomplete = vec![archive_with_blocks(
+            vec![Block::File(split_fragment_file(b"a.txt", HFL_SPLIT_AFTER))],
+            Vec::new(),
+        )];
+        assert!(matches!(
+            extract_volumes_to(
+                &incomplete,
+                crate::ArchiveReadOptions::default(),
+                never_open,
+            ),
+            Err(Error::InvalidHeader(_))
+        ));
+    }
+
+    #[test]
+    fn validate_split_fragment_rejects_directories_and_demands_password_for_encrypted() {
+        let mut dir = split_fragment_file(b"d", HFL_SPLIT_AFTER);
+        dir.file_flags = 0x0001;
+        assert!(matches!(
+            validate_split_fragment(&dir, None),
+            Err(Error::InvalidHeader(_))
+        ));
+
+        let mut encrypted = split_fragment_file(b"a.txt", HFL_SPLIT_AFTER);
+        encrypted.encrypted = true;
+        assert!(matches!(
+            validate_split_fragment(&encrypted, None),
+            Err(Error::NeedPassword)
+        ));
+        validate_split_fragment(&encrypted, Some(b"pw")).unwrap();
+
+        let plain = split_fragment_file(b"a.txt", HFL_SPLIT_AFTER);
+        validate_split_fragment(&plain, None).unwrap();
+    }
+
+    #[test]
+    fn validate_split_continuation_refs_rejects_property_drift_between_fragments() {
+        let first = split_fragment_file(b"a.txt", HFL_SPLIT_AFTER);
+        let pending = PendingSplitRefs::new(&first, 0, 0);
+
+        let renamed = split_fragment_file(b"b.txt", HFL_SPLIT_BEFORE);
+        assert!(matches!(
+            validate_split_continuation_refs(&pending, &renamed, None),
+            Err(Error::InvalidHeader(_))
+        ));
+
+        let mut new_compression = split_fragment_file(b"a.txt", HFL_SPLIT_BEFORE);
+        new_compression.compression_info = 0x123;
+        assert!(matches!(
+            validate_split_continuation_refs(&pending, &new_compression, None),
+            Err(Error::InvalidHeader(_))
+        ));
+
+        let mut new_encryption = split_fragment_file(b"a.txt", HFL_SPLIT_BEFORE);
+        new_encryption.encrypted = true;
+        assert!(matches!(
+            validate_split_continuation_refs(&pending, &new_encryption, Some(b"pw")),
+            Err(Error::InvalidHeader(_))
+        ));
+
+        let same = split_fragment_file(b"a.txt", HFL_SPLIT_BEFORE);
+        validate_split_continuation_refs(&pending, &same, None).unwrap();
+    }
+
+    #[test]
+    fn archive_extract_to_rejects_split_entries_in_single_volume_archive() {
+        let split = split_fragment_file(b"a.txt", HFL_SPLIT_AFTER);
+        let archive = archive_with_blocks(vec![Block::File(split)], Vec::new());
+        let err = archive
+            .extract_to(crate::ArchiveReadOptions::default(), never_open)
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidHeader(msg) if msg.contains("requires multivolume")),
+            "expected multivolume error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn archive_extract_to_skips_redirection_entries_without_opening_writer() {
+        let mut redirect = plain_file(b"link", b"", None);
+        redirect.redirection = Some(super::super::FileRedirection {
+            redirection_type: 1,
+            flags: 0,
+            target_name: b"target".to_vec(),
+        });
+        let archive = archive_with_blocks(vec![Block::File(redirect)], Vec::new());
+        archive
+            .extract_to(crate::ArchiveReadOptions::default(), never_open)
+            .unwrap();
+    }
+
+    #[test]
+    fn extract_volumes_to_skips_redirection_entries_without_opening_writer() {
+        let mut redirect = plain_file(b"link", b"", None);
+        redirect.redirection = Some(super::super::FileRedirection {
+            redirection_type: 1,
+            flags: 0,
+            target_name: b"target".to_vec(),
+        });
+        let volumes = vec![archive_with_blocks(vec![Block::File(redirect)], Vec::new())];
+        extract_volumes_to(
+            &volumes,
+            crate::ArchiveReadOptions::default(),
+            never_open,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn stream_packed_with_decoder_rejects_stored_files() {
+        let file = plain_file(b"stored.txt", b"hello", None);
+        assert!(file.is_stored());
+        let mut decoder = Unpack50Decoder::new();
+        let mut out: Vec<u8> = Vec::new();
+        let err = file
+            .stream_packed_with_decoder(
+                &mut Cursor::new(Vec::<u8>::new()),
+                None,
+                &mut decoder,
+                &mut out,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidHeader(msg) if msg.contains("does not use streaming")),
+            "expected streaming-rejection error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn pending_split_refs_write_stored_to_rejects_unpacked_size_mismatch() {
+        let payload: &[u8] = b"unmatched-size payload";
+        let mut first = split_fragment_file(b"a.txt", HFL_SPLIT_AFTER);
+        first.block.data_range = 0..payload.len();
+        first.block.data_size = Some(payload.len() as u64);
+        first.unpacked_size = (payload.len() + 5) as u64; // mismatch
+        let final_file = first.clone();
+        let pending = PendingSplitRefs::new(&first, 0, 0);
+        let volumes = vec![archive_with_blocks(
+            vec![Block::File(first)],
+            payload.to_vec(),
+        )];
+
+        let mut out: Vec<u8> = Vec::new();
+        let err = pending
+            .write_stored_to(&volumes, &final_file, None, &mut out)
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidHeader(msg) if msg.contains("mismatched packed and unpacked")),
+            "expected size mismatch error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn pending_split_refs_write_stored_to_rejects_crc_mismatch_on_unencrypted() {
+        let payload: &[u8] = b"crc-mismatch payload";
+        let mut first = split_fragment_file(b"a.txt", HFL_SPLIT_AFTER);
+        first.block.data_range = 0..payload.len();
+        first.block.data_size = Some(payload.len() as u64);
+        first.unpacked_size = payload.len() as u64;
+        first.data_crc32 = Some(crc32(payload).wrapping_add(1));
+        let final_file = first.clone();
+        let pending = PendingSplitRefs::new(&first, 0, 0);
+        let volumes = vec![archive_with_blocks(
+            vec![Block::File(first)],
+            payload.to_vec(),
+        )];
+
+        let mut out: Vec<u8> = Vec::new();
+        let err = pending
+            .write_stored_to(&volumes, &final_file, None, &mut out)
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::Crc32Mismatch { .. }),
+            "expected CRC mismatch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn pending_split_refs_write_stored_to_rejects_hash_mismatch_on_unencrypted() {
+        let payload: &[u8] = b"hash-mismatch payload";
+        let mut wrong_hash = blake2sp::hash(payload);
+        wrong_hash[0] ^= 0xff;
+
+        let mut first = split_fragment_file(b"a.txt", HFL_SPLIT_AFTER);
+        first.block.data_range = 0..payload.len();
+        first.block.data_size = Some(payload.len() as u64);
+        first.unpacked_size = payload.len() as u64;
+        first.data_crc32 = Some(crc32(payload));
+        first.hash = Some(FileHash {
+            hash_type: 0,
+            data: wrong_hash.to_vec(),
+        });
+        let final_file = first.clone();
+        let pending = PendingSplitRefs::new(&first, 0, 0);
+        let volumes = vec![archive_with_blocks(
+            vec![Block::File(first)],
+            payload.to_vec(),
+        )];
+
+        let mut out: Vec<u8> = Vec::new();
+        let err = pending
+            .write_stored_to(&volumes, &final_file, None, &mut out)
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::HashMismatch { hash_type: 0 }),
+            "expected hash mismatch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn decoded_data_with_mode_dispatches_through_decode_packed_for_stored_files() {
+        let payload = b"decoded_data_with_mode stored payload";
+        let mut file = plain_file(b"a.txt", payload, None);
+        file.block.data_range = 0..payload.len();
+        file.block.data_size = Some(payload.len() as u64);
+        file.unpacked_size = payload.len() as u64;
+
+        let archive = archive_with_blocks(vec![Block::File(file.clone())], payload.to_vec());
+        let mut decoder = Unpack50Decoder::new();
+        let decoded = file
+            .decoded_data_with_mode(&archive, &mut decoder, None, DecodeMode::Lz)
+            .unwrap();
+        assert_eq!(decoded.data, payload);
+        assert!(decoded.keys.is_none());
+
+        // LzNoFilters dispatches through the same stored short-circuit.
+        let mut decoder = Unpack50Decoder::new();
+        let decoded = file
+            .decoded_data_with_mode(&archive, &mut decoder, None, DecodeMode::LzNoFilters)
+            .unwrap();
+        assert_eq!(decoded.data, payload);
+    }
+
+    #[test]
+    fn decoded_data_unverified_returns_stored_payload_without_crc_check() {
+        let payload = b"decoded_data_unverified stored payload";
+        let mut file = plain_file(b"a.txt", payload, None);
+        file.block.data_range = 0..payload.len();
+        file.block.data_size = Some(payload.len() as u64);
+        file.unpacked_size = payload.len() as u64;
+        // Set wrong CRC — unverified path must not check it.
+        file.data_crc32 = Some(crc32(payload).wrapping_add(1));
+
+        let archive = archive_with_blocks(vec![Block::File(file.clone())], payload.to_vec());
+        let decoded = file.decoded_data_unverified(&archive, None).unwrap();
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn map_truncated_unverified_payload_swallows_need_more_input_when_no_integrity_record() {
+        let mut file = plain_file(b"a.txt", b"", None);
+        file.data_crc32 = None;
+        file.hash = None;
+        assert!(file
+            .map_truncated_unverified_payload(rars_codec::Error::NeedMoreInput)
+            .unwrap()
+            .is_empty());
+
+        file.data_crc32 = Some(0);
+        assert!(file
+            .map_truncated_unverified_payload(rars_codec::Error::NeedMoreInput)
+            .is_err());
+    }
+
+    #[test]
+    fn encryption_iv_falls_back_to_encryption_record_and_errors_when_missing() {
+        let mut with_record = plain_file(b"a.txt", b"", None);
+        with_record.encrypted = true;
+        with_record.encryption = Some(FileEncryption {
+            version: 0,
+            flags: 0,
+            kdf_count: 0,
+            salt: [0u8; 16],
+            iv: [5u8; 16],
+            check_value: None,
+        });
+        assert_eq!(with_record.encryption_iv().unwrap(), [5u8; 16]);
+
+        let missing = plain_file(b"a.txt", b"", None);
+        assert!(matches!(
+            missing.encryption_iv(),
+            Err(Error::InvalidHeader(_))
+        ));
+    }
 }
