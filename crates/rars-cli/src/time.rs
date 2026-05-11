@@ -16,6 +16,12 @@ pub(crate) fn current_filetime() -> u64 {
     seconds.saturating_add(u64::from(duration.subsec_nanos() / 100))
 }
 
+pub(crate) fn format_filetime_utc(filetime: u64) -> String {
+    filetime_to_system_time(filetime)
+        .and_then(format_system_time_utc)
+        .unwrap_or_else(|| format!("{filetime:#018x}"))
+}
+
 pub(crate) fn source_unix_mtime(metadata: &fs::Metadata) -> Option<u32> {
     metadata
         .modified()
@@ -85,6 +91,29 @@ fn dos_time_to_system_time(time: u32) -> Option<SystemTime> {
 
 fn unix_seconds_to_system_time(seconds: u32) -> Option<SystemTime> {
     (seconds != 0).then_some(UNIX_EPOCH + Duration::from_secs(u64::from(seconds)))
+}
+
+fn filetime_to_system_time(filetime: u64) -> Option<SystemTime> {
+    const FILETIME_UNIX_EPOCH_SECONDS: u64 = 11_644_473_600;
+    const FILETIME_TICKS_PER_SECOND: u64 = 10_000_000;
+
+    let seconds = filetime / FILETIME_TICKS_PER_SECOND;
+    let ticks = filetime % FILETIME_TICKS_PER_SECOND;
+    let unix_seconds = seconds.checked_sub(FILETIME_UNIX_EPOCH_SECONDS)?;
+    Some(UNIX_EPOCH + Duration::from_secs(unix_seconds) + Duration::from_nanos(ticks * 100))
+}
+
+fn format_system_time_utc(time: SystemTime) -> Option<String> {
+    let duration = time.duration_since(UNIX_EPOCH).ok()?;
+    let days = i64::try_from(duration.as_secs() / 86_400).ok()?;
+    let seconds_of_day = duration.as_secs() % 86_400;
+    let (year, month, day) = civil_from_days(days);
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+    Some(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z"
+    ))
 }
 
 fn civil_from_days(days_since_unix_epoch: i64) -> (i32, u32, u32) {

@@ -106,7 +106,8 @@ fn cmd_repair_rev5(paths: &[String]) -> CliResult<()> {
     }
 
     rars::rar50::repair_rev5_volumes_to(&slots, &recovery, |index, bytes| {
-        let path = out_dir.join(format!("repaired.part{}.rar", index + 1));
+        let path =
+            repaired_volume_path(&out_dir, &data_inputs, index, usize::from(first.data_count));
         fs::write(&path, bytes)?;
         println!("repaired {}", path.display());
         Ok(())
@@ -161,11 +162,52 @@ fn cmd_repair_rev3(paths: &[String]) -> CliResult<()> {
         .map(|(index, bytes)| (*index, bytes.as_slice()))
         .collect();
     rars::rar15_40::repair_rev3_volumes_to(&slots, recovery_count, &recovery, |index, bytes| {
-        let path = out_dir.join(format!("repaired.part{}.rar", index + 1));
+        let path = repaired_volume_path(&out_dir, &data_inputs, index, data_count);
         fs::write(&path, bytes)?;
         println!("repaired {}", path.display());
         Ok(())
     })
     .map_err(|err| CliError::general(format!("failed to repair RAR 3 REV volume set: {err}")))?;
     Ok(())
+}
+
+fn repaired_volume_path(
+    out_dir: &Path,
+    data_inputs: &[(PathBuf, Vec<u8>)],
+    index: usize,
+    data_count: usize,
+) -> PathBuf {
+    let Some(first_path) = data_inputs.first().map(|(path, _)| path) else {
+        return out_dir.join(format!("repaired.part{}.rar", index + 1));
+    };
+    let Some(file_name) = first_path.file_name().and_then(|name| name.to_str()) else {
+        return out_dir.join(format!("repaired.part{}.rar", index + 1));
+    };
+    let lower = file_name.to_ascii_lowercase();
+    if let Some(part_pos) = lower.rfind(".part") {
+        if lower.ends_with(".rar") {
+            let digits = &file_name[part_pos + ".part".len()..file_name.len() - 4];
+            if !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                let width = digits.len().max(data_count.to_string().len());
+                return out_dir.join(format!(
+                    "{}.part{:0width$}.rar",
+                    &file_name[..part_pos],
+                    index + 1,
+                    width = width
+                ));
+            }
+        }
+    }
+    if lower.ends_with(".rar")
+        || lower.rsplit_once('.').is_some_and(|(_, ext)| {
+            ext.len() == 3
+                && ext.starts_with('r')
+                && ext[1..].bytes().all(|byte| byte.is_ascii_digit())
+        })
+    {
+        let first_out = out_dir.join(file_name);
+        return crate::volumes::volume_part_path(&first_out, index)
+            .unwrap_or_else(|_| out_dir.join(format!("repaired.part{}.rar", index + 1)));
+    }
+    out_dir.join(format!("repaired.part{}.rar", index + 1))
 }

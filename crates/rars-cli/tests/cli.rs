@@ -735,7 +735,7 @@ fn password_options_reject_missing_and_duplicate_sources() {
 #[test]
 fn prints_usage_without_command() {
     let output = rars().output().unwrap();
-    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(output.status.code(), Some(2));
     assert!(stderr(&output).contains("usage:"));
 }
 
@@ -744,6 +744,7 @@ fn prints_usage_for_help_command() {
     let output = rars().arg("--help").output().unwrap();
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert!(stderr(&output).contains("rars info [--password <password>|--password-file <path>]"));
+    assert!(stderr(&output).contains("exit codes:"));
 }
 
 #[test]
@@ -812,7 +813,54 @@ fn rejects_invalid_volume_size() {
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
-    assert!(stderr(&output).contains("invalid digit"));
+    assert!(stderr(&output).contains("invalid size value"));
+}
+
+#[test]
+fn subcommands_print_help_and_version() {
+    let version = rars().arg("--version").output().unwrap();
+    assert!(version.status.success(), "stderr: {}", stderr(&version));
+    assert!(stdout(&version).contains(env!("CARGO_PKG_VERSION")));
+
+    for args in [
+        &["info", "--help"][..],
+        &["test", "--help"][..],
+        &["x", "--help"][..],
+        &["repair", "--help"][..],
+        &["a", "--help"][..],
+    ] {
+        let help = rars().args(args).output().unwrap();
+        assert!(
+            help.status.success(),
+            "args: {args:?}, stderr: {}",
+            stderr(&help)
+        );
+        assert!(stderr(&help).contains("usage:"), "args: {args:?}");
+    }
+}
+
+#[test]
+fn add_accepts_equals_flags_and_double_dash_input() {
+    let dir = scratch("add-equals-flags");
+    let source = dir.join("--literal-name.txt");
+    let archive = dir.join("created.rar");
+    fs::write(&source, b"equals flag cli payload\n").unwrap();
+
+    let create = rars()
+        .args(["a", "--format=rar50"])
+        .arg(&archive)
+        .arg("--")
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(create.status.success(), "stderr: {}", stderr(&create));
+
+    assert_archive_tests_and_extracts_file(
+        &archive,
+        None,
+        "--literal-name.txt",
+        b"equals flag cli payload\n",
+    );
 }
 
 #[test]
@@ -867,7 +915,7 @@ fn creates_rar50_header_encrypted_recovery_volumes() {
 
     let mut parts = Vec::new();
     for index in 1.. {
-        let path = dir.join(format!("split.part{index}.rar"));
+        let path = dir.join(format!("split.part{index:02}.rar"));
         if !path.exists() {
             break;
         }
@@ -903,6 +951,185 @@ fn creates_stored_archive_that_can_be_tested() {
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
     assert_archive_tests_and_extracts_file(&archive, None, "hello.txt", b"hello from cli\n");
+}
+
+#[test]
+fn archive_output_to_stdout_keeps_status_on_stderr() {
+    let dir = scratch("archive-stdout");
+    let source = dir.join("hello.txt");
+    fs::write(&source, b"stdout archive payload\n").unwrap();
+
+    let output = rars()
+        .args(["a", "--format", "rar50", "--store", "-"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(output.stdout.starts_with(b"Rar!\x1a\x07\x01\0"));
+    assert!(!output
+        .stdout
+        .windows(b"created".len())
+        .any(|window| window == b"created"));
+    assert!(stderr(&output).contains("created -"));
+}
+
+#[test]
+fn extraction_refuses_overwrite_unless_explicitly_allowed() {
+    let dir = scratch("extract-overwrite-policy");
+    let source = dir.join("hello.txt");
+    let archive = dir.join("created.rar");
+    let out_dir = dir.join("out");
+    fs::write(&source, b"overwrite policy payload\n").unwrap();
+
+    let create = rars()
+        .args(["a", "--format", "rar50", "--store"])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(create.status.success(), "stderr: {}", stderr(&create));
+
+    let first = rars()
+        .arg("x")
+        .arg(&archive)
+        .arg(&out_dir)
+        .output()
+        .unwrap();
+    assert!(first.status.success(), "stderr: {}", stderr(&first));
+
+    let second = rars()
+        .arg("x")
+        .arg(&archive)
+        .arg(&out_dir)
+        .output()
+        .unwrap();
+    assert!(!second.status.success());
+    assert!(stderr(&second).contains("File exists"));
+
+    let overwrite = rars()
+        .args(["x", "--overwrite=always"])
+        .arg(&archive)
+        .arg(&out_dir)
+        .output()
+        .unwrap();
+    assert!(overwrite.status.success(), "stderr: {}", stderr(&overwrite));
+    assert_eq!(
+        fs::read(out_dir.join("hello.txt")).unwrap(),
+        b"overwrite policy payload\n"
+    );
+}
+
+#[test]
+fn extraction_rejects_destination_that_is_not_a_directory() {
+    let dir = scratch("extract-destination-file");
+    let source = dir.join("hello.txt");
+    let archive = dir.join("created.rar");
+    let dest = dir.join("not-a-directory");
+    fs::write(&source, b"payload\n").unwrap();
+    fs::write(&dest, b"not a directory\n").unwrap();
+
+    let create = rars()
+        .args(["a", "--format", "rar50", "--store"])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(create.status.success(), "stderr: {}", stderr(&create));
+
+    let extract = rars().arg("x").arg(&archive).arg(&dest).output().unwrap();
+    assert!(!extract.status.success());
+    assert!(stderr(&extract).contains("extract destination"));
+    assert!(stderr(&extract).contains("is not a directory"));
+}
+
+#[cfg(unix)]
+#[test]
+fn add_rejects_symlink_input() {
+    let dir = scratch("add-symlink-input");
+    let target = dir.join("target.txt");
+    let link = dir.join("link.txt");
+    let archive = dir.join("created.rar");
+    fs::write(&target, b"target\n").unwrap();
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    let create = rars()
+        .args(["a", "--format", "rar50", "--store"])
+        .arg(&archive)
+        .arg(&link)
+        .output()
+        .unwrap();
+    assert!(!create.status.success());
+    assert!(stderr(&create).contains("is a symlink; refusing to follow it"));
+}
+
+#[test]
+fn add_recurses_directory_inputs_and_preserves_relative_paths() {
+    let dir = scratch("add-recursive-relative");
+    let tree = dir.join("tree");
+    fs::create_dir_all(tree.join("sub")).unwrap();
+    fs::write(tree.join("root.txt"), b"root\n").unwrap();
+    fs::write(tree.join("sub").join("leaf.txt"), b"leaf\n").unwrap();
+    let archive = dir.join("created.rar");
+
+    let create = rars()
+        .current_dir(&dir)
+        .args(["a", "--format", "rar50", "--store"])
+        .arg(&archive)
+        .arg("tree")
+        .output()
+        .unwrap();
+    assert!(create.status.success(), "stderr: {}", stderr(&create));
+
+    assert_archive_tests_and_extracts_files(
+        &archive,
+        None,
+        &[
+            ("tree/root.txt", b"root\n"),
+            ("tree/sub/leaf.txt", b"leaf\n"),
+        ],
+    );
+}
+
+#[test]
+fn add_rejects_duplicate_archive_names() {
+    let dir = scratch("add-duplicate-names");
+    let source = dir.join("same.txt");
+    let archive = dir.join("created.rar");
+    fs::write(&source, b"same\n").unwrap();
+
+    let create = rars()
+        .args(["a", "--format", "rar50", "--store"])
+        .arg(&archive)
+        .arg(&source)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(!create.status.success());
+    assert!(stderr(&create).contains("multiple input entries map to archive name"));
+}
+
+#[test]
+fn info_and_test_escape_control_characters_in_archive_names() {
+    let dir = scratch("escaped-display-names");
+    let source = dir.join("line\nname.txt");
+    let archive = dir.join("created.rar");
+    fs::write(&source, b"escaped display payload\n").unwrap();
+
+    let create = rars()
+        .args(["a", "--format", "rar50", "--store"])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(create.status.success(), "stderr: {}", stderr(&create));
+
+    let info = rars().arg("info").arg(&archive).output().unwrap();
+    assert!(info.status.success(), "stderr: {}", stderr(&info));
+    assert!(stdout(&info).contains("line\\nname.txt"));
+
+    let test = rars().arg("test").arg(&archive).output().unwrap();
+    assert!(test.status.success(), "stderr: {}", stderr(&test));
+    assert!(stdout(&test).contains("OK line\\nname.txt"));
 }
 
 #[test]
@@ -3066,7 +3293,7 @@ fn creates_rar50_encrypted_stored_multivolume_archive_that_can_be_tested() {
 
     let mut parts = Vec::new();
     for index in 1.. {
-        let part = dir.join(format!("created.part{index}.rar"));
+        let part = dir.join(format!("created.part{index:02}.rar"));
         if !part.exists() {
             break;
         }
@@ -3115,7 +3342,7 @@ fn creates_rar50_header_encrypted_stored_multivolume_archive_that_can_be_tested(
 
     let mut parts = Vec::new();
     for index in 1.. {
-        let part = dir.join(format!("created.part{index}.rar"));
+        let part = dir.join(format!("created.part{index:02}.rar"));
         if !part.exists() {
             break;
         }
@@ -3567,17 +3794,29 @@ fn creates_rar50_stored_multivolume_archive_that_can_be_tested() {
         .output()
         .unwrap();
     assert!(create.status.success(), "stderr: {}", stderr(&create));
-    assert!(dir.join("split.part1.rar").exists());
-    assert!(dir.join("split.part2.rar").exists());
+    assert!(dir.join("split.part01.rar").exists());
+    assert!(dir.join("split.part02.rar").exists());
+    let create_stdout = stdout(&create);
+    assert!(create_stdout.contains("created"));
+    assert!(create_stdout.contains("split.part01.rar"));
+    assert!(create_stdout.contains("split.part02.rar"));
 
     let mut parts = Vec::new();
     for index in 1.. {
-        let path = dir.join(format!("split.part{index}.rar"));
+        let path = dir.join(format!("split.part{index:02}.rar"));
         if !path.exists() {
             break;
         }
         parts.push(path);
     }
+
+    let discovered = rars().arg("test").arg(&parts[0]).output().unwrap();
+    assert!(
+        discovered.status.success(),
+        "stderr: {}",
+        stderr(&discovered)
+    );
+    assert!(stdout(&discovered).contains("OK payload.txt"));
 
     let test = rars().arg("test").args(&parts).output().unwrap();
     assert!(test.status.success(), "stderr: {}", stderr(&test));
@@ -3612,12 +3851,12 @@ fn creates_rar50_stored_recovery_multivolume_archive_that_can_be_tested_and_list
         .unwrap();
     assert!(create.status.success(), "stderr: {}", stderr(&create));
     assert!(stderr(&create).contains("validation-ready RR metadata"));
-    assert!(dir.join("split.part1.rar").exists());
-    assert!(dir.join("split.part2.rar").exists());
+    assert!(dir.join("split.part01.rar").exists());
+    assert!(dir.join("split.part02.rar").exists());
 
     let mut parts = Vec::new();
     for index in 1.. {
-        let path = dir.join(format!("split.part{index}.rar"));
+        let path = dir.join(format!("split.part{index:02}.rar"));
         if !path.exists() {
             break;
         }
@@ -3780,7 +4019,7 @@ fn repairs_rar50_rev5_missing_data_volume_set() {
 
     for index in 1..=5 {
         assert_eq!(
-            fs::read(out_dir.join(format!("repaired.part{index}.rar"))).unwrap(),
+            fs::read(out_dir.join(format!("multivol_rev.part{index}.rar"))).unwrap(),
             fs::read(fixture_rar50(&format!("multivol_rev.part{index}.rar"))).unwrap()
         );
     }
@@ -3804,20 +4043,20 @@ fn repairs_rar300_old_style_rev_missing_data_volume_set() {
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert!(stdout(&output).contains("repaired"));
     assert_eq!(
-        fs::read(out_dir.join("repaired.part2.rar")).unwrap(),
+        fs::read(out_dir.join("rev_oldstyle.part2.rar")).unwrap(),
         fs::read(fixture_rar15_40("rar300/rev_oldstyle.part2.rar")).unwrap()
     );
 
     let test = rars()
         .arg("test")
-        .arg(out_dir.join("repaired.part1.rar"))
-        .arg(out_dir.join("repaired.part2.rar"))
-        .arg(out_dir.join("repaired.part3.rar"))
-        .arg(out_dir.join("repaired.part4.rar"))
+        .arg(out_dir.join("rev_oldstyle.part1.rar"))
+        .arg(out_dir.join("rev_oldstyle.part2.rar"))
+        .arg(out_dir.join("rev_oldstyle.part3.rar"))
+        .arg(out_dir.join("rev_oldstyle.part4.rar"))
         .output()
         .unwrap();
     assert!(test.status.success(), "stderr: {}", stderr(&test));
-    assert!(stdout(&test).contains("OK tmp\\rars-rar3-rev-gen\\payload.bin"));
+    assert!(stdout(&test).contains("OK tmp\\\\rars-rar3-rev-gen\\\\payload.bin"));
 }
 
 #[test]
@@ -3838,20 +4077,20 @@ fn repairs_rar4_new_style_rev_missing_data_volume_set() {
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert!(stdout(&output).contains("repaired"));
     assert_eq!(
-        fs::read(out_dir.join("repaired.part2.rar")).unwrap(),
+        fs::read(out_dir.join("rev_newstyle.part2.rar")).unwrap(),
         fs::read(fixture_rar15_40("rar300/rev_newstyle.part2.rar")).unwrap()
     );
 
     let test = rars()
         .arg("test")
-        .arg(out_dir.join("repaired.part1.rar"))
-        .arg(out_dir.join("repaired.part2.rar"))
-        .arg(out_dir.join("repaired.part3.rar"))
-        .arg(out_dir.join("repaired.part4.rar"))
+        .arg(out_dir.join("rev_newstyle.part1.rar"))
+        .arg(out_dir.join("rev_newstyle.part2.rar"))
+        .arg(out_dir.join("rev_newstyle.part3.rar"))
+        .arg(out_dir.join("rev_newstyle.part4.rar"))
         .output()
         .unwrap();
     assert!(test.status.success(), "stderr: {}", stderr(&test));
-    assert!(stdout(&test).contains("OK tmp\\rars-rar4-rev-gen\\payload.bin"));
+    assert!(stdout(&test).contains("OK tmp\\\\rars-rar4-rev-gen\\\\payload.bin"));
 }
 
 #[test]
@@ -3930,12 +4169,12 @@ fn creates_rar50_compressed_multivolume_archive_that_can_be_tested() {
         .output()
         .unwrap();
     assert!(create.status.success(), "stderr: {}", stderr(&create));
-    assert!(dir.join("split.part1.rar").exists());
-    assert!(dir.join("split.part2.rar").exists());
+    assert!(dir.join("split.part01.rar").exists());
+    assert!(dir.join("split.part02.rar").exists());
 
     let mut parts = Vec::new();
     for index in 1.. {
-        let path = dir.join(format!("split.part{index}.rar"));
+        let path = dir.join(format!("split.part{index:02}.rar"));
         if !path.exists() {
             break;
         }
@@ -4459,7 +4698,7 @@ fn creates_rar50_solid_compressed_multivolume_archive_that_can_be_tested() {
 
     let mut parts = Vec::new();
     for index in 1.. {
-        let path = dir.join(format!("split.part{index}.rar"));
+        let path = dir.join(format!("split.part{index:02}.rar"));
         if !path.exists() {
             break;
         }
@@ -4504,7 +4743,7 @@ fn creates_rar50_multi_file_solid_compressed_multivolume_archive_that_can_be_tes
 
     let mut parts = Vec::new();
     for index in 1.. {
-        let path = dir.join(format!("split.part{index}.rar"));
+        let path = dir.join(format!("split.part{index:02}.rar"));
         if !path.exists() {
             break;
         }
@@ -4550,7 +4789,7 @@ fn creates_rar50_encrypted_compressed_multivolume_archive_that_can_be_tested() {
 
     let mut parts = Vec::new();
     for index in 1.. {
-        let path = dir.join(format!("split.part{index}.rar"));
+        let path = dir.join(format!("split.part{index:02}.rar"));
         if !path.exists() {
             break;
         }
@@ -4590,7 +4829,7 @@ fn creates_rar50_encrypted_solid_compressed_multivolume_archive_that_can_be_test
 
     let mut parts = Vec::new();
     for index in 1.. {
-        let path = dir.join(format!("split.part{index}.rar"));
+        let path = dir.join(format!("split.part{index:02}.rar"));
         if !path.exists() {
             break;
         }
@@ -4630,7 +4869,7 @@ fn creates_rar50_header_encrypted_compressed_multivolume_archive_that_can_be_tes
 
     let mut parts = Vec::new();
     for index in 1.. {
-        let path = dir.join(format!("split.part{index}.rar"));
+        let path = dir.join(format!("split.part{index:02}.rar"));
         if !path.exists() {
             break;
         }
@@ -4674,7 +4913,7 @@ fn creates_rar50_header_encrypted_solid_compressed_multivolume_archive_that_can_
 
     let mut parts = Vec::new();
     for index in 1.. {
-        let path = dir.join(format!("split.part{index}.rar"));
+        let path = dir.join(format!("split.part{index:02}.rar"));
         if !path.exists() {
             break;
         }

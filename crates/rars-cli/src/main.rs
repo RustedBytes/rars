@@ -11,8 +11,8 @@ mod volumes;
 use error::{CliError, CliResult};
 use input::{rar15_file_attr, rar50_file_attr, read_inputs};
 use output::{
-    open_output_writer, print_ok_entry, restore_output_metadata, warn_rar50_redirections,
-    ExtractedOutput,
+    open_output_writer, output_path_for_entry, print_ok_entry, restore_output_metadata,
+    warn_rar50_redirections, ExtractedOutput, OverwritePolicy,
 };
 use password::{
     classify_rars_error, ensure_password_for_archives_extract, ensure_password_for_extract,
@@ -29,11 +29,14 @@ use rars::{
     extract_volumes_to, Archive as DetectedArchive, ArchiveReader, ArchiveVersion, FeatureSet,
 };
 use repair::cmd_repair;
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use time::current_filetime;
-use volumes::{rar50_volume_part_path, volume_part_path};
+use time::{current_filetime, format_filetime_utc};
+use volumes::{
+    discover_sibling_volumes, rar50_volume_part_path, sort_volume_paths, volume_part_path,
+};
 
 const ADD_USAGE: &str =
     "usage: rars a [--password <password>|--password-file <path>] --format <rar14|rar15|rar20|rar29|rar30|rar40|rar50|rar70> [--store] [--level <0..5>] [--dict-size <bytes|k|m|g>] [--solid] [--encrypt-headers] [--quick-open] [--comment <text>] [--archive-name <name>] [--file-comment <text>] [--recovery-percent <1..100>] [--volume-size <bytes|k|m|g>] [--ppmd|--auto-filter|--delta-filter <channels>|--e8-filter|--e8e9-filter|--itanium-filter|--rgb-filter <width>|--audio-filter <channels>|--arm-filter] <archive> <files...>";
@@ -63,11 +66,37 @@ fn run() -> CliResult<()> {
     let mut args = env::args().skip(1);
     let Some(command) = args.next() else {
         usage();
-        return Ok(());
+        return Err(CliError::usage("missing command"));
     };
-    let rest: Vec<String> = args.collect();
+    let rest = normalize_args(args.collect());
 
     match command.as_str() {
+        "info" if wants_help(&rest) => {
+            eprintln!(
+                "usage: rars info [--password <password>|--password-file <path>] <archive>..."
+            );
+            Ok(())
+        }
+        "test" if wants_help(&rest) => {
+            eprintln!("usage: rars test [--password <password>|--password-file <path>] <archive> [parts...]");
+            Ok(())
+        }
+        "x" if wants_help(&rest) => {
+            eprintln!("usage: rars x [--password <password>|--password-file <path>] [--overwrite <never|always>] <archive> [parts...] <outdir>");
+            Ok(())
+        }
+        "repair" if wants_help(&rest) => {
+            eprintln!(
+                "usage:
+  rars repair [--password <password>|--password-file <path>] <archive> <repaired-archive>
+  rars repair <rar-parts-and-rev-files...> <outdir>"
+            );
+            Ok(())
+        }
+        "a" if wants_help(&rest) => {
+            add_usage();
+            Ok(())
+        }
         "info" => cmd_info(&rest),
         "test" => cmd_test(&rest),
         "x" => cmd_extract(&rest),
@@ -77,8 +106,48 @@ fn run() -> CliResult<()> {
             usage();
             Ok(())
         }
+        "-V" | "--version" | "version" => {
+            println!("rars {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         _ => Err(CliError::usage(format!("unknown command: {command}"))),
     }
+}
+
+fn wants_help(args: &[String]) -> bool {
+    matches!(args, [arg] if arg == "-h" || arg == "--help" || arg == "help")
+}
+
+fn normalize_args(args: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            out.push(arg);
+            out.extend(iter);
+            break;
+        }
+        if let Some((flag, value)) = arg.split_once('=') {
+            if flag.starts_with("--") && flag.len() > 2 {
+                out.push(flag.to_string());
+                out.push(value.to_string());
+                continue;
+            }
+        }
+        out.push(arg);
+    }
+    out
+}
+
+fn display_text(text: impl AsRef<str>) -> String {
+    text.as_ref()
+        .chars()
+        .flat_map(char::escape_default)
+        .collect()
+}
+
+fn display_bytes_lossy(bytes: &[u8]) -> String {
+    display_text(String::from_utf8_lossy(bytes))
 }
 
 fn cmd_info(args: &[String]) -> CliResult<()> {
@@ -112,7 +181,7 @@ fn cmd_info(args: &[String]) -> CliResult<()> {
                     if let Some(comment) = archive.archive_comment().map_err(|err| {
                         format!("failed to decode archive comment '{path}': {err}")
                     })? {
-                        println!("  comment: {}", String::from_utf8_lossy(&comment));
+                        println!("  comment: {}", display_bytes_lossy(&comment));
                     }
                 }
                 if let Some(av) = archive.authenticity_verification().map_err(|err| {
@@ -127,7 +196,7 @@ fn cmd_info(args: &[String]) -> CliResult<()> {
                 for (index, entry) in archive.entries.iter().enumerate() {
                     println!(
                     "  #{index}: {} pack={} unp={} method={} flags={:#04x} attr={:#04x} checksum={:#06x}",
-                    entry.name_lossy(),
+                    display_text(entry.name_lossy()),
                     entry.header.pack_size,
                     entry.header.unp_size,
                     entry.header.method,
@@ -138,10 +207,10 @@ fn cmd_info(args: &[String]) -> CliResult<()> {
                     if let Some(comment) = entry.file_comment().map_err(|err| {
                         format!(
                             "failed to decode file comment '{}' in '{path}': {err}",
-                            entry.name_lossy()
+                            display_text(entry.name_lossy())
                         )
                     })? {
-                        println!("    comment: {}", String::from_utf8_lossy(&comment));
+                        println!("    comment: {}", display_bytes_lossy(&comment));
                     }
                 }
             }
@@ -154,12 +223,12 @@ fn cmd_info(args: &[String]) -> CliResult<()> {
                     .archive_comment()
                     .map_err(|err| format!("failed to decode archive comment '{path}': {err}"))?
                 {
-                    println!("  comment: {}", String::from_utf8_lossy(&comment));
+                    println!("  comment: {}", display_bytes_lossy(&comment));
                 }
                 for (index, file) in archive.files().enumerate() {
                     println!(
                         "  #{index}: {} pack={} unp={} method={:#04x} flags={:#06x} attr={:#010x} crc={:#010x} ver={}",
-                        file.name_lossy(),
+                        display_text(file.name_lossy()),
                         file.pack_size,
                         file.unp_size,
                         file.method,
@@ -171,17 +240,17 @@ fn cmd_info(args: &[String]) -> CliResult<()> {
                     if let Some(comment) = file.file_comment().map_err(|err| {
                         format!(
                             "failed to decode file comment '{}' in '{path}': {err}",
-                            file.name_lossy()
+                            display_text(file.name_lossy())
                         )
                     })? {
-                        println!("    comment: {}", String::from_utf8_lossy(&comment));
+                        println!("    comment: {}", display_bytes_lossy(&comment));
                     }
                 }
                 for sub in archive.new_subs() {
                     println!(
                         "  subblock: {:?} {} pack={} unp={} method={:#04x} flags={:#06x}",
                         sub.kind,
-                        sub.name_lossy(),
+                        display_text(sub.name_lossy()),
                         sub.file.pack_size,
                         sub.file.unp_size,
                         sub.file.method,
@@ -196,22 +265,25 @@ fn cmd_info(args: &[String]) -> CliResult<()> {
                 );
                 if let Some(metadata) = archive.main.archive_metadata() {
                     if let Some(name) = &metadata.name {
-                        println!("  archive name: {}", String::from_utf8_lossy(name));
+                        println!("  archive name: {}", display_bytes_lossy(name));
                     }
                     if let Some(creation_time) = metadata.creation_time {
-                        println!("  archive creation time: {creation_time:#018x}");
+                        println!(
+                            "  archive creation time: {} ({creation_time:#018x})",
+                            format_filetime_utc(creation_time)
+                        );
                     }
                 }
                 for (index, file) in archive.files().enumerate() {
                     let compression_info = file.decoded_compression_info().map_err(|err| {
                         format!(
                             "failed to decode RAR 5 compression info for '{}': {err}",
-                            file.name_lossy()
+                            display_text(file.name_lossy())
                         )
                     })?;
                     println!(
                         "  #{index}: {} pack={} unp={} algo={} method={} solid={} dict={} flags={:#06x} attr={:#010x} crc={}",
-                        file.name_lossy(),
+                        display_text(file.name_lossy()),
                         file.packed_size(),
                         file.unpacked_size,
                         compression_info.algorithm_version,
@@ -229,14 +301,14 @@ fn cmd_info(args: &[String]) -> CliResult<()> {
                             "       redirection: type={} flags={:#x} target={}",
                             redirection.redirection_type,
                             redirection.flags,
-                            String::from_utf8_lossy(&redirection.target_name)
+                            display_bytes_lossy(&redirection.target_name)
                         );
                     }
                 }
                 for service in archive.services() {
                     println!(
                         "  service: {} pack={} unp={} flags={:#06x}",
-                        service.name_lossy(),
+                        display_text(service.name_lossy()),
                         service.packed_size(),
                         service.unpacked_size,
                         service.block.flags
@@ -260,6 +332,16 @@ fn cmd_test(args: &[String]) -> CliResult<()> {
         return Err(CliError::usage(
             "usage: rars test [--password <password>] <archive> [parts...]",
         ));
+    }
+
+    let mut paths = paths;
+    if paths.len() == 1 {
+        let discovered = discover_sibling_volumes(&paths[0]);
+        if discovered.len() > 1 {
+            paths = discovered;
+        }
+    } else {
+        sort_volume_paths(&mut paths);
     }
 
     if paths.len() == 1 {
@@ -304,15 +386,25 @@ fn cmd_test(args: &[String]) -> CliResult<()> {
 }
 
 fn cmd_extract(args: &[String]) -> CliResult<()> {
-    let (mut password, mut paths) = parse_password(args)?;
+    let (mut password, args) = parse_password(args)?;
+    let (overwrite, mut paths) = parse_extract_options(&args)?;
     if paths.len() < 2 {
         return Err(CliError::usage(
-            "usage: rars x [--password <password>] <archive> [parts...] <outdir>",
+            "usage: rars x [--password <password>] [--overwrite <never|always>] <archive> [parts...] <outdir>",
         ));
     }
     reject_ambiguous_extract_target(&paths)?;
     // Invariant: the length check above guarantees an output directory argument.
     let out_dir = PathBuf::from(paths.pop().expect("outdir"));
+    validate_extract_destination(&out_dir)?;
+    if paths.len() == 1 {
+        let discovered = discover_sibling_volumes(&paths[0]);
+        if discovered.len() > 1 {
+            paths = discovered;
+        }
+    } else {
+        sort_volume_paths(&mut paths);
+    }
 
     if paths.len() == 1 {
         let archive = read_archive_path_prompting(&paths[0], &mut password)?;
@@ -320,9 +412,16 @@ fn cmd_extract(args: &[String]) -> CliResult<()> {
         warn_rar50_redirections(&archive);
         let family = archive.family();
         let mut outputs = Vec::new();
+        let mut planned_paths = HashSet::new();
         archive
             .extract_to(password.as_deref(), |meta| {
-                let (path, writer) = open_output_writer(&out_dir, meta)?;
+                let planned = output_path_for_entry(&out_dir, meta)?;
+                if !planned_paths.insert(planned.clone()) {
+                    return Err(rars::Error::InvalidHeader(
+                        "multiple archive entries map to the same output path",
+                    ));
+                }
+                let (path, writer) = open_output_writer(&out_dir, meta, overwrite)?;
                 outputs.push(ExtractedOutput {
                     name: meta.name.clone(),
                     path,
@@ -346,7 +445,7 @@ fn cmd_extract(args: &[String]) -> CliResult<()> {
             ))
         })?;
         for output in &outputs {
-            println!("x {}", String::from_utf8_lossy(&output.name));
+            println!("x {}", display_bytes_lossy(&output.name));
         }
     } else {
         let archives = parse_archives_prompting(&paths, &mut password)?;
@@ -359,8 +458,15 @@ fn cmd_extract(args: &[String]) -> CliResult<()> {
             .map(DetectedArchive::family)
             .ok_or("no archive parts provided")?;
         let mut outputs = Vec::new();
+        let mut planned_paths = HashSet::new();
         extract_volumes_to(&archives, password.as_deref(), |meta| {
-            let (path, writer) = open_output_writer(&out_dir, meta)?;
+            let planned = output_path_for_entry(&out_dir, meta)?;
+            if !planned_paths.insert(planned.clone()) {
+                return Err(rars::Error::InvalidHeader(
+                    "multiple archive entries map to the same output path",
+                ));
+            }
+            let (path, writer) = open_output_writer(&out_dir, meta, overwrite)?;
             outputs.push(ExtractedOutput {
                 name: meta.name.clone(),
                 path,
@@ -381,8 +487,76 @@ fn cmd_extract(args: &[String]) -> CliResult<()> {
             ))
         })?;
         for output in &outputs {
-            println!("x {}", String::from_utf8_lossy(&output.name));
+            println!("x {}", display_bytes_lossy(&output.name));
         }
+    }
+    Ok(())
+}
+
+fn parse_extract_options(args: &[String]) -> CliResult<(OverwritePolicy, Vec<String>)> {
+    let mut overwrite = OverwritePolicy::Never;
+    let mut paths = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--overwrite" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| CliError::usage("missing --overwrite value"))?;
+                overwrite = parse_overwrite_policy(value)?;
+                index += 2;
+            }
+            "--overwrite=always" => {
+                overwrite = OverwritePolicy::Always;
+                index += 1;
+            }
+            "--overwrite=never" => {
+                overwrite = OverwritePolicy::Never;
+                index += 1;
+            }
+            "--overwrite=ask" => {
+                return Err(CliError::usage(
+                    "--overwrite=ask is not supported; use never or always",
+                ));
+            }
+            "--" => {
+                paths.extend(args[index + 1..].iter().cloned());
+                break;
+            }
+            unknown if unknown.starts_with("--overwrite=") => {
+                return Err(CliError::usage(format!(
+                    "invalid --overwrite value: {}",
+                    &unknown["--overwrite=".len()..]
+                )));
+            }
+            _ => {
+                paths.push(args[index].clone());
+                index += 1;
+            }
+        }
+    }
+    Ok((overwrite, paths))
+}
+
+fn parse_overwrite_policy(value: &str) -> CliResult<OverwritePolicy> {
+    match value {
+        "never" => Ok(OverwritePolicy::Never),
+        "always" => Ok(OverwritePolicy::Always),
+        "ask" => Err(CliError::usage(
+            "--overwrite=ask is not supported; use never or always",
+        )),
+        _ => Err(CliError::usage(format!(
+            "invalid --overwrite value: {value}"
+        ))),
+    }
+}
+
+fn validate_extract_destination(out_dir: &Path) -> CliResult<()> {
+    if out_dir.exists() && !out_dir.is_dir() {
+        return Err(CliError::general(format!(
+            "extract destination '{}' is not a directory",
+            out_dir.display()
+        )));
     }
     Ok(())
 }
@@ -511,7 +685,7 @@ fn parse_add_command(args: &[String]) -> CliResult<AddCommand> {
                 let value = args
                     .get(archive_index + 1)
                     .ok_or_else(|| CliError::usage("missing --level value"))?;
-                let level = value.parse::<u8>()?;
+                let level = parse_u8_flag("--level", value)?;
                 if level > 5 {
                     return Err(CliError::usage(
                         "compression level must be in the range 0..5",
@@ -564,7 +738,7 @@ fn parse_add_command(args: &[String]) -> CliResult<AddCommand> {
                 let value = args
                     .get(archive_index + 1)
                     .ok_or_else(|| CliError::usage("missing --recovery-percent value"))?;
-                recovery_percent = Some(value.parse::<u64>()?);
+                recovery_percent = Some(parse_u64_flag("--recovery-percent", value)?);
                 archive_index += 2;
             }
             "--volume-size" => {
@@ -578,7 +752,7 @@ fn parse_add_command(args: &[String]) -> CliResult<AddCommand> {
                 let value = args
                     .get(archive_index + 1)
                     .ok_or_else(|| CliError::usage("missing --delta-filter value"))?;
-                delta_filter = Some(value.parse::<usize>()?);
+                delta_filter = Some(parse_usize_flag("--delta-filter", value)?);
                 archive_index += 2;
             }
             "--e8-filter" => {
@@ -597,14 +771,14 @@ fn parse_add_command(args: &[String]) -> CliResult<AddCommand> {
                 let value = args
                     .get(archive_index + 1)
                     .ok_or_else(|| CliError::usage("missing --rgb-filter value"))?;
-                rgb_filter = Some(value.parse::<usize>()?);
+                rgb_filter = Some(parse_usize_flag("--rgb-filter", value)?);
                 archive_index += 2;
             }
             "--audio-filter" => {
                 let value = args
                     .get(archive_index + 1)
                     .ok_or_else(|| CliError::usage("missing --audio-filter value"))?;
-                audio_filter = Some(value.parse::<usize>()?);
+                audio_filter = Some(parse_usize_flag("--audio-filter", value)?);
                 archive_index += 2;
             }
             "--arm-filter" => {
@@ -619,6 +793,11 @@ fn parse_add_command(args: &[String]) -> CliResult<AddCommand> {
                 ppmd = true;
                 archive_index += 1;
             }
+            "--" => {
+                archive_index += 1;
+                break;
+            }
+            "-" => break,
             unknown if unknown.starts_with('-') => {
                 return Err(CliError::usage(format!("unknown add option: {unknown}")));
             }
@@ -642,7 +821,10 @@ fn parse_add_command(args: &[String]) -> CliResult<AddCommand> {
         return Err(CliError::usage("solid output requires compression"));
     }
     let archive_path = PathBuf::from(&args[archive_index]);
-    let input_paths = &args[archive_index + 1..];
+    let mut input_paths = args[archive_index + 1..].to_vec();
+    if input_paths.first().is_some_and(|path| path == "--") {
+        input_paths.remove(0);
+    }
     if input_paths.is_empty() {
         return Err(CliError::usage("no input files"));
     }
@@ -669,7 +851,7 @@ fn parse_add_command(args: &[String]) -> CliResult<AddCommand> {
         auto_filter,
         ppmd,
         archive_path,
-        input_paths: input_paths.to_vec(),
+        input_paths,
     })
 }
 
@@ -971,7 +1153,6 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                 if recovery_percent.is_some() {
                     eprintln!("{RAR50_STRUCTURAL_RR_WARNING}");
                 }
-                println!("created {} volumes", parts.len());
                 return Ok(());
             }
             let bytes = if let Some(password) = password.as_deref() {
@@ -1155,16 +1336,10 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                     }
                 }
             };
-            fs::write(&archive_path, bytes).map_err(|err| {
-                format!(
-                    "failed to write archive '{}': {err}",
-                    archive_path.display()
-                )
-            })?;
+            write_archive_output(&archive_path, &bytes)?;
             if recovery_percent.is_some() {
                 eprintln!("{RAR50_STRUCTURAL_RR_WARNING}");
             }
-            println!("created {}", archive_path.display());
             Ok(())
         }
         AddWritePlan::Rar15To40 => {
@@ -1216,7 +1391,6 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                         archive_path.display()
                     )
                 })?;
-                println!("created {} volumes", parts.len());
                 return Ok(());
             }
 
@@ -1326,13 +1500,7 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                     archive_comment.as_deref(),
                 )?
             };
-            fs::write(&archive_path, bytes).map_err(|err| {
-                format!(
-                    "failed to write archive '{}': {err}",
-                    archive_path.display()
-                )
-            })?;
-            println!("created {}", archive_path.display());
+            write_archive_output(&archive_path, &bytes)?;
             Ok(())
         }
         AddWritePlan::Rar13 => {
@@ -1369,7 +1537,6 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                         archive_path.display()
                     )
                 })?;
-                println!("created {} volumes", parts.len());
                 return Ok(());
             }
 
@@ -1408,16 +1575,22 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                     archive_comment.as_deref(),
                 )?
             };
-            fs::write(&archive_path, bytes).map_err(|err| {
-                format!(
-                    "failed to write archive '{}': {err}",
-                    archive_path.display()
-                )
-            })?;
-            println!("created {}", archive_path.display());
+            write_archive_output(&archive_path, &bytes)?;
             Ok(())
         }
     }
+}
+
+fn write_archive_output(path: &Path, bytes: &[u8]) -> CliResult<()> {
+    if path == Path::new("-") || path == Path::new("/dev/stdout") {
+        std::io::Write::write_all(&mut std::io::stdout(), bytes)?;
+        eprintln!("created {}", path.display());
+        return Ok(());
+    }
+    fs::write(path, bytes)
+        .map_err(|err| format!("failed to write archive '{}': {err}", path.display()))?;
+    println!("created {}", path.display());
+    Ok(())
 }
 
 fn validate_rar15_40_add_options(
@@ -1458,19 +1631,32 @@ fn validate_rar15_40_add_options(
 }
 
 fn write_volume_parts(first_path: &Path, parts: &[Vec<u8>]) -> CliResult<()> {
+    let mut paths = Vec::with_capacity(parts.len());
     for (index, bytes) in parts.iter().enumerate() {
         let path = volume_part_path(first_path, index)?;
-        fs::write(path, bytes)?;
+        fs::write(&path, bytes)?;
+        paths.push(path);
     }
+    print_created_volumes(&paths);
     Ok(())
 }
 
 fn write_rar50_volume_parts(first_path: &Path, parts: &[Vec<u8>]) -> CliResult<()> {
+    let mut paths = Vec::with_capacity(parts.len());
     for (index, bytes) in parts.iter().enumerate() {
-        let path = rar50_volume_part_path(first_path, index)?;
-        fs::write(path, bytes)?;
+        let path = rar50_volume_part_path(first_path, index, parts.len())?;
+        fs::write(&path, bytes)?;
+        paths.push(path);
     }
+    print_created_volumes(&paths);
     Ok(())
+}
+
+fn print_created_volumes(paths: &[PathBuf]) {
+    println!("created {} volumes:", paths.len());
+    for path in paths {
+        println!("  {}", path.display());
+    }
 }
 
 fn parse_size(input: &str) -> CliResult<usize> {
@@ -1487,10 +1673,30 @@ fn parse_size(input: &str) -> CliResult<usize> {
     if digits.is_empty() {
         return Err(CliError::usage(format!("invalid size: {input}")));
     }
-    let value = digits.parse::<usize>()?;
+    let value = digits
+        .parse::<usize>()
+        .map_err(|_| CliError::usage(format!("invalid size value: {input}")))?;
     value
         .checked_mul(multiplier)
         .ok_or_else(|| CliError::usage(format!("size overflows usize: {input}")))
+}
+
+fn parse_u8_flag(flag: &str, value: &str) -> CliResult<u8> {
+    value
+        .parse::<u8>()
+        .map_err(|_| CliError::usage(format!("invalid {flag} value: {value}")))
+}
+
+fn parse_u64_flag(flag: &str, value: &str) -> CliResult<u64> {
+    value
+        .parse::<u64>()
+        .map_err(|_| CliError::usage(format!("invalid {flag} value: {value}")))
+}
+
+fn parse_usize_flag(flag: &str, value: &str) -> CliResult<usize> {
+    value
+        .parse::<usize>()
+        .map_err(|_| CliError::usage(format!("invalid {flag} value: {value}")))
 }
 
 fn usage() {
@@ -1498,10 +1704,31 @@ fn usage() {
         "usage:
   rars info [--password <password>|--password-file <path>] <archive>...
   rars test [--password <password>|--password-file <path>] <archive> [parts...]
-  rars x [--password <password>|--password-file <path>] <archive> [parts...] <outdir>
+  rars x [--password <password>|--password-file <path>] [--overwrite <never|always>] <archive> [parts...] <outdir>
   rars repair [--password <password>|--password-file <path>] <archive> <repaired-archive>
   rars repair <rar-parts-and-rev-files...> <outdir>
-  {ADD_USAGE}"
+  rars a [options] --format <rar14|rar15|rar20|rar29|rar30|rar40|rar50|rar70> <archive> <files...>
+
+exit codes:
+  0 success
+  1 operation failed
+  2 invalid command line
+  3 password required, wrong password, or corrupt encrypted data"
+    );
+}
+
+fn add_usage() {
+    eprintln!(
+        "usage:
+  rars a [--password <password>|--password-file <path>]
+         --format <rar14|rar15|rar20|rar29|rar30|rar40|rar50|rar70>
+         [--store] [--level <0..5>] [--dict-size <bytes|k|m|g>] [--solid]
+         [--encrypt-headers] [--quick-open]
+         [--comment <text>] [--archive-name <name>] [--file-comment <text>]
+         [--recovery-percent <1..100>] [--volume-size <bytes|k|m|g>]
+         [--ppmd|--auto-filter|--delta-filter <channels>|--e8-filter|--e8e9-filter|
+          --itanium-filter|--rgb-filter <width>|--audio-filter <channels>|--arm-filter]
+         <archive> <files...>"
     );
 }
 
@@ -1616,16 +1843,16 @@ mod tests {
     #[test]
     fn rar50_volume_part_path_does_not_duplicate_existing_part_suffix() {
         assert_eq!(
-            rar50_volume_part_path(Path::new("archive.part1.rar"), 0).unwrap(),
-            PathBuf::from("archive.part1.rar")
+            rar50_volume_part_path(Path::new("archive.part01.rar"), 0, 20).unwrap(),
+            PathBuf::from("archive.part01.rar")
         );
         assert_eq!(
-            rar50_volume_part_path(Path::new("archive.part1.rar"), 1).unwrap(),
-            PathBuf::from("archive.part2.rar")
+            rar50_volume_part_path(Path::new("archive.part01.rar"), 1, 20).unwrap(),
+            PathBuf::from("archive.part02.rar")
         );
         assert_eq!(
-            rar50_volume_part_path(Path::new("archive.rar"), 0).unwrap(),
-            PathBuf::from("archive.part1.rar")
+            rar50_volume_part_path(Path::new("archive.rar"), 0, 20).unwrap(),
+            PathBuf::from("archive.part01.rar")
         );
     }
 

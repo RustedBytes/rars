@@ -5,6 +5,12 @@ use std::fs::{self, File, OpenOptions};
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OverwritePolicy {
+    Never,
+    Always,
+}
+
 pub(crate) struct ExtractedOutput {
     pub(crate) name: Vec<u8>,
     pub(crate) path: PathBuf,
@@ -15,10 +21,9 @@ pub(crate) struct ExtractedOutput {
 pub(crate) fn open_output_writer(
     out_dir: &Path,
     entry: &ExtractedEntryMeta,
+    overwrite: OverwritePolicy,
 ) -> rars::Result<(PathBuf, Box<dyn std::io::Write>)> {
-    let rel = output_relative_path(&entry.name)
-        .map_err(|_| Error::InvalidHeader("unsafe archive path"))?;
-    let mut out_path = checked_output_path(out_dir, &rel)?;
+    let mut out_path = output_path_for_entry(out_dir, entry)?;
     if entry.is_directory {
         fs::create_dir_all(&out_path)?;
         return Ok((out_path, Box::new(std::io::sink())));
@@ -26,8 +31,22 @@ pub(crate) fn open_output_writer(
     if let Some(parent) = out_path.parent() {
         fs::create_dir_all(parent)?;
     }
+    let rel = output_relative_path(&entry.name)
+        .map_err(|_| Error::InvalidHeader("unsafe archive path"))?;
     out_path = checked_output_path(out_dir, &rel)?;
-    Ok((out_path.clone(), Box::new(create_output_file(&out_path)?)))
+    Ok((
+        out_path.clone(),
+        Box::new(create_output_file(&out_path, overwrite)?),
+    ))
+}
+
+pub(crate) fn output_path_for_entry(
+    out_dir: &Path,
+    entry: &ExtractedEntryMeta,
+) -> rars::Result<PathBuf> {
+    let rel = output_relative_path(&entry.name)
+        .map_err(|_| Error::InvalidHeader("unsafe archive path"))?;
+    checked_output_path(out_dir, &rel)
 }
 
 pub(crate) fn restore_output_metadata(outputs: &[ExtractedOutput]) -> std::io::Result<()> {
@@ -88,7 +107,7 @@ pub(crate) fn checked_output_path(out_dir: &Path, rel: &Path) -> rars::Result<Pa
 pub(crate) fn print_ok_entry(entry: &ExtractedEntryMeta) {
     println!(
         "OK {}{}",
-        String::from_utf8_lossy(&entry.name),
+        display_archive_bytes(&entry.name),
         if entry.is_directory { "/" } else { "" }
     );
 }
@@ -105,8 +124,19 @@ pub(crate) fn warn_rar50_redirections(archive: &DetectedArchive) {
 pub(crate) fn redirection_warning(name: impl AsRef<str>) -> String {
     format!(
         "warning: RAR 5 redirection entry '{}' is not recreated; extraction treats only regular file payloads as writable output",
-        name.as_ref()
+        display_archive_text(name.as_ref())
     )
+}
+
+fn display_archive_text(text: impl AsRef<str>) -> String {
+    text.as_ref()
+        .chars()
+        .flat_map(char::escape_default)
+        .collect()
+}
+
+fn display_archive_bytes(bytes: &[u8]) -> String {
+    display_archive_text(String::from_utf8_lossy(bytes))
 }
 
 pub(crate) fn output_relative_path(name: &[u8]) -> CliResult<PathBuf> {
@@ -135,9 +165,17 @@ pub(crate) fn output_relative_path(name: &[u8]) -> CliResult<PathBuf> {
     Ok(out)
 }
 
-fn create_output_file(path: &Path) -> std::io::Result<File> {
+fn create_output_file(path: &Path, overwrite: OverwritePolicy) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true);
+    match overwrite {
+        OverwritePolicy::Never => {
+            options.create_new(true);
+        }
+        OverwritePolicy::Always => {
+            options.create(true).truncate(true);
+        }
+    }
     set_no_follow(&mut options);
     options.open(path)
 }

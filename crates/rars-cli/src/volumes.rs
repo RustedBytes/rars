@@ -1,5 +1,6 @@
 use crate::CliResult;
 use rars_crc32::crc32;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 pub(crate) fn volume_part_path(first_path: &Path, index: usize) -> CliResult<PathBuf> {
@@ -14,14 +15,23 @@ pub(crate) fn volume_part_path(first_path: &Path, index: usize) -> CliResult<Pat
     Ok(first_path.with_extension(format!("r{:02}", index - 1)))
 }
 
-pub(crate) fn rar50_volume_part_path(first_path: &Path, index: usize) -> CliResult<PathBuf> {
+pub(crate) fn rar50_volume_part_path(
+    first_path: &Path,
+    index: usize,
+    total_parts: usize,
+) -> CliResult<PathBuf> {
     let parent = first_path.parent().unwrap_or_else(|| Path::new(""));
     let file_name = first_path
         .file_name()
         .ok_or("RAR 5 volume path needs a file name")?
         .to_string_lossy();
     let stem = rar50_volume_stem(&file_name);
-    Ok(parent.join(format!("{stem}.part{}.rar", index + 1)))
+    let width = total_parts.to_string().len().max(2);
+    Ok(parent.join(format!(
+        "{stem}.part{:0width$}.rar",
+        index + 1,
+        width = width
+    )))
 }
 
 fn rar50_volume_stem(file_name: &str) -> &str {
@@ -35,6 +45,81 @@ fn rar50_volume_stem(file_name: &str) -> &str {
         }
     }
     without_rar
+}
+
+pub(crate) fn sort_volume_paths(paths: &mut [String]) {
+    paths.sort_by(|a, b| {
+        volume_sort_key(Path::new(a))
+            .cmp(&volume_sort_key(Path::new(b)))
+            .then_with(|| a.cmp(b))
+    });
+}
+
+pub(crate) fn discover_sibling_volumes(first_path: &str) -> Vec<String> {
+    let first = Path::new(first_path);
+    let parent = first.parent().unwrap_or_else(|| Path::new("."));
+    let Some(first_key) = volume_name_key(first) else {
+        return vec![first_path.to_string()];
+    };
+    let Ok(entries) = fs::read_dir(parent) else {
+        return vec![first_path.to_string()];
+    };
+    let mut paths = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if volume_name_key(&path).as_ref() == Some(&first_key) && volume_sort_key(&path).is_some() {
+            paths.push(path.to_string_lossy().into_owned());
+        }
+    }
+    if paths.is_empty() {
+        paths.push(first_path.to_string());
+    }
+    sort_volume_paths(&mut paths);
+    paths
+}
+
+fn volume_name_key(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_string_lossy();
+    let lower = name.to_ascii_lowercase();
+    if let Some((base, suffix)) = lower.rsplit_once(".part") {
+        if suffix.ends_with(".rar")
+            && suffix[..suffix.len() - 4]
+                .bytes()
+                .all(|b| b.is_ascii_digit())
+        {
+            return Some(base.to_string());
+        }
+    }
+    if lower.ends_with(".rar") {
+        return lower.strip_suffix(".rar").map(str::to_string);
+    }
+    if let Some((base, ext)) = lower.rsplit_once('.') {
+        if ext.len() == 3 && ext.starts_with('r') && ext[1..].bytes().all(|b| b.is_ascii_digit()) {
+            return Some(base.to_string());
+        }
+    }
+    None
+}
+
+fn volume_sort_key(path: &Path) -> Option<usize> {
+    let name = path.file_name()?.to_string_lossy();
+    let lower = name.to_ascii_lowercase();
+    if let Some(part_pos) = lower.rfind(".part") {
+        let suffix = &lower[part_pos + ".part".len()..];
+        if let Some(digits) = suffix.strip_suffix(".rar") {
+            if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+                return digits.parse::<usize>().ok()?.checked_sub(1);
+            }
+        }
+    }
+    if lower.ends_with(".rar") {
+        return Some(0);
+    }
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    if ext.len() == 3 && ext.starts_with('r') {
+        return ext[1..].parse::<usize>().ok().map(|index| index + 1);
+    }
+    None
 }
 
 pub(crate) fn path_has_extension(path: &str, extension: &str) -> bool {
