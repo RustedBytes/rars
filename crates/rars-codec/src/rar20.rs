@@ -107,10 +107,24 @@ fn encode_member(
 
     let tokens = encode_tokens(input, history);
     let mut used_main_symbols = [false; MAIN_COUNT];
+    let mut used_length_slots = [false; LENGTH_COUNT];
     for token in &tokens {
         match *token {
             EncodeToken::Literal(byte) => used_main_symbols[byte as usize] = true,
             EncodeToken::RepeatLast => used_main_symbols[256] = true,
+            EncodeToken::OldOffset {
+                index,
+                length,
+                offset,
+            } => {
+                used_main_symbols[257 + index] = true;
+                let (slot, _) = old_length_slot_for_match(length, offset)?;
+                used_length_slots[slot] = true;
+            }
+            EncodeToken::ShortOffset { offset } => {
+                let (slot, _) = short_slot_for_match(offset)?;
+                used_main_symbols[261 + slot] = true;
+            }
             EncodeToken::Match { length, offset } => {
                 let encoded_length = length.checked_sub(match_length_adjustment(offset)).ok_or(
                     Error::InvalidData("RAR 2.0 adjusted match length underflows"),
@@ -133,7 +147,8 @@ fn encode_member(
             }
         }
         let main_symbol_count = used_main_symbols.iter().filter(|&&used| used).count()
-            + used_offset_slots.iter().filter(|&&used| used).count();
+            + used_offset_slots.iter().filter(|&&used| used).count()
+            + used_length_slots.iter().filter(|&&used| used).count();
         literal_code_len(main_symbol_count)?
     };
 
@@ -145,7 +160,13 @@ fn encode_member(
         for len in &mut table_lengths[270..270 + LENGTH_COUNT] {
             *len = literal_len;
         }
+        for len in &mut table_lengths[257..269] {
+            *len = literal_len;
+        }
         for len in &mut table_lengths[MAIN_COUNT..MAIN_COUNT + OFFSET_COUNT] {
+            *len = literal_len;
+        }
+        for len in &mut table_lengths[MAIN_COUNT + OFFSET_COUNT..TABLE_COUNT] {
             *len = literal_len;
         }
     } else {
@@ -164,6 +185,11 @@ fn encode_member(
         for (slot, used) in used_offset_slots.iter().enumerate() {
             if *used {
                 table_lengths[MAIN_COUNT + slot] = literal_len;
+            }
+        }
+        for (slot, used) in used_length_slots.iter().enumerate() {
+            if *used {
+                table_lengths[MAIN_COUNT + OFFSET_COUNT + slot] = literal_len;
             }
         }
     }
@@ -192,6 +218,7 @@ fn encode_member(
         }
     }
     let offset_codes = canonical_codes(&table_lengths[MAIN_COUNT..MAIN_COUNT + OFFSET_COUNT])?;
+    let length_codes = canonical_codes(&table_lengths[MAIN_COUNT + OFFSET_COUNT..TABLE_COUNT])?;
     for token in tokens {
         match token {
             EncodeToken::Literal(byte) => {
@@ -205,6 +232,34 @@ fn encode_member(
                     "RAR 2.0 encoder missing repeat-last Huffman code",
                 ))?;
                 bits.write_bits(code.code as u32, code.len);
+            }
+            EncodeToken::OldOffset {
+                index,
+                length,
+                offset,
+            } => {
+                let code = main_codes[257 + index].ok_or(Error::InvalidData(
+                    "RAR 2.0 encoder missing old-offset Huffman code",
+                ))?;
+                bits.write_bits(code.code as u32, code.len);
+                let (slot, extra) = old_length_slot_for_match(length, offset)?;
+                let length_code = length_codes[slot].ok_or(Error::InvalidData(
+                    "RAR 2.0 encoder missing old-offset length Huffman code",
+                ))?;
+                bits.write_bits(length_code.code as u32, length_code.len);
+                if LENGTH_BITS[slot] != 0 {
+                    bits.write_bits(extra as u32, LENGTH_BITS[slot]);
+                }
+            }
+            EncodeToken::ShortOffset { offset } => {
+                let (slot, extra) = short_slot_for_match(offset)?;
+                let code = main_codes[261 + slot].ok_or(Error::InvalidData(
+                    "RAR 2.0 encoder missing short-offset Huffman code",
+                ))?;
+                bits.write_bits(code.code as u32, code.len);
+                if SHORT_BITS[slot] != 0 {
+                    bits.write_bits(extra as u32, SHORT_BITS[slot]);
+                }
             }
             EncodeToken::Match { length, offset } => {
                 let encoded_length = length.checked_sub(match_length_adjustment(offset)).ok_or(
@@ -249,7 +304,18 @@ impl FixedEncodeTable {
 enum EncodeToken {
     Literal(u8),
     RepeatLast,
-    Match { length: usize, offset: usize },
+    OldOffset {
+        index: usize,
+        length: usize,
+        offset: usize,
+    },
+    ShortOffset {
+        offset: usize,
+    },
+    Match {
+        length: usize,
+        offset: usize,
+    },
 }
 
 fn encode_tokens(input: &[u8], history: &[u8]) -> Vec<EncodeToken> {
@@ -266,14 +332,65 @@ fn encode_tokens(input: &[u8], history: &[u8]) -> Vec<EncodeToken> {
     let mut pos = history.len();
     let end = combined.len();
     let mut last_match = None;
+    let mut old_offsets = [0usize; 4];
     while pos < end {
-        if let Some((length, offset)) = best_match(&combined, pos, end, &buckets) {
-            if last_match == Some((length, offset)) {
-                tokens.push(EncodeToken::RepeatLast);
-            } else {
-                tokens.push(EncodeToken::Match { length, offset });
-                last_match = Some((length, offset));
+        let fresh = best_match(&combined, pos, end, &buckets);
+        let old = best_old_offset_match(&combined, pos, end, &old_offsets);
+        let selected = match (fresh, old) {
+            (Some((fresh_length, _)), Some((index, old_length, old_offset)))
+                if old_length + 1 >= fresh_length =>
+            {
+                Some(SelectedMatch::OldOffset {
+                    index,
+                    length: old_length,
+                    offset: old_offset,
+                })
             }
+            (Some((length, offset)), _) => Some(SelectedMatch::Fresh { length, offset }),
+            (None, Some((index, length, offset))) => Some(SelectedMatch::OldOffset {
+                index,
+                length,
+                offset,
+            }),
+            (None, None) => best_short_offset_match(&combined, pos, end)
+                .map(|offset| SelectedMatch::ShortOffset { offset }),
+        };
+        if let Some(selected) = selected {
+            let (length, offset) = match selected {
+                SelectedMatch::Fresh { length, offset } => {
+                    if last_match == Some((length, offset)) {
+                        tokens.push(EncodeToken::RepeatLast);
+                    } else {
+                        tokens.push(EncodeToken::Match { length, offset });
+                        last_match = Some((length, offset));
+                    }
+                    (length, offset)
+                }
+                SelectedMatch::OldOffset {
+                    index,
+                    length,
+                    offset,
+                } => {
+                    if last_match == Some((length, offset)) {
+                        tokens.push(EncodeToken::RepeatLast);
+                    } else {
+                        tokens.push(EncodeToken::OldOffset {
+                            index,
+                            length,
+                            offset,
+                        });
+                        last_match = Some((length, offset));
+                    }
+                    (length, offset)
+                }
+                SelectedMatch::ShortOffset { offset } => {
+                    let length = 2;
+                    tokens.push(EncodeToken::ShortOffset { offset });
+                    last_match = Some((length, offset));
+                    (length, offset)
+                }
+            };
+            push_old_offset(&mut old_offsets, offset);
             for history_pos in pos..pos + length {
                 insert_match_position(&combined, history_pos, &mut buckets);
             }
@@ -285,6 +402,22 @@ fn encode_tokens(input: &[u8], history: &[u8]) -> Vec<EncodeToken> {
         }
     }
     tokens
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SelectedMatch {
+    Fresh {
+        length: usize,
+        offset: usize,
+    },
+    OldOffset {
+        index: usize,
+        length: usize,
+        offset: usize,
+    },
+    ShortOffset {
+        offset: usize,
+    },
 }
 
 fn best_match(
@@ -332,8 +465,61 @@ fn best_match(
     best
 }
 
+fn best_old_offset_match(
+    input: &[u8],
+    pos: usize,
+    end: usize,
+    old_offsets: &[usize; 4],
+) -> Option<(usize, usize, usize)> {
+    let max_length = (end - pos).min(MAX_ENCODER_MATCH_LENGTH);
+    let mut best = None;
+    for (index, &offset) in old_offsets.iter().enumerate() {
+        if offset == 0 || offset > pos {
+            continue;
+        }
+        let length = match_length_at_offset(input, pos, max_length, offset);
+        if old_length_slot_for_match(length, offset).is_ok()
+            && best.is_none_or(|(_, best_length, best_offset)| {
+                length > best_length || (length == best_length && offset < best_offset)
+            })
+        {
+            best = Some((index, length, offset));
+        }
+    }
+    best
+}
+
+fn best_short_offset_match(input: &[u8], pos: usize, end: usize) -> Option<usize> {
+    if end - pos < 2 {
+        return None;
+    }
+    let max_offset = pos.min(256);
+    (1..=max_offset).find(|&offset| {
+        input[pos] == input[pos - offset] && input[pos + 1] == input[pos + 1 - offset]
+    })
+}
+
+fn match_length_at_offset(input: &[u8], pos: usize, max_length: usize, offset: usize) -> usize {
+    let mut length = 0usize;
+    while length < max_length && input[pos + length] == input[pos + length - offset] {
+        length += 1;
+    }
+    length
+}
+
 fn match_length_adjustment(offset: usize) -> usize {
     usize::from(offset >= 0x2000) + usize::from(offset >= 0x40000)
+}
+
+fn old_length_adjustment(offset: usize) -> usize {
+    usize::from(offset >= 0x101) + usize::from(offset >= 0x2000) + usize::from(offset >= 0x40000)
+}
+
+fn push_old_offset(old_offsets: &mut [usize; 4], offset: usize) {
+    old_offsets[3] = old_offsets[2];
+    old_offsets[2] = old_offsets[1];
+    old_offsets[1] = old_offsets[0];
+    old_offsets[0] = offset;
 }
 
 fn insert_match_position(input: &[u8], pos: usize, buckets: &mut [Vec<usize>]) {
@@ -368,6 +554,35 @@ fn length_slot_for_match(length: usize) -> Result<(usize, usize)> {
     Err(Error::InvalidData("RAR 2.0 match length is too long"))
 }
 
+fn old_length_slot_for_match(length: usize, offset: usize) -> Result<(usize, usize)> {
+    let encoded = length
+        .checked_sub(old_length_adjustment(offset))
+        .ok_or(Error::InvalidData(
+            "RAR 2.0 adjusted old-offset length underflows",
+        ))?;
+    if encoded < 2 {
+        return Err(Error::InvalidData(
+            "RAR 2.0 old-offset match length is too short",
+        ));
+    }
+    let adjusted = encoded - 2;
+    for (slot, &base) in LENGTH_BASES.iter().enumerate() {
+        let extra_bits = LENGTH_BITS[slot];
+        let max = base
+            + if extra_bits == 0 {
+                0
+            } else {
+                (1usize << extra_bits) - 1
+            };
+        if adjusted >= base && adjusted <= max {
+            return Ok((slot, adjusted - base));
+        }
+    }
+    Err(Error::InvalidData(
+        "RAR 2.0 old-offset match length is too long",
+    ))
+}
+
 fn offset_slot_for_match(offset: usize) -> Result<(usize, usize)> {
     if offset == 0 {
         return Err(Error::InvalidData("RAR 2.0 match offset is zero"));
@@ -386,6 +601,30 @@ fn offset_slot_for_match(offset: usize) -> Result<(usize, usize)> {
         }
     }
     Err(Error::InvalidData("RAR 2.0 match offset is too large"))
+}
+
+fn short_slot_for_match(offset: usize) -> Result<(usize, usize)> {
+    if offset == 0 || offset > 256 {
+        return Err(Error::InvalidData(
+            "RAR 2.0 short match offset is out of range",
+        ));
+    }
+    let adjusted = offset - 1;
+    for (slot, &base) in SHORT_BASES.iter().enumerate() {
+        let extra_bits = SHORT_BITS[slot];
+        let max = base
+            + if extra_bits == 0 {
+                0
+            } else {
+                (1usize << extra_bits) - 1
+            };
+        if adjusted >= base && adjusted <= max {
+            return Ok((slot, adjusted - base));
+        }
+    }
+    Err(Error::InvalidData(
+        "RAR 2.0 short match offset is out of range",
+    ))
 }
 
 fn literal_code_len(symbol_count: usize) -> Result<u8> {
@@ -1540,6 +1779,35 @@ mod tests {
                 }
             ]
         ));
+        assert_eq!(unpack20_decode(&packed, input.len()).unwrap(), input);
+    }
+
+    #[test]
+    fn encoder_emits_rar20_short_offset_matches() {
+        let input = b"abab";
+        let tokens = encode_tokens(input, &[]);
+        let packed = unpack20_encode_literals(input).unwrap();
+
+        assert!(matches!(
+            tokens.as_slice(),
+            [
+                EncodeToken::Literal(b'a'),
+                EncodeToken::Literal(b'b'),
+                EncodeToken::ShortOffset { offset: 2 }
+            ]
+        ));
+        assert_eq!(unpack20_decode(&packed, input.len()).unwrap(), input);
+    }
+
+    #[test]
+    fn encoder_emits_rar20_old_offset_matches() {
+        let input = b"abcdabcdXYZXYZwxyzwxyz";
+        let tokens = encode_tokens(input, &[]);
+        let packed = unpack20_encode_literals(input).unwrap();
+
+        assert!(tokens
+            .iter()
+            .any(|token| matches!(token, EncodeToken::OldOffset { .. })));
         assert_eq!(unpack20_decode(&packed, input.len()).unwrap(), input);
     }
 
