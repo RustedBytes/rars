@@ -74,6 +74,8 @@ pub struct Unpack15Encoder {
     last_dist: u32,
     last_length: u32,
     l_count: u32,
+    #[cfg(test)]
+    stmode_literal_count: usize,
 }
 
 impl Unpack15Encoder {
@@ -101,6 +103,8 @@ impl Unpack15Encoder {
             last_dist: u32::MAX,
             last_length: 0,
             l_count: 0,
+            #[cfg(test)]
+            stmode_literal_count: 0,
         };
         encoder.init_huff();
         encoder
@@ -133,7 +137,7 @@ impl Unpack15Encoder {
                 write_planned_flag_bits(&mut flags, flag_bits, flag);
                 payloads.push(EncodedToken::Literal(input[pos]));
                 flag_bits += flag.len();
-                if flag_bits == 8 && plan_num_huf >= 16 {
+                if flag_bits == 8 && plan_num_huf >= 16 && pos + 1 < input.len() {
                     group_enters_stmode = true;
                 }
                 plan_num_huf += 1;
@@ -144,6 +148,7 @@ impl Unpack15Encoder {
             self.emit_flags_byte(flags)?;
             self.emit_payloads(payloads)?;
             if group_enters_stmode {
+                self.emit_stmode_literal_run(input, &mut pos, false)?;
                 self.emit_stmode_exit()?;
             }
         }
@@ -234,7 +239,7 @@ impl Unpack15Encoder {
                 write_planned_flag_bits(&mut flags, flag_bits, flag);
                 payloads.push(EncodedToken::Literal(input[pos]));
                 flag_bits += flag.len();
-                if flag_bits == 8 && plan_num_huf >= 16 {
+                if flag_bits == 8 && plan_num_huf >= 16 && pos + 1 < input.len() {
                     group_enters_stmode = true;
                 }
                 plan_num_huf += 1;
@@ -245,6 +250,7 @@ impl Unpack15Encoder {
             self.emit_flags_byte(flags)?;
             self.emit_payloads(payloads)?;
             if group_enters_stmode {
+                self.emit_stmode_literal_run(input, &mut pos, true)?;
                 self.emit_stmode_exit()?;
             }
         }
@@ -397,6 +403,48 @@ impl Unpack15Encoder {
             .position(|&value| (value >> 8) as u8 == byte)
             .ok_or(Error::InvalidData("RAR 1.3 literal is not encodable"))?;
         self.emit_literal_place(byte_place, byte_place, true)
+    }
+
+    fn emit_stmode_literal(&mut self, byte: u8) -> Result<()> {
+        let byte_place = self
+            .ch_set
+            .iter()
+            .position(|&value| (value >> 8) as u8 == byte)
+            .ok_or(Error::InvalidData(
+                "RAR 1.3 stmode literal is not encodable",
+            ))?;
+        #[cfg(test)]
+        {
+            self.stmode_literal_count += 1;
+        }
+        self.emit_literal_place(byte_place + 1, byte_place, false)
+    }
+
+    fn emit_stmode_literal_run(
+        &mut self,
+        input: &[u8],
+        pos: &mut usize,
+        allow_lz: bool,
+    ) -> Result<()> {
+        while *pos + 1 < input.len() {
+            if allow_lz
+                && find_lz_token(
+                    input,
+                    *pos,
+                    self.last_dist,
+                    self.last_length,
+                    self.old_dist,
+                    self.old_dist_ptr,
+                    self.max_dist3,
+                )
+                .is_some()
+            {
+                break;
+            }
+            self.emit_stmode_literal(input[*pos])?;
+            *pos += 1;
+        }
+        Ok(())
     }
 
     fn emit_literal_place(
@@ -1115,11 +1163,9 @@ fn find_old_dist_lz(
 }
 
 fn old_distance_encoder_enabled() -> bool {
-    // RAR 1.402 decodes some writer-generated old-distance forms differently
-    // from our decoder, especially around the Buf60 toggle encoding. Keep the
-    // decoder support, but avoid emitting this compatibility-sensitive
-    // vocabulary until it has a DOS oracle-backed encoder model.
-    false
+    // Compatibility-checked by scripts/reference-rar14-writer.sh against
+    // DOS RAR 1.402 extraction.
+    true
 }
 
 fn old_dist_lz_is_encodable(length: u32, distance: u32, short_code: u32) -> bool {
@@ -2026,10 +2072,58 @@ mod tests {
     }
 
     #[test]
+    fn planner_emits_safe_old_distance_token() {
+        let mut input: Vec<_> = (0..80).map(|index| (index * 37 + 11) as u8).collect();
+        let pos = input.len();
+        input.extend_from_within(pos - 33..pos - 13);
+
+        let encoder = Unpack15Encoder::new();
+        let token = encoder
+            .choose_lz_token(
+                &input,
+                pos,
+                LzPlanState {
+                    last_dist: u32::MAX,
+                    last_length: 0,
+                    old_dist: [11, 22, 33, 44],
+                    old_dist_ptr: 0,
+                    max_dist3: 0x2001,
+                    nlzb: encoder.nlzb,
+                    nhfb: encoder.nhfb,
+                    l_count: encoder.l_count,
+                },
+                0,
+            )
+            .expect("old-distance candidate should be selected");
+
+        assert_eq!(
+            token,
+            EncodedToken::OldDist(OldDistLz {
+                distance: 33,
+                length: 20,
+                short_code: 11,
+            })
+        );
+    }
+
+    #[test]
     fn encoder_exits_stmode_when_literal_runs_trigger_decoder_mode() {
         let input: Vec<_> = (0..96).map(|index| (index * 73 + 19) as u8).collect();
         let packed = unpack15_encode(&input).unwrap();
 
+        assert_eq!(unpack15_decode(&packed, input.len()).unwrap(), input);
+    }
+
+    #[test]
+    fn encoder_emits_stmode_literals_for_long_literal_runs() {
+        let input: Vec<_> = (0..128).map(|index| (index * 73 + 19) as u8).collect();
+        let mut encoder = Unpack15Encoder::new();
+        let packed = encoder.encode_member(&input).unwrap();
+
+        assert!(
+            encoder.stmode_literal_count > 0,
+            "long literal runs should use stmode literals before exiting stmode"
+        );
         assert_eq!(unpack15_decode(&packed, input.len()).unwrap(), input);
     }
 

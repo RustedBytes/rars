@@ -5,12 +5,6 @@
 
 ## Compression Work
 
-- Revisit RAR 1.4 old-distance token emission with DOS RAR 1.402 oracle
-  coverage. The writer currently avoids that compatibility-sensitive
-  vocabulary and relies on repeat-last, short-LZ, and long-LZ matches.
-- Improve RAR 1.4 compressed-writer quality after the DOS compatibility path
-  is stable: match selection, safe old-distance reuse, and text-heavy corpus
-  tuning.
 - Tune RAR29/RAR30/RAR40 lower-level policy: `m5` is already strong, and
   cost-aware lazy lookahead, repeat-distance candidates, dictionary-bounded
   match search, multi-range x86 filtering, ranged Delta filtering, and
@@ -43,9 +37,9 @@
   stable behaviour.
 - Maintain local oracle scripts:
   `reference-rar5-writer.sh`, `reference-rar5-recovery-repair.sh`,
-  `reference-rar20-writer.sh`, `reference-rar29-rarvm-writer.sh`,
-  `reference-rar29-level-writer.sh`, `reference-rar3-aes-writer.sh`, and
-  `reference-rar70-large-dict.sh`.
+  `reference-rar14-writer.sh`, `reference-rar20-writer.sh`,
+  `reference-rar29-rarvm-writer.sh`, `reference-rar29-level-writer.sh`,
+  `reference-rar3-aes-writer.sh`, and `reference-rar70-large-dict.sh`.
 - Run `./scripts/coverage.py` periodically.
 
 ## Deferred

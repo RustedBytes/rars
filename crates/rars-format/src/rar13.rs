@@ -30,7 +30,6 @@ const LHD_SOLID: u8 = 0x10;
 const METHOD_STORE: u8 = 0;
 const METHOD_BEST: u8 = 5;
 const DEFAULT_UNP_VER: u8 = 2;
-const MIN_STORE_FALLBACK_SIZE: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -1055,10 +1054,7 @@ pub fn write_compressed_archive_with_comment(
         } else {
             unpack15_encode(entry.data)?
         };
-        let method = if !solid
-            && entry.data.len() >= MIN_STORE_FALLBACK_SIZE
-            && packed.len() >= entry.data.len()
-        {
+        let method = if !solid && packed.len() >= entry.data.len() {
             packed = entry.data.to_vec();
             METHOD_STORE
         } else {
@@ -1840,9 +1836,12 @@ mod tests {
         assert_eq!(archive.main.flags, 0x80);
         assert_eq!(archive.entries.len(), 1);
         assert_eq!(archive.entries[0].name, b"tiny.txt");
-        assert!(!archive.entries[0].is_stored());
-        assert_eq!(archive.entries[0].header.method, METHOD_BEST);
-        assert!(archive.entries[0].header.pack_size > 0);
+        assert!(archive.entries[0].is_stored());
+        assert_eq!(archive.entries[0].header.method, METHOD_STORE);
+        assert_eq!(
+            archive.entries[0].header.pack_size,
+            input[0].data.len() as u32
+        );
 
         let extracted = collect_extract(&archive, None).unwrap();
         assert_eq!(extracted[0].data, b"literal bytes over sixteen");
@@ -1958,6 +1957,26 @@ mod tests {
     }
 
     #[test]
+    fn compressed_writer_stores_tiny_incompressible_member_when_smaller() {
+        let data = b"\x00\xff\x12\xed\x34\xcb\x56\xa9\x78\x87\x9a\x65\xbc\x43\xde\x21";
+        let input = [FileEntry {
+            name: b"tiny.bin",
+            data,
+            file_time: 0,
+            file_attr: 0x20,
+            password: None,
+            file_comment: None,
+        }];
+
+        let bytes = write_compressed_archive(&input, WriterOptions::default()).unwrap();
+        let archive = Archive::parse(&bytes).unwrap();
+
+        assert_eq!(archive.entries[0].header.method, METHOD_STORE);
+        assert_eq!(archive.entries[0].header.pack_size, data.len() as u32);
+        assert_eq!(collect_extract(&archive, None).unwrap()[0].data, data);
+    }
+
+    #[test]
     fn writes_and_reads_solid_compressed_archive() {
         let input = [
             FileEntry {
@@ -2012,7 +2031,7 @@ mod tests {
         let bytes = write_compressed_archive(&input, WriterOptions::default()).unwrap();
         let archive = Archive::parse(&bytes).unwrap();
         assert!(archive.entries[0].is_encrypted());
-        assert_eq!(archive.entries[0].header.method, METHOD_BEST);
+        assert_eq!(archive.entries[0].header.method, METHOD_STORE);
         assert!(matches!(
             collect_extract(&archive, None),
             Err(Error::NeedPassword)
@@ -2138,7 +2157,7 @@ mod tests {
 
         let bytes = write_compressed_archive(&input, WriterOptions::default()).unwrap();
         let archive = Archive::parse(&bytes).unwrap();
-        assert_eq!(archive.entries[0].header.method, METHOD_BEST);
+        assert_eq!(archive.entries[0].header.method, METHOD_STORE);
         assert_eq!(archive.entries[0].header.pack_size, 0);
 
         let extracted = collect_extract(&archive, None).unwrap();
