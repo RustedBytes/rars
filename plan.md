@@ -11,9 +11,10 @@
 - Improve RAR 1.4 compressed-writer quality after the DOS compatibility path
   is stable: match selection, safe old-distance reuse, and text-heavy corpus
   tuning.
-- Add WinRAR 2.90 oracle coverage before enabling RAR20 old-distance or
-  short-distance writer tokens. The current RAR20 writer emits literals, fresh
-  LZ matches, repeat-last matches, and audio blocks when they beat LZ.
+- Expand RAR20 old-distance or short-distance writer tokens under
+  `reference-rar20-writer.sh` coverage. The current RAR20 writer emits
+  literals, fresh LZ matches, repeat-last matches, and audio blocks when they
+  beat LZ; the local oracle checks generated output with DOS UnRAR 2.50.
 - Tune RAR29/RAR30/RAR40 lower-level policy: `m5` is already strong, and
   cost-aware lazy lookahead, repeat-distance candidates, dictionary-bounded
   match search, multi-range x86 filtering, ranged Delta filtering, and
@@ -46,8 +47,9 @@
   stable behaviour.
 - Maintain local oracle scripts:
   `reference-rar5-writer.sh`, `reference-rar5-recovery-repair.sh`,
-  `reference-rar29-rarvm-writer.sh`, `reference-rar29-level-writer.sh`,
-  `reference-rar3-aes-writer.sh`, and `reference-rar70-large-dict.sh`.
+  `reference-rar20-writer.sh`, `reference-rar29-rarvm-writer.sh`,
+  `reference-rar29-level-writer.sh`, `reference-rar3-aes-writer.sh`, and
+  `reference-rar70-large-dict.sh`.
 - Run `./scripts/coverage.py` periodically.
 
 ## Deferred
