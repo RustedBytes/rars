@@ -274,6 +274,14 @@ fn cmd_info(args: &[String]) -> CliResult<()> {
                         );
                     }
                 }
+                let archive_comment = archive
+                    .archive_comment_with_password(password.as_deref())
+                    .map_err(|err| {
+                        format!("failed to decode archive comment '{path}': {err}")
+                    })?;
+                if let Some(ref comment) = archive_comment {
+                    println!("  comment: {}", display_bytes_lossy(comment));
+                }
                 for (index, file) in archive.files().enumerate() {
                     let compression_info = file.decoded_compression_info().map_err(|err| {
                         format!(
@@ -305,7 +313,12 @@ fn cmd_info(args: &[String]) -> CliResult<()> {
                         );
                     }
                 }
+                let mut suppressed_archive_cmt = archive_comment.is_some();
                 for service in archive.services() {
+                    if suppressed_archive_cmt && service.name == b"CMT" {
+                        suppressed_archive_cmt = false;
+                        continue;
+                    }
                     println!(
                         "  service: {} pack={} unp={} flags={:#06x}",
                         display_text(service.name_lossy()),

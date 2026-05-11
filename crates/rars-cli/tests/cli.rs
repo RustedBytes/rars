@@ -3077,7 +3077,7 @@ fn creates_rar50_encrypted_stored_archive_comment_service() {
         .output()
         .unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
-    assert!(stdout(&info).contains("service: CMT"));
+    assert!(stdout(&info).contains("comment: Encrypted RAR5 CLI comment"));
 
     let test = rars()
         .args(["test", "--password", "pass"])
@@ -3117,7 +3117,7 @@ fn creates_rar50_encrypted_compressed_archive_comment_service() {
         .output()
         .unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
-    assert!(stdout(&info).contains("service: CMT"));
+    assert!(stdout(&info).contains("comment: Encrypted compressed RAR5 CLI comment"));
 
     let test = rars()
         .args(["test", "--password", "pass"])
@@ -3204,7 +3204,7 @@ fn creates_rar50_header_encrypted_stored_archive_comment_service() {
         .output()
         .unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
-    assert!(stdout(&info).contains("service: CMT"));
+    assert!(stdout(&info).contains("comment: Header encrypted RAR5 CLI comment"));
 
     let test = rars()
         .args(["test", "--password", "pass"])
@@ -3252,7 +3252,7 @@ fn creates_rar50_header_encrypted_compressed_archive_comment_service() {
         .output()
         .unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
-    assert!(stdout(&info).contains("service: CMT"));
+    assert!(stdout(&info).contains("comment: Header encrypted compressed RAR5 CLI comment"));
 
     let test = rars()
         .args(["test", "--password", "pass"])
@@ -3387,7 +3387,7 @@ fn creates_rar50_stored_archive_comment_service() {
 
     let info = rars().arg("info").arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
-    assert!(stdout(&info).contains("service: CMT"));
+    assert!(stdout(&info).contains("comment: RAR5 CLI comment"));
 
     let test = rars().arg("test").arg(&archive).output().unwrap();
     assert!(test.status.success(), "stderr: {}", stderr(&test));
@@ -3417,7 +3417,7 @@ fn creates_rar50_compressed_archive_comment_service() {
 
     let info = rars().arg("info").arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
-    assert!(stdout(&info).contains("service: CMT"));
+    assert!(stdout(&info).contains("comment: RAR5 compressed CLI comment"));
 
     let test = rars().arg("test").arg(&archive).output().unwrap();
     assert!(test.status.success(), "stderr: {}", stderr(&test));

@@ -610,6 +610,33 @@ impl Archive {
         })
     }
 
+    /// Decodes the archive-level `CMT` service payload, if any.
+    ///
+    /// RAR 5 stores comments as `Service` blocks named `CMT`. Archive-level
+    /// comments appear before any `File` block; service blocks attached to a
+    /// specific file follow that file. This returns only the former.
+    pub fn archive_comment(&self) -> Result<Option<Vec<u8>>> {
+        self.archive_comment_with_password(None)
+    }
+
+    /// Same as [`Self::archive_comment`] but supplies a password for
+    /// individually-encrypted comment services.
+    pub fn archive_comment_with_password(
+        &self,
+        password: Option<&[u8]>,
+    ) -> Result<Option<Vec<u8>>> {
+        for block in &self.blocks {
+            match block {
+                Block::File(_) => return Ok(None),
+                Block::Service(service) if service.name == b"CMT" => {
+                    return service.decoded_data_unverified(self, password).map(Some);
+                }
+                _ => {}
+            }
+        }
+        Ok(None)
+    }
+
     pub fn repair_recovery(&self) -> Result<Vec<u8>> {
         let mut repaired = Vec::new();
         self.repair_recovery_to(&mut repaired)?;
@@ -1849,5 +1876,74 @@ mod tests {
 
         assert_eq!(file.name_bytes(), [0xff, b'.', b'b', b'i', b'n']);
         assert_eq!(file.name_lossy(), "\u{fffd}.bin");
+    }
+
+    fn build_archive_with_optional_comment(comment: Option<&[u8]>) -> Archive {
+        use crate::FeatureSet;
+        let mut features = FeatureSet::store_only();
+        features.archive_comment = comment.is_some();
+        let entries = [crate::rar50::StoredEntry {
+            name: b"payload.txt",
+            data: b"payload bytes",
+            mtime: None,
+            attributes: 0x20,
+            host_os: 3,
+        }];
+        let bytes = crate::rar50::Rar50Writer::new(crate::rar50::WriterOptions::new(
+            crate::version::ArchiveVersion::Rar50,
+            features,
+        ))
+        .stored_entries(&entries)
+        .archive_comment(comment)
+        .finish()
+        .unwrap();
+        Archive::parse(&bytes).unwrap()
+    }
+
+    #[test]
+    fn archive_comment_returns_none_for_archive_without_a_cmt_service() {
+        let archive = build_archive_with_optional_comment(None);
+        assert!(archive.archive_comment().unwrap().is_none());
+    }
+
+    #[test]
+    fn archive_comment_decodes_the_cmt_service_payload_text() {
+        let comment_text = b"archive comment from rars unit test\n";
+        let archive = build_archive_with_optional_comment(Some(comment_text));
+        let comment = archive.archive_comment().unwrap();
+        assert_eq!(comment.as_deref(), Some(&comment_text[..]));
+    }
+
+    #[test]
+    fn archive_comment_ignores_cmt_services_attached_to_files() {
+        // Service blocks that follow a File block belong to that file, not the
+        // archive — archive_comment should not surface them.
+        use crate::FeatureSet;
+        let services = [crate::rar50::StoredServiceEntry {
+            name: b"CMT",
+            data: b"per-file comment",
+        }];
+        let entry = crate::rar50::StoredEntryWithServices {
+            entry: crate::rar50::StoredEntry {
+                name: b"payload.txt",
+                data: b"payload bytes",
+                mtime: None,
+                attributes: 0x20,
+                host_os: 3,
+            },
+            services: &services,
+        };
+        let mut features = FeatureSet::store_only();
+        features.file_comment = true;
+        let bytes = crate::rar50::Rar50Writer::new(crate::rar50::WriterOptions::new(
+            crate::version::ArchiveVersion::Rar50,
+            features,
+        ))
+        .stored_entries_with_services(std::slice::from_ref(&entry))
+        .finish()
+        .unwrap();
+        let archive = Archive::parse(&bytes).unwrap();
+
+        assert!(archive.archive_comment().unwrap().is_none());
     }
 }
