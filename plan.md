@@ -70,12 +70,6 @@
 
 ## Deferred
 
-- Split `rars-cli/src/main.rs` into command modules when the CLI is next edited
-  heavily. When doing that split, consolidate usage text, flag parsing, and
-  CLI failure-mode tests so help and parser behaviour cannot drift apart.
-- Tighten `Rar50Writer`'s archive-comment state so plain and encrypted archive
-  comments are represented as one mutually exclusive value instead of two
-  `Option` fields checked at finish time.
 - Define legacy byte-encoding policy for RAR3 passwords and archive names.
   Avoid silent `from_utf8_lossy` derivation; either reject non-UTF-8 bytes
   clearly or implement the intended legacy byte-to-wide/code-page mapping.

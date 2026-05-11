@@ -150,8 +150,7 @@ pub enum FilterPolicy {
 pub struct Rar50Writer<'a> {
     options: WriterOptions,
     members: Vec<Rar50WriteMember<'a>>,
-    archive_comment: Option<&'a [u8]>,
-    encrypted_archive_comment: Option<EncryptedArchiveCommentEntry<'a>>,
+    archive_comment: Option<ArchiveComment<'a>>,
     archive_metadata: Option<ArchiveMetadataEntry<'a>>,
     filter_policy: FilterPolicy,
     recovery_percent: Option<u64>,
@@ -173,6 +172,33 @@ enum Rar50VolumeEntries<'a> {
     Compressed(&'a [CompressedEntry<'a>]),
     EncryptedStored(EncryptedStoredEntry<'a>),
     EncryptedCompressed(&'a [EncryptedCompressedEntry<'a>]),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArchiveComment<'a> {
+    Plain(&'a [u8]),
+    Encrypted(EncryptedArchiveCommentEntry<'a>),
+}
+
+impl<'a> ArchiveComment<'a> {
+    fn encrypted(self) -> Option<EncryptedArchiveCommentEntry<'a>> {
+        match self {
+            Self::Plain(_) => None,
+            Self::Encrypted(comment) => Some(comment),
+        }
+    }
+
+    fn password(self) -> Option<&'a [u8]> {
+        self.encrypted().map(|comment| comment.password)
+    }
+
+    fn plain_only(self) -> Option<Self> {
+        matches!(self, Self::Plain(_)).then_some(self)
+    }
+
+    fn encrypted_only(self) -> Option<Self> {
+        matches!(self, Self::Encrypted(_)).then_some(self)
+    }
 }
 
 impl<'a> Rar50VolumeWriter<'a> {
@@ -261,7 +287,6 @@ impl<'a> Rar50Writer<'a> {
             options,
             members: Vec::new(),
             archive_comment: None,
-            encrypted_archive_comment: None,
             archive_metadata: None,
             filter_policy: FilterPolicy::None,
             recovery_percent: None,
@@ -328,7 +353,7 @@ impl<'a> Rar50Writer<'a> {
     }
 
     pub fn archive_comment(mut self, comment: Option<&'a [u8]>) -> Self {
-        self.archive_comment = comment;
+        self.archive_comment = comment.map(ArchiveComment::Plain);
         self
     }
 
@@ -336,7 +361,7 @@ impl<'a> Rar50Writer<'a> {
         mut self,
         comment: Option<EncryptedArchiveCommentEntry<'a>>,
     ) -> Self {
-        self.encrypted_archive_comment = comment;
+        self.archive_comment = comment.map(ArchiveComment::Encrypted);
         self
     }
 
@@ -390,12 +415,6 @@ impl<'a> Rar50Writer<'a> {
                 });
             }
         }
-        if self.archive_comment.is_some() && self.encrypted_archive_comment.is_some() {
-            return Err(Error::UnsupportedFeature {
-                version: self.options.target,
-                feature: "RAR 5 mixed encrypted/plain archive comments",
-            });
-        }
         let algorithm_version = rar50_algorithm_version(self.options)?;
         let compression_method = compression_method_for_level(self.options.compression_level)?;
         let dictionary_size = dictionary_size_for_options(self.options)?;
@@ -423,8 +442,7 @@ impl<'a> Rar50Writer<'a> {
                 }
                 Ok(ResolvedRar50WritePlan {
                     main_flags: 0,
-                    archive_comment: self.archive_comment,
-                    encrypted_archive_comment: None,
+                    archive_comment: self.archive_comment.and_then(ArchiveComment::plain_only),
                     archive_metadata: self.archive_metadata,
                     quick_open: self.options.features.quick_open,
                     recovery_percent: self.recovery_percent,
@@ -434,7 +452,6 @@ impl<'a> Rar50Writer<'a> {
             }
             Rar50WriteMemberKind::StoredWithServices => {
                 if self.archive_comment.is_some()
-                    || self.encrypted_archive_comment.is_some()
                     || self.archive_metadata.is_some()
                     || self.recovery_percent.is_some()
                     || self.filter_policy != FilterPolicy::None
@@ -456,7 +473,6 @@ impl<'a> Rar50Writer<'a> {
                 Ok(ResolvedRar50WritePlan {
                     main_flags: 0,
                     archive_comment: None,
-                    encrypted_archive_comment: None,
                     archive_metadata: None,
                     quick_open: false,
                     recovery_percent: None,
@@ -546,8 +562,7 @@ impl<'a> Rar50Writer<'a> {
                     } else {
                         0
                     },
-                    archive_comment: self.archive_comment,
-                    encrypted_archive_comment: None,
+                    archive_comment: self.archive_comment.and_then(ArchiveComment::plain_only),
                     archive_metadata: self.archive_metadata,
                     quick_open: false,
                     recovery_percent: self.recovery_percent,
@@ -568,11 +583,7 @@ impl<'a> Rar50Writer<'a> {
                             .map(|member| member.encrypted_stored_password(self.options.target))
                             .collect::<Result<Vec<_>>>()?
                             .into_iter()
-                            .chain(
-                                self.encrypted_archive_comment
-                                    .iter()
-                                    .map(|comment| comment.password),
-                            )
+                            .chain(self.archive_comment.and_then(ArchiveComment::password))
                             .chain(self.recovery_password),
                     )?;
                     Some(header_encryption_keys(password)?)
@@ -588,8 +599,9 @@ impl<'a> Rar50Writer<'a> {
                 }
                 Ok(ResolvedRar50WritePlan {
                     main_flags: 0,
-                    archive_comment: None,
-                    encrypted_archive_comment: self.encrypted_archive_comment,
+                    archive_comment: self
+                        .archive_comment
+                        .and_then(ArchiveComment::encrypted_only),
                     archive_metadata: self.archive_metadata,
                     quick_open: false,
                     recovery_percent: self.recovery_percent,
@@ -599,7 +611,6 @@ impl<'a> Rar50Writer<'a> {
             }
             Rar50WriteMemberKind::EncryptedStoredWithServices => {
                 if self.archive_comment.is_some()
-                    || self.encrypted_archive_comment.is_some()
                     || self.archive_metadata.is_some()
                     || self.recovery_percent.is_some()
                     || self.filter_policy != FilterPolicy::None
@@ -639,7 +650,6 @@ impl<'a> Rar50Writer<'a> {
                 Ok(ResolvedRar50WritePlan {
                     main_flags: 0,
                     archive_comment: None,
-                    encrypted_archive_comment: None,
                     archive_metadata: None,
                     quick_open: false,
                     recovery_percent: None,
@@ -660,11 +670,7 @@ impl<'a> Rar50Writer<'a> {
                             .map(|member| member.encrypted_compressed_password(self.options.target))
                             .collect::<Result<Vec<_>>>()?
                             .into_iter()
-                            .chain(
-                                self.encrypted_archive_comment
-                                    .iter()
-                                    .map(|comment| comment.password),
-                            ),
+                            .chain(self.archive_comment.and_then(ArchiveComment::password)),
                     )?;
                     Some(header_encryption_keys(password)?)
                 } else {
@@ -734,8 +740,9 @@ impl<'a> Rar50Writer<'a> {
                     } else {
                         0
                     },
-                    archive_comment: None,
-                    encrypted_archive_comment: self.encrypted_archive_comment,
+                    archive_comment: self
+                        .archive_comment
+                        .and_then(ArchiveComment::encrypted_only),
                     archive_metadata: self.archive_metadata,
                     quick_open: false,
                     recovery_percent: self.recovery_percent,
@@ -869,8 +876,7 @@ fn mixed_member_plan_error(target: crate::ArchiveVersion) -> Error {
 
 struct ResolvedRar50WritePlan<'a> {
     main_flags: u64,
-    archive_comment: Option<&'a [u8]>,
-    encrypted_archive_comment: Option<EncryptedArchiveCommentEntry<'a>>,
+    archive_comment: Option<ArchiveComment<'a>>,
     archive_metadata: Option<ArchiveMetadataEntry<'a>>,
     quick_open: bool,
     recovery_percent: Option<u64>,
@@ -983,19 +989,28 @@ fn emit_resolved_writer_plan_pass(
         write_main_header(&mut out, main_flags, None, &main_extra)?;
     }
     if let Some(comment) = plan.archive_comment {
-        if plan.quick_open {
-            write_stored_service_with_cache(&mut out, &mut cached_headers, b"CMT", comment)?;
-        } else {
-            write_stored_service(&mut out, b"CMT", comment)?;
+        match comment {
+            ArchiveComment::Plain(comment) => {
+                if plan.quick_open {
+                    write_stored_service_with_cache(
+                        &mut out,
+                        &mut cached_headers,
+                        b"CMT",
+                        comment,
+                    )?;
+                } else {
+                    write_stored_service(&mut out, b"CMT", comment)?;
+                }
+            }
+            ArchiveComment::Encrypted(comment) => {
+                write_encrypted_stored_service_with_header_keys(
+                    &mut out,
+                    b"CMT",
+                    comment,
+                    plan.header_keys.as_ref().map(|keys| &keys.keys),
+                )?;
+            }
         }
-    }
-    if let Some(comment) = plan.encrypted_archive_comment {
-        write_encrypted_stored_service_with_header_keys(
-            &mut out,
-            b"CMT",
-            comment,
-            plan.header_keys.as_ref().map(|keys| &keys.keys),
-        )?;
     }
     for member in &plan.members {
         match member {
