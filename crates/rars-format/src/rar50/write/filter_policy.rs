@@ -21,6 +21,26 @@ pub(super) fn encode_member_with_filter_policy(
     }
 }
 
+pub(super) fn encode_member_with_filter_policy_candidates(
+    data: &[u8],
+    algorithm_version: u8,
+    policy: FilterPolicy,
+    candidates: &[EncodeOptions],
+) -> Result<Vec<u8>> {
+    let mut candidates = candidates.iter().copied();
+    let first = candidates.next().ok_or(Error::InvalidHeader(
+        "RAR 5 compression level has no encoder options",
+    ))?;
+    let mut best = encode_member_with_filter_policy(data, algorithm_version, policy, first)?;
+    for options in candidates {
+        let packed = encode_member_with_filter_policy(data, algorithm_version, policy, options)?;
+        if packed.len() < best.len() {
+            best = packed;
+        }
+    }
+    Ok(best)
+}
+
 pub(super) fn should_store_compressed_payload(
     data: &[u8],
     packed: &[u8],
@@ -86,6 +106,25 @@ pub(super) fn encode_options_for_level(
         .with_lazy_matching(matches!(level, None | Some(4..=5)))
         .with_lazy_lookahead(if matches!(level, Some(5)) { 4 } else { 1 })
         .with_max_match_distance(max_match_distance))
+}
+
+pub(super) fn encode_option_candidates_for_level(
+    level: Option<u8>,
+    dictionary_size: u64,
+) -> Result<Vec<EncodeOptions>> {
+    let primary = encode_options_for_level(level, dictionary_size)?;
+    let Some(level @ 2..=5) = level else {
+        return Ok(vec![primary]);
+    };
+
+    let mut candidates = vec![primary];
+    for fallback_level in (1..level).rev() {
+        candidates.push(encode_options_for_level(
+            Some(fallback_level),
+            dictionary_size,
+        )?);
+    }
+    Ok(candidates)
 }
 
 pub(super) fn validate_compression_level(options: WriterOptions) -> Result<()> {

@@ -6,11 +6,13 @@ use rars_recovery::rar5::build_structural_inline_recovery_data;
 
 mod filter_policy;
 mod volume;
+#[cfg(test)]
+use filter_policy::encode_member_with_filter_policy;
 use filter_policy::{
     compression_info, compression_method_for_level, dictionary_size_for_options,
-    encode_member_with_filter_policy, encode_options_for_level, encode_safe_lz_member,
-    encode_with_solid_reset_policy, rar50_algorithm_version, should_store_compressed_payload,
-    validate_compression_level,
+    encode_member_with_filter_policy_candidates, encode_option_candidates_for_level,
+    encode_options_for_level, encode_safe_lz_member, encode_with_solid_reset_policy,
+    rar50_algorithm_version, should_store_compressed_payload, validate_compression_level,
 };
 use volume::{
     write_compressed_volume_set_impl, write_encrypted_compressed_volume_set_impl,
@@ -420,6 +422,8 @@ impl<'a> Rar50Writer<'a> {
         let dictionary_size = dictionary_size_for_options(self.options)?;
         let encode_options =
             encode_options_for_level(self.options.compression_level, dictionary_size)?;
+        let encode_option_candidates =
+            encode_option_candidates_for_level(self.options.compression_level, dictionary_size)?;
 
         let mut resolved_members = Vec::with_capacity(self.members.len());
         match member_kind.unwrap_or(Rar50WriteMemberKind::Stored) {
@@ -529,11 +533,11 @@ impl<'a> Rar50Writer<'a> {
                         )?
                     } else {
                         (
-                            encode_member_with_filter_policy(
+                            encode_member_with_filter_policy_candidates(
                                 entry.data,
                                 algorithm_version,
                                 self.filter_policy,
-                                encode_options,
+                                &encode_option_candidates,
                             )?,
                             false,
                         )
@@ -705,7 +709,12 @@ impl<'a> Rar50Writer<'a> {
                         )?
                     } else {
                         (
-                            encode_safe_lz_member(entry.data, algorithm_version, encode_options)?,
+                            encode_member_with_filter_policy_candidates(
+                                entry.data,
+                                algorithm_version,
+                                FilterPolicy::None,
+                                &encode_option_candidates,
+                            )?,
                             false,
                         )
                     };
@@ -2596,6 +2605,55 @@ mod tests {
                 "RAR 5 v0 dictionary size must be a power-of-two multiple of 128 KiB"
             ))
         ));
+    }
+
+    #[test]
+    fn non_solid_level_five_keeps_smaller_lower_level_parse_when_best_search_loses() {
+        let long_tail = b"stable long match payload for RAR5 best-level search ".repeat(10);
+        let mut data = Vec::new();
+        data.extend_from_slice(b"abc");
+        data.extend_from_slice(&long_tail);
+        for index in 0..320usize {
+            data.extend_from_slice(b"abc");
+            data.push((index as u8).wrapping_mul(37));
+            data.extend_from_slice(b" near same-hash decoy ");
+            data.extend_from_slice(&(index as u32).to_le_bytes());
+        }
+        data.extend_from_slice(b"abc");
+        data.extend_from_slice(&long_tail);
+
+        let level_five = encode_options_for_level(Some(5), DEFAULT_RAR50_DICTIONARY_SIZE).unwrap();
+        let fallback_candidates =
+            encode_option_candidates_for_level(Some(5), DEFAULT_RAR50_DICTIONARY_SIZE).unwrap();
+
+        let level_five_only =
+            encode_member_with_filter_policy(&data, 0, FilterPolicy::None, level_five).unwrap();
+        let chosen = encode_member_with_filter_policy_candidates(
+            &data,
+            0,
+            FilterPolicy::None,
+            &fallback_candidates,
+        )
+        .unwrap();
+
+        assert!(
+            chosen.len() < level_five_only.len(),
+            "candidate fallback should avoid a larger level-5 parse: level5={} chosen={}",
+            level_five_only.len(),
+            chosen.len()
+        );
+
+        let mut decoder = rars_codec::rar50::Unpack50Decoder::new();
+        let output = decoder
+            .decode_member(
+                &chosen,
+                0,
+                data.len(),
+                false,
+                rars_codec::rar50::DecodeMode::Lz,
+            )
+            .unwrap();
+        assert_eq!(output, data);
     }
 
     #[test]
