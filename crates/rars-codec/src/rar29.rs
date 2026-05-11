@@ -620,10 +620,10 @@ fn encode_member_inner(
     {
         low_offset_frequencies[0] = 1;
     }
-    let main_lengths = huffman::uniform_lengths_for_frequencies(&main_frequencies);
-    let offset_lengths = huffman::uniform_lengths_for_frequencies(&offset_frequencies);
-    let low_offset_lengths = huffman::uniform_lengths_for_frequencies(&low_offset_frequencies);
-    let length_lengths = huffman::uniform_lengths_for_frequencies(&length_frequencies);
+    let main_lengths = huffman::lengths_for_frequencies(&main_frequencies, 15);
+    let offset_lengths = huffman::lengths_for_frequencies(&offset_frequencies, 15);
+    let low_offset_lengths = huffman::lengths_for_frequencies(&low_offset_frequencies, 15);
+    let length_lengths = huffman::lengths_for_frequencies(&length_frequencies, 15);
     table_lengths[..MAIN_COUNT].copy_from_slice(&main_lengths);
     table_lengths[MAIN_COUNT..MAIN_COUNT + OFFSET_COUNT].copy_from_slice(&offset_lengths);
     table_lengths[MAIN_COUNT + OFFSET_COUNT..MAIN_COUNT + OFFSET_COUNT + LOW_OFFSET_COUNT]
@@ -3124,7 +3124,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
     }
 
     #[test]
-    fn lz_encoder_uses_uniform_rar29_huffman_tables_for_external_decoder_compatibility() {
+    fn lz_encoder_uses_weighted_rar29_huffman_tables() {
         let mut input = Vec::new();
         for byte in 0u8..120 {
             input.push(b'A');
@@ -3141,7 +3141,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
             .filter(|&length| length != 0)
             .collect::<std::collections::BTreeSet<_>>();
 
-        assert_eq!(nonzero_lengths.len(), 1);
+        assert!(nonzero_lengths.len() > 1);
         assert_eq!(unpack29_decode(&packed, input.len()).unwrap(), input);
     }
 

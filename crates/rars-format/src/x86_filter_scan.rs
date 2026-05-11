@@ -3,8 +3,8 @@ use std::ops::Range;
 const AUTO_X86_CLUSTER_GAP: usize = 4096;
 const AUTO_X86_SPAN_CLUSTER_GAP: usize = 32768;
 const AUTO_X86_RANGE_PADDING: usize = 16;
-const AUTO_X86_MAX_RANGES: usize = 4;
-const AUTO_X86_MAX_SPAN_RANGES: usize = 2;
+const AUTO_X86_MAX_RANGES: usize = 8;
+const AUTO_X86_MAX_SPAN_RANGES: usize = 4;
 const AUTO_X86_MIN_SPAN_OPCODES: usize = 4;
 
 pub(crate) fn auto_x86_filter_ranges(data: &[u8], include_e9: bool) -> Vec<Range<usize>> {
@@ -135,5 +135,26 @@ mod tests {
 
         assert_eq!(ranges.len(), 1);
         assert_eq!(ranges[0], 1008..1151);
+    }
+
+    #[test]
+    fn keeps_more_disjoint_code_section_candidates() {
+        let mut data = vec![0x41u8; 700_000];
+        for section in 0..8 {
+            let start = 16_384 + section * 80_000;
+            for index in 0..6 {
+                data[start + index * 64] = 0xe8;
+            }
+        }
+
+        let ranges = auto_x86_filter_ranges(&data, false);
+
+        for section in 0..8 {
+            let start = 16_384 + section * 80_000;
+            assert!(
+                ranges.iter().any(|range| range.contains(&start)),
+                "missing x86 section at {start}"
+            );
+        }
     }
 }

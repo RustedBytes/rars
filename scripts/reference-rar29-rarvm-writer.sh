@@ -14,7 +14,6 @@ require_command() {
 require_command cargo
 require_command python3
 require_command wine
-require_command winepath
 
 if [[ -z "${RARS_WINRAR300_PREFIX:-}" || -z "${RARS_WINRAR420_PREFIX:-}" ]]; then
   cat >&2 <<'EOF'
@@ -103,9 +102,12 @@ run_unrar() {
   local prefix=$1
   local unrar=$2
   local archive=$3
-  local wine_archive
-  wine_archive="$(env WINEPREFIX="$prefix" winepath -w "$archive")"
-  env WINEPREFIX="$prefix" wine "$unrar" t "$wine_archive"
+  env WINEPREFIX="$prefix" wine "$unrar" t "$(wine_z_path "$archive")"
+}
+
+wine_z_path() {
+  local path=$1
+  printf 'Z:%s' "${path//\//\\}"
 }
 
 for archive in \

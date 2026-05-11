@@ -26,10 +26,6 @@
   they beat LZ. The `BoatModernEnglish` RAR20 fixture is no longer a regression;
   remaining work is oracle-guided tuning for hybrid audio/LZ switching on PCM
   fixtures and other wild audio regressions.
-- Reintroduce RAR29/RAR30/RAR40 frequency-weighted Huffman lengths only with
-  independent decoder-oracle coverage. The current writer deliberately uses
-  uniform LZ Huffman tables after weighted Main tables produced streams that
-  rars could decode but `rar` rejected on real recompress payloads.
 - Improve RAR50/RAR70 ratio policy beyond the current baseline. Wire-level
   method stamping, stored fallback, lazy matching, state-aware match costs,
   repeat-distance candidates, bounded cost-aware lookahead, frequency-weighted
@@ -50,15 +46,12 @@
   stable behaviour.
 - Maintain local oracle scripts:
   `reference-rar5-writer.sh`, `reference-rar5-recovery-repair.sh`,
-  `reference-rar29-rarvm-writer.sh`, `reference-rar3-aes-writer.sh`, and
-  `reference-rar70-large-dict.sh`.
+  `reference-rar29-rarvm-writer.sh`, `reference-rar29-level-writer.sh`,
+  `reference-rar3-aes-writer.sh`, and `reference-rar70-large-dict.sh`.
 - Run `./scripts/coverage.py` periodically.
 
 ## Deferred
 
-- Define legacy byte-encoding policy for RAR3 passwords and archive names.
-  Avoid silent `from_utf8_lossy` derivation; either reject non-UTF-8 bytes
-  clearly or implement the intended legacy byte-to-wide/code-page mapping.
 - Add a RAR 1.5-4.x writer builder only if another independent option axis
   lands there.
 - Keep `reference-rar70-large-dict.sh` reproducible for external Unpack70
