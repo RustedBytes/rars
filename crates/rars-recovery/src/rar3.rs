@@ -16,7 +16,9 @@ impl std::fmt::Display for Error {
         match self {
             Self::InvalidParitySize => f.write_str("RAR 3 recovery parity size is invalid"),
             Self::InvalidCodewordSize => f.write_str("RAR 3 recovery codeword size is invalid"),
-            Self::TooManyErasures => f.write_str("RAR 3 recovery has too many erasures"),
+            Self::TooManyErasures => {
+                f.write_str("RAR 3 recovery data cannot repair this many erasures")
+            }
             Self::DecodeFailed => f.write_str("RAR 3 recovery decode failed"),
         }
     }

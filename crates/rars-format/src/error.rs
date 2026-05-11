@@ -74,6 +74,7 @@ pub enum Error {
     Codec(rars_codec::Error),
     Rar3Recovery(rars_recovery::rar3::Error),
     Rar5Recovery(rars_recovery::rar5::Error),
+    Rar20Crypto(rars_crypto::rar20::Error),
     Rar30Crypto(rars_crypto::rar30::Error),
     Rar50Crypto(rars_crypto::rar50::Error),
 }
@@ -140,11 +141,12 @@ impl std::fmt::Display for Error {
             Self::HashMismatch { hash_type } => {
                 write!(f, "hash mismatch for hash type {hash_type}")
             }
-            Self::Codec(error) => write!(f, "{}", display_codec_error(error)),
-            Self::Rar3Recovery(error) => write!(f, "{}", display_rar3_recovery_error(error)),
-            Self::Rar5Recovery(error) => write!(f, "{}", display_rar5_recovery_error(error)),
-            Self::Rar30Crypto(error) => write!(f, "{}", display_rar30_crypto_error(error)),
-            Self::Rar50Crypto(error) => write!(f, "{}", display_rar50_crypto_error(error)),
+            Self::Codec(error) => write!(f, "{error}"),
+            Self::Rar3Recovery(error) => write!(f, "{error}"),
+            Self::Rar5Recovery(error) => write!(f, "{error}"),
+            Self::Rar20Crypto(error) => write!(f, "{error}"),
+            Self::Rar30Crypto(error) => write!(f, "{error}"),
+            Self::Rar50Crypto(error) => write!(f, "{error}"),
         }
     }
 }
@@ -166,6 +168,7 @@ impl std::error::Error for Error {
             Self::Codec(source) => Some(source),
             Self::Rar3Recovery(source) => Some(source),
             Self::Rar5Recovery(source) => Some(source),
+            Self::Rar20Crypto(source) => Some(source),
             Self::Rar30Crypto(source) => Some(source),
             Self::Rar50Crypto(source) => Some(source),
             Self::Io(source) => Some(source.source()),
@@ -209,6 +212,12 @@ impl From<rars_recovery::rar3::Error> for Error {
     }
 }
 
+impl From<rars_crypto::rar20::Error> for Error {
+    fn from(error: rars_crypto::rar20::Error) -> Self {
+        Self::Rar20Crypto(error)
+    }
+}
+
 impl From<rars_crypto::rar30::Error> for Error {
     fn from(error: rars_crypto::rar30::Error) -> Self {
         Self::Rar30Crypto(error)
@@ -218,63 +227,6 @@ impl From<rars_crypto::rar30::Error> for Error {
 impl From<rars_crypto::rar50::Error> for Error {
     fn from(error: rars_crypto::rar50::Error) -> Self {
         Self::Rar50Crypto(error)
-    }
-}
-
-fn display_codec_error(error: &rars_codec::Error) -> &'static str {
-    match error {
-        rars_codec::Error::InvalidData(message) => message,
-        rars_codec::Error::NeedMoreInput => "codec input is truncated",
-        _ => "codec error",
-    }
-}
-
-fn display_rar5_recovery_error(error: &rars_recovery::rar5::Error) -> &'static str {
-    match error {
-        rars_recovery::rar5::Error::BadRecoveryChunk => "RAR 5 recovery chunk is invalid",
-        rars_recovery::rar5::Error::OddShardSize => "RAR 5 recovery shard size is odd",
-        rars_recovery::rar5::Error::PlanOverflow => "RAR 5 recovery plan overflows",
-        rars_recovery::rar5::Error::PrefixExceedsPlan => {
-            "RAR 5 recovery prefix exceeds planned shard capacity"
-        }
-        rars_recovery::rar5::Error::TooManyDamagedShards => {
-            "RAR 5 recovery data cannot repair this many damaged shards"
-        }
-        rars_recovery::rar5::Error::ShardSizeMismatch => "RAR 5 recovery shard sizes differ",
-        rars_recovery::rar5::Error::TooManyShards => "RAR 5 recovery shard count is invalid",
-        rars_recovery::rar5::Error::SingularElement => "RAR 5 recovery matrix is singular",
-        _ => "RAR 5 recovery error",
-    }
-}
-
-fn display_rar3_recovery_error(error: &rars_recovery::rar3::Error) -> &'static str {
-    match error {
-        rars_recovery::rar3::Error::InvalidParitySize => "RAR 3 recovery parity size is invalid",
-        rars_recovery::rar3::Error::InvalidCodewordSize => {
-            "RAR 3 recovery codeword size is invalid"
-        }
-        rars_recovery::rar3::Error::TooManyErasures => {
-            "RAR 3 recovery data cannot repair this many erasures"
-        }
-        rars_recovery::rar3::Error::DecodeFailed => "RAR 3 recovery decode failed",
-        _ => "RAR 3 recovery error",
-    }
-}
-
-fn display_rar30_crypto_error(error: &rars_crypto::rar30::Error) -> &'static str {
-    match error {
-        rars_crypto::rar30::Error::NonUtf8Password => "RAR 3.x password is not UTF-8",
-        rars_crypto::rar30::Error::UnalignedInput => "RAR 3.x AES input is not block aligned",
-        _ => "RAR 3.x crypto error",
-    }
-}
-
-fn display_rar50_crypto_error(error: &rars_crypto::rar50::Error) -> &'static str {
-    match error {
-        rars_crypto::rar50::Error::KdfCountTooLarge => "RAR 5 KDF count is too large",
-        rars_crypto::rar50::Error::BadPassword => "wrong password or corrupt encrypted data",
-        rars_crypto::rar50::Error::UnalignedInput => "RAR 5 AES input is not block aligned",
-        _ => "RAR 5 crypto error",
     }
 }
 
@@ -388,7 +340,7 @@ mod tests {
         assert_eq!(error.to_string(), "codec input is truncated");
         assert_eq!(
             std::error::Error::source(&error).map(ToString::to_string),
-            Some("more input is required".to_string())
+            Some("codec input is truncated".to_string())
         );
     }
 
@@ -433,6 +385,24 @@ mod tests {
         assert_eq!(
             std::error::Error::source(&error).map(ToString::to_string),
             Some("RAR 3.x AES input is not block aligned".to_string())
+        );
+    }
+
+    #[test]
+    fn rar20_crypto_errors_remain_in_source_chain() {
+        let error = Error::from(rars_crypto::rar20::Error::UnalignedInput);
+
+        assert!(matches!(
+            error,
+            Error::Rar20Crypto(rars_crypto::rar20::Error::UnalignedInput)
+        ));
+        assert_eq!(
+            error.to_string(),
+            "RAR 2.0 cipher input is not block aligned"
+        );
+        assert_eq!(
+            std::error::Error::source(&error).map(ToString::to_string),
+            Some("RAR 2.0 cipher input is not block aligned".to_string())
         );
     }
 

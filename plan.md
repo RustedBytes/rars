@@ -6,9 +6,6 @@
   either repair those overlap sectors correctly or document the unsupported
   layout explicitly.
 - Add adversarial PPMd fixtures as corpus bugs appear.
-- Make nested error display exhaustive or delegate to `Display` on inner error
-  enums so new codec/crypto/recovery variants cannot silently collapse to a
-  generic message.
 - Add remaining fuzz targets for RAR 3.x recovery records and RAR 3.x AES
   streams. Existing fuzz targets cover archive parsing, Unpack29, PPMd,
   RARVM, Unpack50, RAR5 recovery, and RAR50 crypto.

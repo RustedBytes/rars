@@ -1103,9 +1103,7 @@ fn encrypt_split_packed_data(
         ArchiveVersion::Rar20 => {
             let padded_len = checked_align16(data.len(), RAR15_ALIGN_OVERFLOW)?;
             data.resize(padded_len, 0);
-            Rar20Cipher::new(password)
-                .encrypt_in_place(data)
-                .map_err(Error::InvalidHeader)?;
+            Rar20Cipher::new(password).encrypt_in_place(data)?;
             Ok(None)
         }
         ArchiveVersion::Rar29 | ArchiveVersion::Rar30 | ArchiveVersion::Rar40 => {
@@ -1168,9 +1166,7 @@ fn encrypt_packed_data_for_writer(
         ArchiveVersion::Rar20 => {
             let padded_len = checked_align16(data.len(), RAR15_ALIGN_OVERFLOW)?;
             data.resize(padded_len, 0);
-            Rar20Cipher::new(password)
-                .encrypt_in_place(data)
-                .map_err(Error::InvalidHeader)?;
+            Rar20Cipher::new(password).encrypt_in_place(data)?;
             Ok(None)
         }
         ArchiveVersion::Rar29 | ArchiveVersion::Rar30 | ArchiveVersion::Rar40 => {

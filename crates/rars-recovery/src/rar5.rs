@@ -38,8 +38,8 @@ impl std::fmt::Display for Error {
             Self::TooManyDamagedShards => {
                 f.write_str("RAR 5 recovery data cannot repair this many damaged shards")
             }
-            Self::ShardSizeMismatch => f.write_str("RAR 5 recovery shard sizes do not match"),
-            Self::TooManyShards => f.write_str("RAR 5 recovery has too many shards"),
+            Self::ShardSizeMismatch => f.write_str("RAR 5 recovery shard sizes differ"),
+            Self::TooManyShards => f.write_str("RAR 5 recovery shard count is invalid"),
             Self::SingularElement => f.write_str("RAR 5 recovery matrix is singular"),
         }
     }

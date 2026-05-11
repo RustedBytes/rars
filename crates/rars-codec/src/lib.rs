@@ -20,7 +20,7 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidData(msg) => write!(f, "{msg}"),
-            Self::NeedMoreInput => write!(f, "more input is required"),
+            Self::NeedMoreInput => write!(f, "codec input is truncated"),
         }
     }
 }

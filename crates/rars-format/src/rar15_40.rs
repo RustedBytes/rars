@@ -575,6 +575,7 @@ impl FileHeader {
             | Error::Codec(_)
             | Error::Rar3Recovery(_)
             | Error::Rar5Recovery(_)
+            | Error::Rar20Crypto(_)
             | Error::Rar30Crypto(_)
             | Error::Rar50Crypto(_)
             | Error::CrcMismatch { .. }

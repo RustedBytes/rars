@@ -1202,7 +1202,7 @@ fn map_rar50_crypto_error(error: rars_crypto::rar50::Error) -> Error {
         rars_crypto::rar50::Error::UnalignedInput => {
             Error::InvalidHeader("RAR 5 AES input is not block aligned")
         }
-        _ => Error::InvalidHeader("RAR 5 crypto error"),
+        other => Error::Rar50Crypto(other),
     }
 }
 

@@ -18,6 +18,24 @@ const INIT_SUBST_TABLE: [u8; 256] = [
 
 const INIT_KEY: [u32; 4] = [0xd3a3_b879, 0x3f6d_12f7, 0x7515_a235, 0xa4e7_f123];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Error {
+    UnalignedInput,
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnalignedInput => f.write_str("RAR 2.0 cipher input is not block aligned"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+pub type Result<T> = std::result::Result<T, Error>;
+
 pub struct Rar20Cipher {
     key: [u32; 4],
     subst: [u8; 256],
@@ -33,9 +51,9 @@ impl Rar20Cipher {
         cipher
     }
 
-    pub fn decrypt_in_place(&mut self, data: &mut [u8]) -> Result<(), &'static str> {
+    pub fn decrypt_in_place(&mut self, data: &mut [u8]) -> Result<()> {
         if !data.len().is_multiple_of(16) {
-            return Err("RAR 2.0 cipher input is not block aligned");
+            return Err(Error::UnalignedInput);
         }
         for block in data.chunks_exact_mut(16) {
             self.decrypt_block(block);
@@ -43,9 +61,9 @@ impl Rar20Cipher {
         Ok(())
     }
 
-    pub fn encrypt_in_place(&mut self, data: &mut [u8]) -> Result<(), &'static str> {
+    pub fn encrypt_in_place(&mut self, data: &mut [u8]) -> Result<()> {
         if !data.len().is_multiple_of(16) {
-            return Err("RAR 2.0 cipher input is not block aligned");
+            return Err(Error::UnalignedInput);
         }
         for block in data.chunks_exact_mut(16) {
             self.encrypt_block(block);
@@ -156,7 +174,7 @@ fn write_block(block: &mut [u8], a: u32, b: u32, c: u32, d: u32) {
 
 #[cfg(test)]
 mod tests {
-    use super::Rar20Cipher;
+    use super::{Error, Rar20Cipher};
 
     #[test]
     fn rar20_encrypt_decrypt_round_trips_blocks() {
@@ -188,12 +206,12 @@ mod tests {
 
         assert_eq!(
             Rar20Cipher::new(b"password").encrypt_in_place(&mut data),
-            Err("RAR 2.0 cipher input is not block aligned")
+            Err(Error::UnalignedInput)
         );
         assert_eq!(data, original);
         assert_eq!(
             Rar20Cipher::new(b"password").decrypt_in_place(&mut data),
-            Err("RAR 2.0 cipher input is not block aligned")
+            Err(Error::UnalignedInput)
         );
         assert_eq!(data, original);
     }
