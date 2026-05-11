@@ -5,13 +5,6 @@
 
 ## Compression Work
 
-- Keep an eye on RAR29 PPMd/LZSS conversion in wild recompression. The known
-  libarchive PPMd/LZSS outlier now recompresses to valid, compact archives
-  after preserving RAR4 dictionary bits, preventing level-3 LZ recompress from
-  silently switching to PPMd, and using period-compatible PPMd LZ escape
-  lengths. `test_read_format_rar_multi_lzss_blocks.rar` is wire-correct and
-  compact with `m5`/auto/PPMd, but method-preserving `m3` LZ recompress remains
-  a ratio outlier.
 - Revisit RAR 1.4 old-distance token emission with DOS RAR 1.402 oracle
   coverage. The writer currently avoids that compatibility-sensitive
   vocabulary and relies on repeat-last, short-LZ, and long-LZ matches.

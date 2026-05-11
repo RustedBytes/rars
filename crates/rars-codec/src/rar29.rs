@@ -406,6 +406,7 @@ pub struct EncodeOptions {
     pub lazy_matching: bool,
     pub lazy_lookahead: usize,
     pub max_match_distance: usize,
+    pub block_size: Option<usize>,
 }
 
 impl EncodeOptions {
@@ -415,6 +416,7 @@ impl EncodeOptions {
             lazy_matching: false,
             lazy_lookahead: 1,
             max_match_distance: MAX_ENCODER_MATCH_OFFSET,
+            block_size: None,
         }
     }
 
@@ -430,6 +432,11 @@ impl EncodeOptions {
 
     pub const fn with_max_match_distance(mut self, distance: usize) -> Self {
         self.max_match_distance = distance;
+        self
+    }
+
+    pub const fn with_block_size(mut self, bytes: usize) -> Self {
+        self.block_size = Some(bytes);
         self
     }
 }
@@ -521,7 +528,32 @@ fn encode_member_with_options(
     history: &[u8],
     options: EncodeOptions,
 ) -> Result<Vec<u8>> {
+    if let Some(block_size) = options.block_size.filter(|&size| size != 0) {
+        if input.len() > block_size {
+            return encode_member_blocks(input, history, options, block_size);
+        }
+    }
     encode_member_inner(input, history, &[], options)
+}
+
+fn encode_member_blocks(
+    input: &[u8],
+    history: &[u8],
+    mut options: EncodeOptions,
+    block_size: usize,
+) -> Result<Vec<u8>> {
+    options.block_size = None;
+    let mut out = Vec::new();
+    let mut local_history = history[history.len().saturating_sub(MAX_HISTORY)..].to_vec();
+    for chunk in input.chunks(block_size) {
+        out.extend_from_slice(&encode_member_inner(chunk, &local_history, &[], options)?);
+        local_history.extend_from_slice(chunk);
+        let keep_from = local_history.len().saturating_sub(MAX_HISTORY);
+        if keep_from != 0 {
+            local_history.drain(..keep_from);
+        }
+    }
+    Ok(out)
 }
 
 fn encode_member_with_initial_filters(
@@ -2856,6 +2888,31 @@ mod tests {
         let packed = unpack29_encode_literals(input).unwrap();
 
         assert_eq!(unpack29_decode(&packed, input.len()).unwrap(), input);
+    }
+
+    #[test]
+    fn multi_block_lz_encoding_improves_large_repeated_documents() {
+        let seed = b"<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.0 Transitional//EN\">\n\
+<HTML><BODY><P>RAR29 repeated document body with enough structured text to \
+exercise LZSS block table selection.</P></BODY></HTML>\n"
+            .repeat(96);
+        let input = seed.repeat(180);
+        let single =
+            super::encode_member_with_options(&input, &[], EncodeOptions::new(96)).unwrap();
+        let blocked = super::encode_member_with_options(
+            &input,
+            &[],
+            EncodeOptions::new(96).with_block_size(1024 * 1024),
+        )
+        .unwrap();
+
+        assert_eq!(unpack29_decode(&blocked, input.len()).unwrap(), input);
+        assert!(
+            blocked.len() * 4 < single.len() * 3,
+            "blocked={} single={}",
+            blocked.len(),
+            single.len()
+        );
     }
 
     #[test]

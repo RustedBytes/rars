@@ -16,6 +16,7 @@ const RAR29_LARGE_TEXT_PPMD_THRESHOLD: usize = 16 * 1024 * 1024;
 const RAR29_TEXT_SAMPLE_SIZE: usize = 8192;
 const RAR29_AUDIO_SAMPLE_SIZE: usize = 8192;
 const RAR29_MAX_MATCH_CANDIDATES_DEFAULT: usize = 256;
+const RAR29_LZ_BLOCK_SIZE: usize = 1024 * 1024;
 const RAR15_ALIGN_OVERFLOW: &str = "RAR 1.5 block size overflows usize";
 
 pub fn write_stored_archive(
@@ -839,7 +840,8 @@ fn rar29_encode_options_for_level(level: Option<u8>) -> Result<Rar29EncodeOption
     };
     Ok(Rar29EncodeOptions::new(candidates)
         .with_lazy_matching(level >= 4)
-        .with_lazy_lookahead(if level >= 5 { 4 } else { 1 }))
+        .with_lazy_lookahead(if level >= 5 { 4 } else { 1 })
+        .with_block_size(RAR29_LZ_BLOCK_SIZE))
 }
 
 fn rar29_encode_options_for_options(options: WriterOptions) -> Result<Rar29EncodeOptions> {
