@@ -230,43 +230,13 @@ impl Unpack15Encoder {
             let mut flags = 0u8;
             let mut flag_bits = 0usize;
             let mut payloads = Vec::new();
-            let mut plan_nhfb = self.nhfb;
-            let mut plan_nlzb = self.nlzb;
-            let mut plan_last_dist = self.last_dist;
-            let mut plan_last_length = self.last_length;
-            let mut plan_old_dist = self.old_dist;
-            let mut plan_old_dist_ptr = self.old_dist_ptr;
-            let mut plan_avr_ln2 = self.avr_ln2;
-            let mut plan_avr_ln3 = self.avr_ln3;
-            let mut plan_max_dist3 = self.max_dist3;
-            let mut plan_l_count = self.l_count;
-            let mut plan_num_huf = self.num_huf;
+            let mut plan_encoder = self.clone_for_planning();
             let mut group_enters_stmode = false;
-            let mut group_has_literal = false;
-            let mut group_has_adaptive_lz = false;
 
             while flag_bits < 8 && pos < input.len() {
-                if let Some(token) = self
-                    .choose_lz_token(
-                        input,
-                        pos,
-                        &buckets,
-                        LzPlanState {
-                            last_dist: plan_last_dist,
-                            last_length: plan_last_length,
-                            old_dist: plan_old_dist,
-                            old_dist_ptr: plan_old_dist_ptr,
-                            max_dist3: plan_max_dist3,
-                            nlzb: plan_nlzb,
-                            nhfb: plan_nhfb,
-                            l_count: plan_l_count,
-                        },
-                        flag_bits,
-                    )
-                    .filter(|token| {
-                        !(matches!(token, EncodedToken::LongLz(_) | EncodedToken::OldDist(_))
-                            && (group_has_literal || group_has_adaptive_lz))
-                    })
+                let state = plan_encoder.lz_plan_state();
+                if let Some(token) = plan_encoder
+                    .choose_lz_token(input, pos, &buckets, state, flag_bits)
                     .filter(|token| {
                         !self.options.lazy_matching
                             || !should_lazy_emit_literal(
@@ -274,12 +244,12 @@ impl Unpack15Encoder {
                                 pos,
                                 &buckets,
                                 *token,
-                                plan_max_dist3,
+                                state.max_dist3,
                                 self.options,
                             )
                     })
                 {
-                    let flag = token.flag_bits(plan_nlzb, plan_nhfb);
+                    let flag = token.flag_bits(state.nlzb, state.nhfb);
                     let next_pos = pos + token.length() as usize;
                     let leaves_unfillable_flag_bit =
                         flag_bits + flag.len() == 7 && next_pos < input.len();
@@ -287,50 +257,25 @@ impl Unpack15Encoder {
                         write_planned_flag_bits(&mut flags, flag_bits, flag);
                         flag_bits += flag.len();
                         pos = next_pos;
-                        token.plan_effect(&mut plan_nhfb, &mut plan_nlzb);
-                        token.plan_l_count_effect(&mut plan_l_count);
-                        token.plan_num_huf_effect(&mut plan_num_huf);
-                        if let EncodedToken::LongLz(long_lz) = token {
-                            plan_long_lz_adaptive_effect(
-                                long_lz,
-                                &mut plan_avr_ln2,
-                                &mut plan_avr_ln3,
-                                self.avr_plc,
-                                &mut plan_max_dist3,
-                            );
-                        }
-                        if matches!(token, EncodedToken::LongLz(_) | EncodedToken::OldDist(_)) {
-                            group_has_adaptive_lz = true;
-                        }
-                        if let Some((distance, length)) = token.match_state() {
-                            plan_remember_match(
-                                &mut plan_old_dist,
-                                &mut plan_old_dist_ptr,
-                                &mut plan_last_dist,
-                                &mut plan_last_length,
-                                distance,
-                                length,
-                            );
-                        }
+                        plan_encoder.emit_payloads(vec![token])?;
                         payloads.push(token);
                         continue;
                     }
                 }
 
-                let flag = huff_flag_bits(plan_nlzb <= plan_nhfb);
+                let flag = huff_flag_bits(plan_encoder.nlzb <= plan_encoder.nhfb);
                 if flag_bits + flag.len() > 8 {
                     break;
                 }
                 write_planned_flag_bits(&mut flags, flag_bits, flag);
+                let literal = input[pos];
                 payloads.push(EncodedToken::Literal(input[pos]));
                 flag_bits += flag.len();
-                if flag_bits == 8 && plan_num_huf >= 16 && pos + 1 < input.len() {
+                if flag_bits == 8 && plan_encoder.num_huf >= 16 && pos + 1 < input.len() {
                     group_enters_stmode = true;
                 }
-                plan_num_huf += 1;
                 pos += 1;
-                group_has_literal = true;
-                plan_huff_effect(&mut plan_nhfb, &mut plan_nlzb);
+                plan_encoder.emit_literal(literal)?;
             }
 
             self.emit_flags_byte(flags)?;
@@ -343,6 +288,49 @@ impl Unpack15Encoder {
             }
         }
         Ok(std::mem::take(&mut self.bits).finish())
+    }
+
+    fn clone_for_planning(&self) -> Self {
+        Self {
+            bits: BitWriter::new(),
+            options: self.options,
+            ch_set: self.ch_set,
+            ch_set_c: self.ch_set_c,
+            ch_set_b: self.ch_set_b,
+            n_to_pl: self.n_to_pl,
+            n_to_pl_b: self.n_to_pl_b,
+            n_to_pl_c: self.n_to_pl_c,
+            ch_set_a: self.ch_set_a,
+            avr_plc: self.avr_plc,
+            avr_plc_b: self.avr_plc_b,
+            avr_ln1: self.avr_ln1,
+            avr_ln2: self.avr_ln2,
+            avr_ln3: self.avr_ln3,
+            max_dist3: self.max_dist3,
+            nhfb: self.nhfb,
+            nlzb: self.nlzb,
+            num_huf: self.num_huf,
+            old_dist: self.old_dist,
+            old_dist_ptr: self.old_dist_ptr,
+            last_dist: self.last_dist,
+            last_length: self.last_length,
+            l_count: self.l_count,
+            #[cfg(test)]
+            stmode_literal_count: self.stmode_literal_count,
+        }
+    }
+
+    fn lz_plan_state(&self) -> LzPlanState {
+        LzPlanState {
+            last_dist: self.last_dist,
+            last_length: self.last_length,
+            old_dist: self.old_dist,
+            old_dist_ptr: self.old_dist_ptr,
+            max_dist3: self.max_dist3,
+            nlzb: self.nlzb,
+            nhfb: self.nhfb,
+            l_count: self.l_count,
+        }
     }
 
     fn choose_lz_token(
@@ -937,40 +925,6 @@ impl EncodedToken {
             Self::ShortLz(_) | Self::RepeatLast(_) | Self::OldDist(_) => &[false, false],
         }
     }
-
-    fn plan_effect(self, nhfb: &mut u32, nlzb: &mut u32) {
-        match self {
-            Self::Literal(_) => plan_huff_effect(nhfb, nlzb),
-            Self::LongLz(_) => plan_long_lz_effect(nhfb, nlzb),
-            Self::ShortLz(_) | Self::RepeatLast(_) | Self::OldDist(_) => {}
-        }
-    }
-
-    fn plan_l_count_effect(self, l_count: &mut u32) {
-        match self {
-            Self::RepeatLast(_) if *l_count < 2 => *l_count += 1,
-            Self::ShortLz(_) | Self::OldDist(_) => *l_count = 0,
-            Self::Literal(_) | Self::RepeatLast(_) | Self::LongLz(_) => {}
-        }
-    }
-
-    fn plan_num_huf_effect(self, num_huf: &mut u32) {
-        match self {
-            Self::Literal(_) => *num_huf += 1,
-            Self::ShortLz(_) | Self::RepeatLast(_) | Self::OldDist(_) | Self::LongLz(_) => {
-                *num_huf = 0;
-            }
-        }
-    }
-
-    fn match_state(self) -> Option<(u32, u32)> {
-        match self {
-            Self::Literal(_) | Self::RepeatLast(_) => None,
-            Self::ShortLz(token) => Some((token.distance, token.length)),
-            Self::OldDist(token) => Some((token.distance, token.length)),
-            Self::LongLz(token) => Some((token.distance, token.length)),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1030,60 +984,8 @@ fn plan_huff_effect(nhfb: &mut u32, nlzb: &mut u32) {
     }
 }
 
-fn plan_long_lz_effect(nhfb: &mut u32, nlzb: &mut u32) {
-    *nlzb += 16;
-    if *nlzb > 0xff {
-        *nlzb = 0x90;
-        *nhfb >>= 1;
-    }
-}
-
 fn l_count_break_bit_cost(l_count: u32) -> usize {
     usize::from(l_count == 2)
-}
-
-fn plan_remember_match(
-    old_dist: &mut [u32; 4],
-    old_dist_ptr: &mut usize,
-    last_dist: &mut u32,
-    last_length: &mut u32,
-    distance: u32,
-    length: u32,
-) {
-    old_dist[*old_dist_ptr] = distance;
-    *old_dist_ptr = (*old_dist_ptr + 1) & 3;
-    *last_dist = distance;
-    *last_length = length;
-}
-
-fn plan_long_lz_adaptive_effect(
-    long_lz: LongLz,
-    avr_ln2: &mut u32,
-    avr_ln3: &mut u32,
-    avr_plc: u32,
-    max_dist3: &mut u32,
-) {
-    let old_avr2 = *avr_ln2;
-    let old_avr3 = *avr_ln3;
-    let Some(length_code) = long_lz_length_code_for_distance(long_lz, *max_dist3) else {
-        return;
-    };
-
-    *avr_ln2 += length_code;
-    *avr_ln2 -= *avr_ln2 >> 5;
-    if length_code != 1 && length_code != 4 {
-        if length_code == 0 && long_lz.distance <= *max_dist3 {
-            *avr_ln3 += 1;
-            *avr_ln3 -= *avr_ln3 >> 8;
-        } else if *avr_ln3 > 0 {
-            *avr_ln3 -= 1;
-        }
-    }
-    if old_avr3 > 0xb0 || (avr_plc >= 0x2a00 && old_avr2 < 0x40) {
-        *max_dist3 = 0x7f00;
-    } else {
-        *max_dist3 = 0x2001;
-    }
 }
 
 fn find_lz_token(

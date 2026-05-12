@@ -1330,11 +1330,19 @@ fn creates_rar29_archives_with_distinct_compression_levels() {
         stderr(&create_auto)
     );
 
-    let lz_info = rars().args(["info", "-v"]).arg(&level_three).output().unwrap();
+    let lz_info = rars()
+        .args(["info", "-v"])
+        .arg(&level_three)
+        .output()
+        .unwrap();
     assert!(lz_info.status.success(), "stderr: {}", stderr(&lz_info));
     assert!(stdout(&lz_info).contains("method=0x33"));
 
-    let auto_info = rars().args(["info", "-v"]).arg(&level_five).output().unwrap();
+    let auto_info = rars()
+        .args(["info", "-v"])
+        .arg(&level_five)
+        .output()
+        .unwrap();
     assert!(auto_info.status.success(), "stderr: {}", stderr(&auto_info));
     assert!(stdout(&auto_info).contains("method=0x35"));
 
