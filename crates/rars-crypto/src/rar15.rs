@@ -1,5 +1,7 @@
 use rars_crc32::{crc32_raw, table_entry as crc32_table_entry};
+use zeroize::ZeroizeOnDrop;
 
+#[derive(ZeroizeOnDrop)]
 pub struct Rar15Cipher {
     key: [u16; 4],
 }

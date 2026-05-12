@@ -2,6 +2,13 @@ use crate::{CliError, CliResult};
 use rars::{Archive as DetectedArchive, ArchiveReadOptions, ArchiveReader, Error};
 use std::fs;
 use std::io::IsTerminal;
+use zeroize::Zeroizing;
+
+pub(crate) type Password = Zeroizing<Vec<u8>>;
+
+pub(crate) fn password_bytes(password: &Option<Password>) -> Option<&[u8]> {
+    password.as_deref().map(Vec::as_slice)
+}
 
 fn read_options(password: Option<&[u8]>) -> ArchiveReadOptions<'_> {
     match password {
@@ -10,7 +17,7 @@ fn read_options(password: Option<&[u8]>) -> ArchiveReadOptions<'_> {
     }
 }
 
-pub(crate) fn parse_password(args: &[String]) -> CliResult<(Option<Vec<u8>>, Vec<String>)> {
+pub(crate) fn parse_password(args: &[String]) -> CliResult<(Option<Password>, Vec<String>)> {
     let mut password = None;
     let mut rest = Vec::new();
     let mut iter = args.iter();
@@ -26,7 +33,7 @@ pub(crate) fn parse_password(args: &[String]) -> CliResult<(Option<Vec<u8>>, Vec
                 let path = iter
                     .next()
                     .ok_or_else(|| CliError::usage("missing --password-file value"))?;
-                let bytes = fs::read(path)?;
+                let bytes = Zeroizing::new(fs::read(path)?);
                 set_password(&mut password, trim_password_line(bytes))?;
             }
             _ => rest.push(arg.clone()),
@@ -35,7 +42,7 @@ pub(crate) fn parse_password(args: &[String]) -> CliResult<(Option<Vec<u8>>, Vec
     Ok((password, rest))
 }
 
-fn set_password(slot: &mut Option<Vec<u8>>, value: Vec<u8>) -> CliResult<()> {
+fn set_password(slot: &mut Option<Password>, value: Password) -> CliResult<()> {
     if slot.is_some() {
         return Err(CliError::usage("password was provided more than once"));
     }
@@ -43,16 +50,16 @@ fn set_password(slot: &mut Option<Vec<u8>>, value: Vec<u8>) -> CliResult<()> {
     Ok(())
 }
 
-fn read_password_value(value: &str) -> CliResult<Vec<u8>> {
+fn read_password_value(value: &str) -> CliResult<Password> {
     if value == "-" {
-        let mut bytes = Vec::new();
+        let mut bytes = Zeroizing::new(Vec::new());
         std::io::Read::read_to_end(&mut std::io::stdin(), &mut bytes)?;
         return Ok(trim_password_line(bytes));
     }
-    Ok(value.as_bytes().to_vec())
+    Ok(Zeroizing::new(value.as_bytes().to_vec()))
 }
 
-fn trim_password_line(mut bytes: Vec<u8>) -> Vec<u8> {
+fn trim_password_line(mut bytes: Password) -> Password {
     while matches!(bytes.last(), Some(b'\n' | b'\r')) {
         bytes.pop();
     }
@@ -61,14 +68,14 @@ fn trim_password_line(mut bytes: Vec<u8>) -> Vec<u8> {
 
 pub(crate) fn read_archive_path_prompting(
     path: &str,
-    password: &mut Option<Vec<u8>>,
+    password: &mut Option<Password>,
 ) -> CliResult<DetectedArchive> {
-    match ArchiveReader::read_path_with_options(path, read_options(password.as_deref())) {
+    match ArchiveReader::read_path_with_options(path, read_options(password_bytes(password))) {
         Ok(archive) => Ok(archive),
         Err(error) if password.is_none() && error_needs_password(&error) => {
             if let Some(prompted) = prompt_password_if_tty()? {
                 *password = Some(prompted);
-                ArchiveReader::read_path_with_options(path, read_options(password.as_deref()))
+                ArchiveReader::read_path_with_options(path, read_options(password_bytes(password)))
                     .map_err(|err| read_archive_cli_error(path, err))
             } else {
                 Err(read_archive_cli_error(path, error))
@@ -80,7 +87,7 @@ pub(crate) fn read_archive_path_prompting(
 
 pub(crate) fn parse_archives_prompting(
     paths: &[String],
-    password: &mut Option<Vec<u8>>,
+    password: &mut Option<Password>,
 ) -> CliResult<Vec<DetectedArchive>> {
     let mut archives = Vec::new();
     for path in paths {
@@ -91,7 +98,7 @@ pub(crate) fn parse_archives_prompting(
 
 pub(crate) fn ensure_password_for_archives_extract(
     archives: &[DetectedArchive],
-    password: &mut Option<Vec<u8>>,
+    password: &mut Option<Password>,
 ) -> CliResult<()> {
     if password.is_none()
         && archives
@@ -107,17 +114,17 @@ pub(crate) fn ensure_password_for_archives_extract(
 
 pub(crate) fn ensure_password_for_extract(
     archive: &DetectedArchive,
-    password: &mut Option<Vec<u8>>,
+    password: &mut Option<Password>,
 ) -> CliResult<()> {
     ensure_password_for_archives_extract(std::slice::from_ref(archive), password)
 }
 
-fn prompt_password_if_tty() -> CliResult<Option<Vec<u8>>> {
+fn prompt_password_if_tty() -> CliResult<Option<Password>> {
     if !should_prompt_password(std::io::stdin().is_terminal()) {
         return Ok(None);
     }
     let line = rpassword::prompt_password("password: ")?;
-    Ok(Some(trim_password_line(line.into_bytes())))
+    Ok(Some(trim_password_line(Zeroizing::new(line.into_bytes()))))
 }
 
 pub(crate) fn should_prompt_password(stdin_is_terminal: bool) -> bool {

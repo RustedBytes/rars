@@ -2,6 +2,7 @@ use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
 use aes::Aes256;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const MAX_KDF_COUNT_LOG: u8 = 24;
 type HmacSha256 = Hmac<Sha256>;
@@ -28,13 +29,30 @@ impl std::error::Error for Error {}
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, ZeroizeOnDrop)]
 #[non_exhaustive]
 pub struct Rar50Keys {
     pub key: [u8; 32],
     pub hash_key: [u8; 32],
     pub password_check: [u8; 8],
 }
+
+impl std::fmt::Debug for Rar50Keys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Rar50Keys").finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for Rar50Keys {
+    fn eq(&self, other: &Self) -> bool {
+        let key_eq = constant_time_eq(&self.key, &other.key);
+        let hash_eq = constant_time_eq(&self.hash_key, &other.hash_key);
+        let check_eq = constant_time_eq(&self.password_check, &other.password_check);
+        key_eq & hash_eq & check_eq
+    }
+}
+
+impl Eq for Rar50Keys {}
 
 impl Rar50Keys {
     pub fn derive(password: &[u8], salt: [u8; 16], kdf_count_log: u8) -> Result<Self> {
@@ -67,11 +85,15 @@ impl Rar50Keys {
             *byte = taps[2][i] ^ taps[2][i + 8] ^ taps[2][i + 16] ^ taps[2][i + 24];
         }
 
-        Ok(Self {
+        let result = Self {
             key: taps[0],
             hash_key: taps[1],
             password_check,
-        })
+        };
+        u.zeroize();
+        accumulator.zeroize();
+        taps.zeroize();
+        Ok(result)
     }
 
     pub fn check_password(&self, stored: &[u8; 12]) -> Result<()> {
@@ -114,6 +136,7 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     diff == 0
 }
 
+#[derive(ZeroizeOnDrop)]
 pub struct Rar50Cipher {
     cipher: Aes256,
     iv: [u8; 16],

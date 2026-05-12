@@ -1,4 +1,5 @@
 use rars_crc32::table_entry as crc32_table_entry;
+use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 const INIT_SUBST_TABLE: [u8; 256] = [
     215, 19, 149, 35, 73, 197, 192, 205, 249, 28, 16, 119, 48, 221, 2, 42, 232, 1, 177, 233, 14,
@@ -36,6 +37,7 @@ impl std::error::Error for Error {}
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+#[derive(ZeroizeOnDrop)]
 pub struct Rar20Cipher {
     key: [u32; 4],
     subst: [u8; 256],
@@ -88,9 +90,10 @@ impl Rar20Cipher {
             }
         }
 
-        let mut padded = password.to_vec();
+        let mut padded = Zeroizing::new(password.to_vec());
         let padding = (16 - padded.len() % 16) % 16;
-        padded.resize(padded.len() + padding, 0);
+        let new_len = padded.len() + padding;
+        padded.resize(new_len, 0);
         for block in padded.chunks_exact_mut(16) {
             self.encrypt_block(block);
         }

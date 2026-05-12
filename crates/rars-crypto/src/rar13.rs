@@ -1,3 +1,6 @@
+use zeroize::ZeroizeOnDrop;
+
+#[derive(ZeroizeOnDrop)]
 pub struct Rar13Cipher {
     key: [u8; 3],
 }

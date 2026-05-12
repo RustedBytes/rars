@@ -1,8 +1,10 @@
+use crate::password::Password;
 use crate::time::{source_dos_mtime, source_unix_mtime};
 use crate::{CliResult, DOS_ARCHIVE_ATTR};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use zeroize::Zeroizing;
 
 pub(crate) struct OwnedInput {
     pub(crate) name: Vec<u8>,
@@ -11,7 +13,7 @@ pub(crate) struct OwnedInput {
     pub(crate) unix_mode: Option<u32>,
     pub(crate) unix_mtime: Option<u32>,
     pub(crate) dos_mtime: u32,
-    pub(crate) password: Option<Vec<u8>>,
+    pub(crate) password: Option<Password>,
 }
 
 pub(crate) fn read_inputs(paths: &[String], password: Option<&[u8]>) -> CliResult<Vec<OwnedInput>> {
@@ -68,7 +70,7 @@ fn collect_input(
             unix_mode,
             unix_mtime,
             dos_mtime,
-            password: password.map(|p| p.to_vec()),
+            password: password.map(|p| Zeroizing::new(p.to_vec())),
         });
     }
     Ok(())

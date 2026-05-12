@@ -16,7 +16,8 @@ use output::{
 };
 use password::{
     classify_rars_error, ensure_password_for_archives_extract, ensure_password_for_extract,
-    error_is_password_class, parse_archives_prompting, parse_password, read_archive_path_prompting,
+    error_is_password_class, parse_archives_prompting, parse_password, password_bytes,
+    read_archive_path_prompting, Password,
 };
 use rars::rar13::{
     self, FileEntry, StoredEntry as Rar13StoredEntry, WriterOptions as Rar13WriterOptions,
@@ -276,7 +277,7 @@ fn cmd_info(args: &[String]) -> CliResult<()> {
                     }
                 }
                 let archive_comment = archive
-                    .archive_comment_with_password(password.as_deref())
+                    .archive_comment_with_password(password_bytes(&password))
                     .map_err(|err| format!("failed to decode archive comment '{path}': {err}"))?;
                 if let Some(ref comment) = archive_comment {
                     println!("  comment: {}", display_bytes_lossy(comment));
@@ -362,7 +363,7 @@ fn cmd_test(args: &[String]) -> CliResult<()> {
         warn_rar50_redirections(&archive);
         let mut entries = Vec::new();
         archive
-            .extract_to(password.as_deref(), |meta| {
+            .extract_to(password_bytes(&password), |meta| {
                 entries.push(meta.clone());
                 Ok(Box::new(std::io::sink()))
             })
@@ -381,7 +382,7 @@ fn cmd_test(args: &[String]) -> CliResult<()> {
             warn_rar50_redirections(archive);
         }
         let mut entries = Vec::new();
-        extract_volumes_to(&archives, password.as_deref(), |meta| {
+        extract_volumes_to(&archives, password_bytes(&password), |meta| {
             entries.push(meta.clone());
             Ok(Box::new(std::io::sink()))
         })
@@ -426,7 +427,7 @@ fn cmd_extract(args: &[String]) -> CliResult<()> {
         let mut outputs = Vec::new();
         let mut planned_paths = HashSet::new();
         archive
-            .extract_to(password.as_deref(), |meta| {
+            .extract_to(password_bytes(&password), |meta| {
                 let planned = output_path_for_entry(&out_dir, meta)?;
                 if !planned_paths.insert(planned.clone()) {
                     return Err(rars::Error::InvalidHeader(
@@ -471,7 +472,7 @@ fn cmd_extract(args: &[String]) -> CliResult<()> {
             .ok_or("no archive parts provided")?;
         let mut outputs = Vec::new();
         let mut planned_paths = HashSet::new();
-        extract_volumes_to(&archives, password.as_deref(), |meta| {
+        extract_volumes_to(&archives, password_bytes(&password), |meta| {
             let planned = output_path_for_entry(&out_dir, meta)?;
             if !planned_paths.insert(planned.clone()) {
                 return Err(rars::Error::InvalidHeader(
@@ -637,7 +638,7 @@ impl AddWritePlan {
 }
 
 struct AddCommand {
-    password: Option<Vec<u8>>,
+    password: Option<Password>,
     target: ArchiveVersion,
     store: bool,
     compression_level: Option<u8>,
@@ -925,7 +926,7 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
     ) {
         validate_rar15_40_add_options(
             target,
-            password.as_deref(),
+            password_bytes(&password),
             archive_comment.as_deref(),
             file_comment.as_deref(),
             volume_size,
@@ -945,7 +946,7 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
     {
         return Err("multivolume writer currently supports one input file".into());
     }
-    let owned = read_inputs(input_paths, password.as_deref())?;
+    let owned = read_inputs(input_paths, password_bytes(&password))?;
     if matches!(
         target,
         ArchiveVersion::Rar14
@@ -1105,7 +1106,7 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                 if archive_comment.is_some() {
                     return Err("RAR 5 writer does not support comments on volumes yet".into());
                 }
-                let parts = if let Some(password) = password.as_deref() {
+                let parts = if let Some(password) = password_bytes(&password) {
                     if store {
                         // Invariant: parse_add_command rejects add commands without inputs.
                         let entry = owned.first().expect("stored volume input checked above");
@@ -1178,7 +1179,7 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                 }
                 return Ok(());
             }
-            let bytes = if let Some(password) = password.as_deref() {
+            let bytes = if let Some(password) = password_bytes(&password) {
                 let archive_metadata =
                     archive_name
                         .as_deref()
@@ -1392,7 +1393,7 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                         file_time: entry.dos_mtime,
                         file_attr: rar15_file_attr(entry),
                         host_os: 3,
-                        password: entry.password.as_deref(),
+                        password: entry.password.as_deref().map(Vec::as_slice),
                         file_comment: None,
                     };
                     rars::rar15_40::write_stored_volumes(entry, options, volume_size)?
@@ -1403,7 +1404,7 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                         file_time: entry.dos_mtime,
                         file_attr: rar15_file_attr(entry),
                         host_os: 3,
-                        password: entry.password.as_deref(),
+                        password: entry.password.as_deref().map(Vec::as_slice),
                         file_comment: None,
                     };
                     rars::rar15_40::write_compressed_volumes(entry, options, volume_size)?
@@ -1429,7 +1430,7 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                         file_time: entry.dos_mtime,
                         file_attr: rar15_file_attr(entry),
                         host_os: 3,
-                        password: entry.password.as_deref(),
+                        password: entry.password.as_deref().map(Vec::as_slice),
                         file_comment: file_comment.as_deref(),
                     });
                 }
@@ -1457,7 +1458,7 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                         file_time: entry.dos_mtime,
                         file_attr: rar15_file_attr(entry),
                         host_os: 3,
-                        password: entry.password.as_deref(),
+                        password: entry.password.as_deref().map(Vec::as_slice),
                         file_comment: None,
                     });
                 }
@@ -1513,7 +1514,7 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                         file_time: entry.dos_mtime,
                         file_attr: rar15_file_attr(entry),
                         host_os: 3,
-                        password: entry.password.as_deref(),
+                        password: entry.password.as_deref().map(Vec::as_slice),
                         file_comment: file_comment.as_deref(),
                     });
                 }
@@ -1542,7 +1543,7 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                         data: &entry.data,
                         file_time: entry.dos_mtime,
                         file_attr: entry.file_attr,
-                        password: entry.password.as_deref(),
+                        password: entry.password.as_deref().map(Vec::as_slice),
                         file_comment: file_comment.as_deref(),
                     };
                     rar13::write_compressed_volumes(entry, options, volume_size)?
@@ -1552,7 +1553,7 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                         data: &entry.data,
                         file_time: entry.dos_mtime,
                         file_attr: entry.file_attr,
-                        password: entry.password.as_deref(),
+                        password: entry.password.as_deref().map(Vec::as_slice),
                         file_comment: file_comment.as_deref(),
                     };
                     rar13::write_stored_volumes(entry, options, volume_size)?
@@ -1574,7 +1575,7 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                         data: &entry.data,
                         file_time: entry.dos_mtime,
                         file_attr: entry.file_attr,
-                        password: entry.password.as_deref(),
+                        password: entry.password.as_deref().map(Vec::as_slice),
                         file_comment: file_comment.as_deref(),
                     })
                     .collect();
@@ -1591,7 +1592,7 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
                         data: &entry.data,
                         file_time: entry.dos_mtime,
                         file_attr: entry.file_attr,
-                        password: entry.password.as_deref(),
+                        password: entry.password.as_deref().map(Vec::as_slice),
                         file_comment: file_comment.as_deref(),
                     })
                     .collect();

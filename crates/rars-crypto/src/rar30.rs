@@ -2,6 +2,7 @@ use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
 use aes::Aes128;
 use sha1::{Digest, Sha1 as FastSha1};
 use std::str;
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 const HASH_ROUNDS: u32 = 0x40000;
 
@@ -25,7 +26,7 @@ impl std::error::Error for Error {}
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Clone)]
+#[derive(Clone, ZeroizeOnDrop)]
 pub struct Rar30Cipher {
     cipher: Aes128,
     iv: [u8; 16],
@@ -33,11 +34,10 @@ pub struct Rar30Cipher {
 
 impl Rar30Cipher {
     pub fn new(password: &[u8], salt: Option<[u8; 8]>) -> Result<Self> {
-        let (key, iv) = derive_key_iv(password, salt)?;
-        Ok(Self {
-            cipher: Aes128::new(&key.into()),
-            iv,
-        })
+        let (mut key, iv) = derive_key_iv(password, salt)?;
+        let cipher = Aes128::new(&key.into());
+        key.zeroize();
+        Ok(Self { cipher, iv })
     }
 
     pub fn decrypt_in_place(&mut self, data: &mut [u8]) -> Result<()> {
@@ -79,7 +79,7 @@ impl Rar30Cipher {
 }
 
 fn derive_key_iv(password: &[u8], salt: Option<[u8; 8]>) -> Result<([u8; 16], [u8; 16])> {
-    let mut raw = Vec::with_capacity(password.len() * 2 + 8);
+    let mut raw = Zeroizing::new(Vec::with_capacity(password.len() * 2 + 8));
     let password = str::from_utf8(password).map_err(|_| Error::NonUtf8Password)?;
     for code_unit in password.encode_utf16() {
         raw.extend_from_slice(&code_unit.to_le_bytes());
@@ -100,7 +100,7 @@ fn derive_key_iv(password: &[u8], salt: Option<[u8; 8]>) -> Result<([u8; 16], [u
 
 fn derive_key_iv_slow(raw: &mut [u8]) -> ([u8; 16], [u8; 16]) {
     let raw_size = raw.len();
-    let mut raw = raw.to_vec();
+    let mut raw = Zeroizing::new(raw.to_vec());
     raw.resize(raw_size + 64, 0);
     let mut sha1 = FastSha1::new();
     let mut iv = [0; 16];
