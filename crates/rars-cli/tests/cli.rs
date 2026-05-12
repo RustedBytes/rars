@@ -51,7 +51,7 @@ fn rars() -> Command {
 #[test]
 fn info_lists_rar13_entries() {
     let output = rars()
-        .arg("info")
+        .args(["info", "-v"])
         .arg(fixture("README_store.rar"))
         .output()
         .unwrap();
@@ -65,7 +65,7 @@ fn info_lists_rar13_entries() {
 #[test]
 fn info_lists_packed_archive_comment() {
     let output = rars()
-        .arg("info")
+        .args(["info", "-v"])
         .arg(fixture("COMMENT.RAR"))
         .output()
         .unwrap();
@@ -76,7 +76,7 @@ fn info_lists_packed_archive_comment() {
 #[test]
 fn info_lists_file_comment() {
     let output = rars()
-        .arg("info")
+        .args(["info", "-v"])
         .arg(fixture("FCOMM.RAR"))
         .output()
         .unwrap();
@@ -87,7 +87,7 @@ fn info_lists_file_comment() {
 #[test]
 fn info_reports_inline_av_shape_fixture() {
     let output = rars()
-        .arg("info")
+        .args(["info", "-v"])
         .arg(fixture("rar140_av/rar140_av_patched.rar"))
         .output()
         .unwrap();
@@ -100,7 +100,7 @@ fn info_reports_inline_av_shape_fixture() {
 #[test]
 fn info_lists_rar15_40_metadata() {
     let output = rars()
-        .arg("info")
+        .args(["info", "-v"])
         .arg(fixture_rar15_40("rar300/with_comment_rar300.rar"))
         .output()
         .unwrap();
@@ -660,7 +660,7 @@ fn reports_missing_archive_path_with_context() {
     let dir = scratch("missing-archive");
     let missing = dir.join("missing.rar");
 
-    let output = rars().arg("info").arg(&missing).output().unwrap();
+    let output = rars().args(["info", "-v"]).arg(&missing).output().unwrap();
     assert!(!output.status.success());
     let stderr = stderr(&output);
     assert!(stderr.contains("failed to read archive"));
@@ -773,7 +773,7 @@ fn rejects_non_rar_input_to_info() {
     let input = dir.join("plain.txt");
     fs::write(&input, b"not a rar archive").unwrap();
 
-    let output = rars().arg("info").arg(&input).output().unwrap();
+    let output = rars().args(["info", "-v"]).arg(&input).output().unwrap();
     assert!(!output.status.success());
     let stderr = stderr(&output);
     assert!(stderr.contains("failed to identify archive"));
@@ -1132,7 +1132,7 @@ fn info_and_test_escape_control_characters_in_archive_names() {
         .unwrap();
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
-    let info = rars().arg("info").arg(&archive).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     assert!(stdout(&info).contains("line\\nname.txt"));
 
@@ -1156,7 +1156,7 @@ fn creates_rar15_stored_archive_that_can_be_tested() {
         .unwrap();
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
-    let info = rars().arg("info").arg(&archive).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     let info_stdout = stdout(&info);
     assert!(info_stdout.contains("Rar15To40"));
@@ -1180,7 +1180,7 @@ fn creates_rar15_compressed_archive_that_can_be_tested() {
         .unwrap();
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
-    let info = rars().arg("info").arg(&archive).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     assert!(stdout(&info).contains("method=0x33"));
 
@@ -1208,7 +1208,7 @@ fn creates_rar20_compressed_archive_that_can_be_tested() {
         .unwrap();
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
-    let info = rars().arg("info").arg(&archive).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     let info_stdout = stdout(&info);
     assert!(info_stdout.contains("method=0x33"));
@@ -1262,7 +1262,7 @@ fn creates_rar29_compressed_archive_that_can_be_tested() {
         .unwrap();
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
-    let info = rars().arg("info").arg(&archive).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     let info_stdout = stdout(&info);
     assert!(info_stdout.contains("method=0x33") || info_stdout.contains("method=0x35"));
@@ -1308,11 +1308,11 @@ fn creates_rar29_archives_with_distinct_compression_levels() {
         stderr(&create_auto)
     );
 
-    let lz_info = rars().arg("info").arg(&level_three).output().unwrap();
+    let lz_info = rars().args(["info", "-v"]).arg(&level_three).output().unwrap();
     assert!(lz_info.status.success(), "stderr: {}", stderr(&lz_info));
     assert!(stdout(&lz_info).contains("method=0x33"));
 
-    let auto_info = rars().arg("info").arg(&level_five).output().unwrap();
+    let auto_info = rars().args(["info", "-v"]).arg(&level_five).output().unwrap();
     assert!(auto_info.status.success(), "stderr: {}", stderr(&auto_info));
     assert!(stdout(&auto_info).contains("method=0x35"));
 
@@ -1399,7 +1399,7 @@ fn accepts_rar50_compression_level() {
         .unwrap();
 
     assert!(create.status.success(), "stderr: {}", stderr(&create));
-    let info = rars().arg("info").arg(&archive).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     assert!(stdout(&info).contains("method=5"));
     assert_archive_tests_and_extracts_file(&archive, None, "source.txt", &payload);
@@ -1421,7 +1421,7 @@ fn accepts_rar50_dictionary_size() {
         .unwrap();
 
     assert!(create.status.success(), "stderr: {}", stderr(&create));
-    let info = rars().arg("info").arg(&archive).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     assert!(stdout(&info).contains("dict=524288"));
     assert_archive_tests_and_extracts_file(&archive, None, "source.txt", &payload);
@@ -1443,7 +1443,7 @@ fn rar70_default_dictionary_keeps_rar5_compatible_algorithm() {
         .unwrap();
 
     assert!(create.status.success(), "stderr: {}", stderr(&create));
-    let info = rars().arg("info").arg(&archive).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     let info_stdout = stdout(&info);
     assert!(info_stdout.contains("algo=0"));
@@ -1473,7 +1473,7 @@ fn accepts_rar70_v1_dictionary_size() {
         .unwrap();
 
     assert!(create.status.success(), "stderr: {}", stderr(&create));
-    let info = rars().arg("info").arg(&archive).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     let info_stdout = stdout(&info);
     assert!(info_stdout.contains("algo=1"));
@@ -1585,7 +1585,7 @@ fn level_zero_stores_payload_for_rar50() {
         .unwrap();
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
-    let info = rars().arg("info").arg(&archive).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     assert!(stdout(&info).contains("method=0"));
     assert_archive_tests_and_extracts_file(
@@ -1614,7 +1614,7 @@ fn creates_rar29_solid_archive_that_can_be_tested() {
         .unwrap();
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
-    let info = rars().arg("info").arg(&archive).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     let info_stdout = stdout(&info);
     assert!(info_stdout.contains("rar15-40 main: flags=0x0008"));
@@ -1651,7 +1651,7 @@ fn creates_rar20_solid_archive_that_tests() {
         .unwrap();
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
-    let info = rars().arg("info").arg(&archive).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     assert!(stdout(&info).contains("rar15-40 main: flags=0x0008"));
 
@@ -1690,7 +1690,7 @@ fn creates_rar15_archive_comment() {
         .unwrap();
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
-    let info = rars().arg("info").arg(&archive).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     assert!(stdout(&info).contains("comment: rar15 note"));
 
@@ -1723,7 +1723,7 @@ fn creates_rar15_file_comment() {
         .unwrap();
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
-    let info = rars().arg("info").arg(&archive).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     assert!(stdout(&info).contains("comment: rar15 file note"));
 
@@ -1750,7 +1750,7 @@ fn creates_rar20_archive_and_file_comments() {
         "stderr: {}",
         stderr(&archive_comment)
     );
-    let info = rars().arg("info").arg(&archive).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     assert!(stdout(&info).contains("comment: rar20 note"));
 
@@ -1773,7 +1773,7 @@ fn creates_rar20_archive_and_file_comments() {
         stderr(&file_comment)
     );
     let info = rars()
-        .arg("info")
+        .args(["info", "-v"])
         .arg(&file_comment_archive)
         .output()
         .unwrap();
@@ -1806,7 +1806,7 @@ fn creates_rar29_archive_and_file_comments() {
         "stderr: {}",
         stderr(&archive_comment)
     );
-    let info = rars().arg("info").arg(&archive).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     assert!(stdout(&info).contains("comment: rar29 note"));
 
@@ -1829,7 +1829,7 @@ fn creates_rar29_archive_and_file_comments() {
         stderr(&file_comment)
     );
     let info = rars()
-        .arg("info")
+        .args(["info", "-v"])
         .arg(&file_comment_archive)
         .output()
         .unwrap();
@@ -1859,7 +1859,7 @@ fn creates_rar30_newsub_archive_comment() {
         .unwrap();
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
-    let info = rars().arg("info").arg(&archive).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     let info_stdout = stdout(&info);
     assert!(info_stdout.contains("comment: rar30 NEWSUB note"));
@@ -1888,7 +1888,7 @@ fn creates_literal_compressed_archive_that_can_be_tested() {
         .unwrap();
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
-    let info = rars().arg("info").arg(&archive).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     assert!(stdout(&info).contains("method=5"));
 
@@ -1922,7 +1922,7 @@ fn creates_solid_compressed_archive_that_can_be_tested() {
         .unwrap();
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
-    let info = rars().arg("info").arg(&archive).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     let info_stdout = stdout(&info);
     assert!(info_stdout.contains("rar13 main: flags=0x88"));
@@ -1962,7 +1962,7 @@ fn creates_rar15_solid_compressed_archive_that_can_be_tested() {
         .unwrap();
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
-    let info = rars().arg("info").arg(&archive).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     let info_stdout = stdout(&info);
     assert!(info_stdout.contains("rar15-40 main: flags=0x0008"));
@@ -2053,7 +2053,7 @@ fn creates_archive_and_file_comments() {
         .unwrap();
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
-    let info = rars().arg("info").arg(&archive).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     let stdout = stdout(&info);
     assert!(stdout.contains("comment: archive note"));
@@ -2517,7 +2517,7 @@ fn creates_rar30_header_encrypted_archive_that_can_be_tested() {
         .unwrap();
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
-    let missing_password = rars().arg("info").arg(&archive).output().unwrap();
+    let missing_password = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert_password_required(&missing_password);
 
     let test = rars()
@@ -2555,7 +2555,7 @@ fn creates_rar30_solid_header_encrypted_archive_that_can_be_tested() {
         .unwrap();
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
-    let missing_password = rars().arg("info").arg(&archive).output().unwrap();
+    let missing_password = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert_password_required(&missing_password);
 
     let test = rars()
@@ -2604,7 +2604,7 @@ fn creates_rar50_quick_open_archive_that_can_be_tested_and_listed() {
         .unwrap();
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
-    let info = rars().arg("info").arg(&archive).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     assert!(stdout(&info).contains("service: QO"));
 
@@ -2636,7 +2636,7 @@ fn creates_rar50_recovery_archive_that_can_be_tested_and_listed() {
     assert!(create.status.success(), "stderr: {}", stderr(&create));
     assert!(stderr(&create).contains("validation-ready RR metadata"));
 
-    let info = rars().arg("info").arg(&archive).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     let info_stdout = stdout(&info);
     assert!(info_stdout.contains("rar50 main: flags=0x0008"));
@@ -2667,7 +2667,7 @@ fn creates_rar50_compressed_recovery_archive_that_can_be_tested_and_listed() {
     assert!(create.status.success(), "stderr: {}", stderr(&create));
     assert!(stderr(&create).contains("validation-ready RR metadata"));
 
-    let info = rars().arg("info").arg(&archive).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     let info_stdout = stdout(&info);
     assert!(info_stdout.contains("rar50 main: flags=0x0008"));
@@ -2703,7 +2703,7 @@ fn creates_rar50_encrypted_recovery_archive_that_can_be_tested_and_listed() {
     assert!(create.status.success(), "stderr: {}", stderr(&create));
     assert!(stderr(&create).contains("validation-ready RR metadata"));
 
-    let info_without_password = rars().arg("info").arg(&archive).output().unwrap();
+    let info_without_password = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info_without_password.status.success());
     assert!(stdout(&info_without_password).contains("service: RR"));
 
@@ -2747,7 +2747,7 @@ fn creates_rar50_encrypted_compressed_recovery_archive_that_can_be_tested_and_li
     assert!(create.status.success(), "stderr: {}", stderr(&create));
     assert!(stderr(&create).contains("validation-ready RR metadata"));
 
-    let info_without_password = rars().arg("info").arg(&archive).output().unwrap();
+    let info_without_password = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info_without_password.status.success());
     assert!(stdout(&info_without_password).contains("service: RR"));
 
@@ -2786,11 +2786,11 @@ fn creates_rar50_header_encrypted_recovery_archive_that_can_be_tested_and_listed
     assert!(create.status.success(), "stderr: {}", stderr(&create));
     assert!(stderr(&create).contains("validation-ready RR metadata"));
 
-    let info_without_password = rars().arg("info").arg(&archive).output().unwrap();
+    let info_without_password = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert_password_required(&info_without_password);
 
     let info = rars()
-        .args(["info", "--password", "pass"])
+        .args(["info", "-v", "--password", "pass"])
         .arg(&archive)
         .output()
         .unwrap();
@@ -2837,7 +2837,7 @@ fn creates_rar50_header_encrypted_compressed_recovery_archive_that_can_be_tested
     assert!(create.status.success(), "stderr: {}", stderr(&create));
     assert!(stderr(&create).contains("validation-ready RR metadata"));
 
-    let info_without_password = rars().arg("info").arg(&archive).output().unwrap();
+    let info_without_password = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert_password_required(&info_without_password);
 
     let test = rars()
@@ -2896,7 +2896,7 @@ fn creates_rar50_encrypted_compressed_archive_that_can_be_tested() {
         .unwrap();
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
-    let info = rars().arg("info").arg(&archive).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     assert!(stdout(&info).contains("method=1"));
 
@@ -2989,7 +2989,7 @@ fn creates_rar50_header_encrypted_compressed_archive_that_can_be_tested() {
     assert_password_required(&missing);
 
     let info = rars()
-        .args(["info", "--password", "pass"])
+        .args(["info", "-v", "--password", "pass"])
         .arg(&archive)
         .output()
         .unwrap();
@@ -3081,7 +3081,7 @@ fn creates_rar50_encrypted_stored_archive_comment_service() {
     assert_password_required(&missing_password);
 
     let info = rars()
-        .args(["info", "--password", "pass"])
+        .args(["info", "-v", "--password", "pass"])
         .arg(&archive)
         .output()
         .unwrap();
@@ -3121,7 +3121,7 @@ fn creates_rar50_encrypted_compressed_archive_comment_service() {
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
     let info = rars()
-        .args(["info", "--password", "pass"])
+        .args(["info", "-v", "--password", "pass"])
         .arg(&archive)
         .output()
         .unwrap();
@@ -3204,11 +3204,11 @@ fn creates_rar50_header_encrypted_stored_archive_comment_service() {
         .unwrap();
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
-    let missing_password = rars().arg("info").arg(&archive).output().unwrap();
+    let missing_password = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert_password_required(&missing_password);
 
     let info = rars()
-        .args(["info", "--password", "pass"])
+        .args(["info", "-v", "--password", "pass"])
         .arg(&archive)
         .output()
         .unwrap();
@@ -3252,11 +3252,11 @@ fn creates_rar50_header_encrypted_compressed_archive_comment_service() {
         .unwrap();
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
-    let missing_password = rars().arg("info").arg(&archive).output().unwrap();
+    let missing_password = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert_password_required(&missing_password);
 
     let info = rars()
-        .args(["info", "--password", "pass"])
+        .args(["info", "-v", "--password", "pass"])
         .arg(&archive)
         .output()
         .unwrap();
@@ -3394,7 +3394,7 @@ fn creates_rar50_stored_archive_comment_service() {
         .unwrap();
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
-    let info = rars().arg("info").arg(&archive).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     assert!(stdout(&info).contains("comment: RAR5 CLI comment"));
 
@@ -3424,7 +3424,7 @@ fn creates_rar50_compressed_archive_comment_service() {
         .unwrap();
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
-    let info = rars().arg("info").arg(&archive).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     assert!(stdout(&info).contains("comment: RAR5 compressed CLI comment"));
 
@@ -3455,7 +3455,7 @@ fn creates_rar50_stored_file_comment_service() {
         .unwrap();
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
-    let info = rars().arg("info").arg(&archive).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     assert!(stdout(&info).contains("service: CMT"));
 
@@ -3492,7 +3492,7 @@ fn creates_rar50_encrypted_stored_file_comment_service() {
     assert_password_required(&missing_password);
 
     let info = rars()
-        .args(["info", "--password", "pass"])
+        .args(["info", "-v", "--password", "pass"])
         .arg(&archive)
         .output()
         .unwrap();
@@ -3537,11 +3537,11 @@ fn creates_rar50_header_encrypted_stored_file_comment_service() {
         .unwrap();
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
-    let missing_password = rars().arg("info").arg(&archive).output().unwrap();
+    let missing_password = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert_password_required(&missing_password);
 
     let info = rars()
-        .args(["info", "--password", "pass"])
+        .args(["info", "-v", "--password", "pass"])
         .arg(&archive)
         .output()
         .unwrap();
@@ -3579,7 +3579,7 @@ fn creates_rar70_stored_archive_metadata() {
         .unwrap();
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
-    let info = rars().arg("info").arg(&archive).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     assert!(stdout(&info).contains("archive name: cli-metadata.rar"));
 
@@ -3613,7 +3613,7 @@ fn creates_rar70_compressed_archive_metadata() {
         .unwrap();
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
-    let info = rars().arg("info").arg(&archive).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     assert!(stdout(&info).contains("archive name: cli-compressed-metadata.rar"));
 
@@ -3646,7 +3646,7 @@ fn creates_rar70_encrypted_stored_archive_metadata() {
         .unwrap();
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
-    let info = rars().arg("info").arg(&archive).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     assert!(stdout(&info).contains("archive name: cli-encrypted-metadata.rar"));
 
@@ -3686,7 +3686,7 @@ fn creates_rar70_encrypted_compressed_archive_metadata() {
         .unwrap();
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
-    let info = rars().arg("info").arg(&archive).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     assert!(stdout(&info).contains("archive name: cli-encrypted-compressed-metadata.rar"));
 
@@ -3724,11 +3724,11 @@ fn creates_rar70_header_encrypted_stored_archive_metadata() {
         .unwrap();
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
-    let missing_password = rars().arg("info").arg(&archive).output().unwrap();
+    let missing_password = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert_password_required(&missing_password);
 
     let info = rars()
-        .args(["info", "--password", "pass"])
+        .args(["info", "-v", "--password", "pass"])
         .arg(&archive)
         .output()
         .unwrap();
@@ -3773,7 +3773,7 @@ fn creates_rar70_header_encrypted_compressed_archive_metadata() {
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
     let info = rars()
-        .args(["info", "--password", "pass"])
+        .args(["info", "-v", "--password", "pass"])
         .arg(&archive)
         .output()
         .unwrap();
@@ -3872,7 +3872,7 @@ fn creates_rar50_stored_recovery_multivolume_archive_that_can_be_tested_and_list
         parts.push(path);
     }
 
-    let info = rars().arg("info").arg(&parts[0]).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&parts[0]).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     assert!(stdout(&info).contains("service: RR"));
 
@@ -4118,7 +4118,7 @@ fn creates_rar50_compressed_archive_that_can_be_tested() {
         .unwrap();
     assert!(output.status.success(), "stderr: {}", stderr(&output));
 
-    let info = rars().arg("info").arg(&archive).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     assert!(stdout(&info).contains("method=1"));
 
@@ -4146,7 +4146,7 @@ fn creates_rar50_solid_compressed_archive_that_can_be_tested() {
         .unwrap();
     assert!(output.status.success(), "stderr: {}", stderr(&output));
 
-    let info = rars().arg("info").arg(&archive).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     assert!(stdout(&info).contains("rar50 main: flags=0x0004"));
     assert!(stdout(&info).contains("solid=false"));
@@ -4211,7 +4211,7 @@ fn creates_rar50_delta_filtered_compressed_archive_that_can_be_tested() {
         .unwrap();
     assert!(output.status.success(), "stderr: {}", stderr(&output));
 
-    let info = rars().arg("info").arg(&archive).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     assert!(stdout(&info).contains("method=1"));
 
@@ -4346,7 +4346,7 @@ fn creates_rar30_header_encrypted_e8_filtered_compressed_archive_that_can_be_tes
         .unwrap();
     assert!(create.status.success(), "stderr: {}", stderr(&create));
 
-    let missing_password = rars().arg("info").arg(&archive).output().unwrap();
+    let missing_password = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert_password_required(&missing_password);
 
     assert_archive_tests_and_extracts_file(&archive, Some("pass"), "secret.bin", &payload);
@@ -4630,7 +4630,7 @@ fn creates_rar29_ppmd_compressed_archive_that_can_be_tested() {
         .unwrap();
     assert!(output.status.success(), "stderr: {}", stderr(&output));
 
-    let info = rars().arg("info").arg(&archive).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     assert!(stdout(&info).contains("method=0x35"));
 
@@ -4658,7 +4658,7 @@ fn creates_rar29_ppmd_filtered_archive_that_can_be_tested() {
         .unwrap();
     assert!(output.status.success(), "stderr: {}", stderr(&output));
 
-    let info = rars().arg("info").arg(&archive).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     assert!(stdout(&info).contains("method=0x35"));
 
@@ -4715,7 +4715,7 @@ fn creates_rar50_solid_compressed_multivolume_archive_that_can_be_tested() {
     }
     assert!(parts.len() >= 2);
 
-    let info = rars().arg("info").arg(&parts[0]).output().unwrap();
+    let info = rars().args(["info", "-v"]).arg(&parts[0]).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     assert!(stdout(&info).contains("rar50 main: flags=0x0007"));
 
@@ -4760,7 +4760,7 @@ fn creates_rar50_multi_file_solid_compressed_multivolume_archive_that_can_be_tes
     }
     assert!(parts.len() >= 2);
 
-    let info = rars().arg("info").args(&parts).output().unwrap();
+    let info = rars().args(["info", "-v"]).args(&parts).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
     assert!(stdout(&info).contains("solid=true"));
 

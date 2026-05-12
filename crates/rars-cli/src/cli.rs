@@ -50,6 +50,9 @@ pub(crate) struct PasswordArgs {
 pub(crate) struct InfoArgs {
     #[command(flatten)]
     pub password: PasswordArgs,
+    /// Show all raw block/header fields (the developer-style dump)
+    #[arg(short = 'v', long)]
+    pub verbose: bool,
     /// One or more archive paths
     #[arg(value_name = "ARCHIVE", required = true)]
     pub paths: Vec<String>,

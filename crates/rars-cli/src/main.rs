@@ -87,172 +87,34 @@ fn display_bytes_lossy(bytes: &[u8]) -> String {
 
 fn cmd_info(args: InfoArgs) -> CliResult<()> {
     let mut password = resolve_password_args(&args.password)?;
-    for path in args.paths {
-        let archive = read_archive_path_prompting(&path, &mut password)?;
+    for path in &args.paths {
+        let archive = read_archive_path_prompting(path, &mut password)?;
         let family = archive.family();
-        println!("{path}: {:?} at offset {}", family, archive.sfx_offset());
+        if args.verbose {
+            println!("{path}: {family:?} at offset {}", archive.sfx_offset());
+        } else {
+            print_terse_header(path, &archive);
+        }
         match archive {
             DetectedArchive::Rar13(archive) => {
-                println!(
-                    "  rar13 main: flags={:#04x} head_size={} sfx_offset={}",
-                    archive.main.flags, archive.main.head_size, archive.sfx_offset
-                );
-                if archive.main.has_archive_comment() {
-                    println!(
-                        "  archive comment extension: {} bytes{}",
-                        archive.main.extra.len(),
-                        if archive.main.has_packed_comment() {
-                            " (packed)"
-                        } else {
-                            ""
-                        }
-                    );
-                    if let Some(comment) = archive.archive_comment().map_err(|err| {
-                        format!("failed to decode archive comment '{path}': {err}")
-                    })? {
-                        println!("  comment: {}", display_bytes_lossy(&comment));
-                    }
-                }
-                if let Some(av) = archive.authenticity_verification().map_err(|err| {
-                    format!("failed to parse authenticity verification in '{path}': {err}")
-                })? {
-                    println!(
-                    "  authenticity verification: structural size={} cipher_body={} status=not-cryptographically-verified",
-                    av.size,
-                    av.cipher_body.len()
-                );
-                }
-                for (index, entry) in archive.entries.iter().enumerate() {
-                    println!(
-                    "  #{index}: {} pack={} unp={} method={} flags={:#04x} attr={:#04x} checksum={:#06x}",
-                    display_text(entry.name_lossy()),
-                    entry.header.pack_size,
-                    entry.header.unp_size,
-                    entry.header.method,
-                    entry.header.flags,
-                    entry.header.file_attr,
-                    entry.header.file_crc
-                );
-                    if let Some(comment) = entry.file_comment().map_err(|err| {
-                        format!(
-                            "failed to decode file comment '{}' in '{path}': {err}",
-                            display_text(entry.name_lossy())
-                        )
-                    })? {
-                        println!("    comment: {}", display_bytes_lossy(&comment));
-                    }
+                if args.verbose {
+                    info_rar13_verbose(path, &archive)?;
+                } else {
+                    info_rar13_terse(path, &archive)?;
                 }
             }
             DetectedArchive::Rar15To40(archive) => {
-                println!(
-                    "  rar15-40 main: flags={:#06x} head_size={} sfx_offset={}",
-                    archive.main.flags, archive.main.head_size, archive.sfx_offset
-                );
-                if let Some(comment) = archive
-                    .archive_comment()
-                    .map_err(|err| format!("failed to decode archive comment '{path}': {err}"))?
-                {
-                    println!("  comment: {}", display_bytes_lossy(&comment));
-                }
-                for (index, file) in archive.files().enumerate() {
-                    println!(
-                        "  #{index}: {} pack={} unp={} method={:#04x} flags={:#06x} attr={:#010x} crc={:#010x} ver={}",
-                        display_text(file.name_lossy()),
-                        file.pack_size,
-                        file.unp_size,
-                        file.method,
-                        file.block.flags,
-                        file.attr,
-                        file.file_crc,
-                        file.unp_ver
-                    );
-                    if let Some(comment) = file.file_comment().map_err(|err| {
-                        format!(
-                            "failed to decode file comment '{}' in '{path}': {err}",
-                            display_text(file.name_lossy())
-                        )
-                    })? {
-                        println!("    comment: {}", display_bytes_lossy(&comment));
-                    }
-                }
-                for sub in archive.new_subs() {
-                    println!(
-                        "  subblock: {:?} {} pack={} unp={} method={:#04x} flags={:#06x}",
-                        sub.kind,
-                        display_text(sub.name_lossy()),
-                        sub.file.pack_size,
-                        sub.file.unp_size,
-                        sub.file.method,
-                        sub.file.block.flags
-                    );
+                if args.verbose {
+                    info_rar15_40_verbose(path, &archive)?;
+                } else {
+                    info_rar15_40_terse(path, &archive)?;
                 }
             }
             DetectedArchive::Rar50Plus(archive) => {
-                println!(
-                    "  rar50 main: flags={:#06x} header_size={} sfx_offset={}",
-                    archive.main.archive_flags, archive.main.block.header_size, archive.sfx_offset
-                );
-                if let Some(metadata) = archive.main.archive_metadata() {
-                    if let Some(name) = &metadata.name {
-                        println!("  archive name: {}", display_bytes_lossy(name));
-                    }
-                    if let Some(creation_time) = metadata.creation_time {
-                        println!(
-                            "  archive creation time: {} ({creation_time:#018x})",
-                            format_filetime_utc(creation_time)
-                        );
-                    }
-                }
-                let archive_comment = archive
-                    .archive_comment_with_password(password_bytes(&password))
-                    .map_err(|err| format!("failed to decode archive comment '{path}': {err}"))?;
-                if let Some(ref comment) = archive_comment {
-                    println!("  comment: {}", display_bytes_lossy(comment));
-                }
-                for (index, file) in archive.files().enumerate() {
-                    let compression_info = file.decoded_compression_info().map_err(|err| {
-                        format!(
-                            "failed to decode RAR 5 compression info for '{}': {err}",
-                            display_text(file.name_lossy())
-                        )
-                    })?;
-                    println!(
-                        "  #{index}: {} pack={} unp={} algo={} method={} solid={} dict={} flags={:#06x} attr={:#010x} crc={}",
-                        display_text(file.name_lossy()),
-                        file.packed_size(),
-                        file.unpacked_size,
-                        compression_info.algorithm_version,
-                        compression_info.method,
-                        compression_info.solid,
-                        compression_info.dictionary_size,
-                        file.block.flags,
-                        file.attributes,
-                        file.data_crc32
-                            .map(|crc| format!("{crc:#010x}"))
-                            .unwrap_or_else(|| "none".to_string())
-                    );
-                    if let Some(redirection) = &file.redirection {
-                        println!(
-                            "       redirection: type={} flags={:#x} target={}",
-                            redirection.redirection_type,
-                            redirection.flags,
-                            display_bytes_lossy(&redirection.target_name)
-                        );
-                    }
-                }
-                let mut suppressed_archive_cmt = archive_comment.is_some();
-                for service in archive.services() {
-                    if suppressed_archive_cmt && service.name == b"CMT" {
-                        suppressed_archive_cmt = false;
-                        continue;
-                    }
-                    println!(
-                        "  service: {} pack={} unp={} flags={:#06x}",
-                        display_text(service.name_lossy()),
-                        service.packed_size(),
-                        service.unpacked_size,
-                        service.block.flags
-                    );
+                if args.verbose {
+                    info_rar50_verbose(path, &archive, password_bytes(&password))?;
+                } else {
+                    info_rar50_terse(path, &archive, password_bytes(&password))?;
                 }
             }
             _ => {
@@ -263,6 +125,353 @@ fn cmd_info(args: InfoArgs) -> CliResult<()> {
         }
     }
 
+    Ok(())
+}
+
+fn print_terse_header(path: &str, archive: &DetectedArchive) {
+    let label = match archive {
+        DetectedArchive::Rar13(_) => "RAR 1.3",
+        DetectedArchive::Rar15To40(_) => "RAR 1.5-4.x",
+        DetectedArchive::Rar50Plus(_) => "RAR 5.0+",
+        _ => "unknown",
+    };
+    let sfx_offset = archive.sfx_offset();
+    if sfx_offset > 0 {
+        println!("{path}: {label} (SFX, payload at offset {sfx_offset})");
+    } else {
+        println!("{path}: {label}");
+    }
+}
+
+fn render_comment_safe(bytes: &[u8]) -> String {
+    // Strip trailing NUL terminators, decode lossily, then escape ANSI-dangerous
+    // control characters so a hostile comment can't smuggle terminal escapes
+    // through us. Tabs and newlines pass through verbatim.
+    let end = bytes.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+    let text = String::from_utf8_lossy(&bytes[..end]);
+    let trimmed = text.trim_end_matches(['\0', '\r', '\n']);
+    let mut out = String::with_capacity(trimmed.len());
+    for ch in trimmed.chars() {
+        if ch == '\t' || ch == '\n' || !ch.is_control() {
+            out.push(ch);
+        } else {
+            out.push_str(&format!("\\x{:02x}", ch as u32));
+        }
+    }
+    out
+}
+
+fn print_comment(indent: &str, bytes: &[u8]) {
+    let rendered = render_comment_safe(bytes);
+    if rendered.is_empty() {
+        return;
+    }
+    if rendered.contains('\n') {
+        println!("{indent}Comment:");
+        for line in rendered.lines() {
+            println!("{indent}  {line}");
+        }
+    } else {
+        println!("{indent}Comment: {rendered}");
+    }
+}
+
+fn print_entry_table<I>(rows: I)
+where
+    I: IntoIterator<Item = (u64, u64, String)>,
+{
+    let rows: Vec<(u64, u64, String)> = rows.into_iter().collect();
+    if rows.is_empty() {
+        return;
+    }
+    let size_w = rows
+        .iter()
+        .map(|(unp, _, _)| unp.to_string().len())
+        .max()
+        .unwrap_or(0)
+        .max(4);
+    let pack_w = rows
+        .iter()
+        .map(|(_, pack, _)| pack.to_string().len())
+        .max()
+        .unwrap_or(0)
+        .max(6);
+    println!("  {:>size_w$}  {:>pack_w$}  Name", "Size", "Packed");
+    for (unp, pack, name) in &rows {
+        println!("  {unp:>size_w$}  {pack:>pack_w$}  {name}");
+    }
+}
+
+fn info_rar13_terse(path: &str, archive: &rars::rar13::Archive) -> CliResult<()> {
+    if let Some(comment) = archive
+        .archive_comment()
+        .map_err(|err| format!("failed to decode archive comment '{path}': {err}"))?
+    {
+        print_comment("  ", &comment);
+    }
+    print_entry_table(archive.entries.iter().map(|entry| {
+        (
+            u64::from(entry.header.unp_size),
+            u64::from(entry.header.pack_size),
+            display_text(entry.name_lossy()),
+        )
+    }));
+    Ok(())
+}
+
+fn info_rar13_verbose(path: &str, archive: &rars::rar13::Archive) -> CliResult<()> {
+    println!(
+        "  rar13 main: flags={:#04x} head_size={} sfx_offset={}",
+        archive.main.flags, archive.main.head_size, archive.sfx_offset
+    );
+    if archive.main.has_archive_comment() {
+        println!(
+            "  archive comment extension: {} bytes{}",
+            archive.main.extra.len(),
+            if archive.main.has_packed_comment() {
+                " (packed)"
+            } else {
+                ""
+            }
+        );
+        if let Some(comment) = archive
+            .archive_comment()
+            .map_err(|err| format!("failed to decode archive comment '{path}': {err}"))?
+        {
+            println!("  comment: {}", display_bytes_lossy(&comment));
+        }
+    }
+    if let Some(av) = archive
+        .authenticity_verification()
+        .map_err(|err| format!("failed to parse authenticity verification in '{path}': {err}"))?
+    {
+        println!(
+            "  authenticity verification: structural size={} cipher_body={} status=not-cryptographically-verified",
+            av.size,
+            av.cipher_body.len()
+        );
+    }
+    for (index, entry) in archive.entries.iter().enumerate() {
+        println!(
+            "  #{index}: {} pack={} unp={} method={} flags={:#04x} attr={:#04x} checksum={:#06x}",
+            display_text(entry.name_lossy()),
+            entry.header.pack_size,
+            entry.header.unp_size,
+            entry.header.method,
+            entry.header.flags,
+            entry.header.file_attr,
+            entry.header.file_crc
+        );
+        if let Some(comment) = entry.file_comment().map_err(|err| {
+            format!(
+                "failed to decode file comment '{}' in '{path}': {err}",
+                display_text(entry.name_lossy())
+            )
+        })? {
+            println!("    comment: {}", display_bytes_lossy(&comment));
+        }
+    }
+    Ok(())
+}
+
+fn info_rar15_40_terse(path: &str, archive: &rars::rar15_40::Archive) -> CliResult<()> {
+    if let Some(comment) = archive
+        .archive_comment()
+        .map_err(|err| format!("failed to decode archive comment '{path}': {err}"))?
+    {
+        print_comment("  ", &comment);
+    }
+    print_entry_table(archive.files().map(|file| {
+        (
+            file.unp_size,
+            file.pack_size,
+            display_text(file.name_lossy()),
+        )
+    }));
+    let sub_count = archive.new_subs().count();
+    if sub_count > 0 {
+        let kinds: Vec<String> = archive
+            .new_subs()
+            .map(|sub| format!("{:?}", sub.kind))
+            .collect();
+        println!("  Subblocks: {}", kinds.join(", "));
+    }
+    Ok(())
+}
+
+fn info_rar15_40_verbose(path: &str, archive: &rars::rar15_40::Archive) -> CliResult<()> {
+    println!(
+        "  rar15-40 main: flags={:#06x} head_size={} sfx_offset={}",
+        archive.main.flags, archive.main.head_size, archive.sfx_offset
+    );
+    if let Some(comment) = archive
+        .archive_comment()
+        .map_err(|err| format!("failed to decode archive comment '{path}': {err}"))?
+    {
+        println!("  comment: {}", display_bytes_lossy(&comment));
+    }
+    for (index, file) in archive.files().enumerate() {
+        println!(
+            "  #{index}: {} pack={} unp={} method={:#04x} flags={:#06x} attr={:#010x} crc={:#010x} ver={}",
+            display_text(file.name_lossy()),
+            file.pack_size,
+            file.unp_size,
+            file.method,
+            file.block.flags,
+            file.attr,
+            file.file_crc,
+            file.unp_ver
+        );
+        if let Some(comment) = file.file_comment().map_err(|err| {
+            format!(
+                "failed to decode file comment '{}' in '{path}': {err}",
+                display_text(file.name_lossy())
+            )
+        })? {
+            println!("    comment: {}", display_bytes_lossy(&comment));
+        }
+    }
+    for sub in archive.new_subs() {
+        println!(
+            "  subblock: {:?} {} pack={} unp={} method={:#04x} flags={:#06x}",
+            sub.kind,
+            display_text(sub.name_lossy()),
+            sub.file.pack_size,
+            sub.file.unp_size,
+            sub.file.method,
+            sub.file.block.flags
+        );
+    }
+    Ok(())
+}
+
+fn info_rar50_terse(
+    path: &str,
+    archive: &rars::rar50::Archive,
+    password: Option<&[u8]>,
+) -> CliResult<()> {
+    if let Some(metadata) = archive.main.archive_metadata() {
+        if let Some(name) = &metadata.name {
+            println!("  Archive name: {}", display_bytes_lossy(name));
+        }
+        if let Some(creation_time) = metadata.creation_time {
+            println!("  Created: {}", format_filetime_utc(creation_time));
+        }
+    }
+    let archive_comment = archive
+        .archive_comment_with_password(password)
+        .map_err(|err| format!("failed to decode archive comment '{path}': {err}"))?;
+    if let Some(comment) = &archive_comment {
+        print_comment("  ", comment);
+    }
+    print_entry_table(archive.files().map(|file| {
+        let mut name = display_text(file.name_lossy());
+        if let Some(redirection) = &file.redirection {
+            name.push_str(" → ");
+            name.push_str(&display_bytes_lossy(&redirection.target_name));
+        }
+        (file.unpacked_size, file.packed_size(), name)
+    }));
+    let suppressed_cmt = archive_comment.is_some();
+    let services: Vec<&[u8]> = archive
+        .services()
+        .filter_map(|service| {
+            if suppressed_cmt && service.name == b"CMT" {
+                None
+            } else {
+                Some(service.name.as_slice())
+            }
+        })
+        .collect();
+    if !services.is_empty() {
+        let names: Vec<String> = services.iter().map(|s| service_label(s)).collect();
+        println!("  Services: {}", names.join(", "));
+    }
+    Ok(())
+}
+
+fn service_label(name: &[u8]) -> String {
+    match name {
+        b"QO" => "quick-open".to_string(),
+        b"RR" => "recovery".to_string(),
+        b"CMT" => "comment".to_string(),
+        b"ACL" => "acl".to_string(),
+        b"STM" => "stream".to_string(),
+        other => display_bytes_lossy(other),
+    }
+}
+
+fn info_rar50_verbose(
+    path: &str,
+    archive: &rars::rar50::Archive,
+    password: Option<&[u8]>,
+) -> CliResult<()> {
+    println!(
+        "  rar50 main: flags={:#06x} header_size={} sfx_offset={}",
+        archive.main.archive_flags, archive.main.block.header_size, archive.sfx_offset
+    );
+    if let Some(metadata) = archive.main.archive_metadata() {
+        if let Some(name) = &metadata.name {
+            println!("  archive name: {}", display_bytes_lossy(name));
+        }
+        if let Some(creation_time) = metadata.creation_time {
+            println!(
+                "  archive creation time: {} ({creation_time:#018x})",
+                format_filetime_utc(creation_time)
+            );
+        }
+    }
+    let archive_comment = archive
+        .archive_comment_with_password(password)
+        .map_err(|err| format!("failed to decode archive comment '{path}': {err}"))?;
+    if let Some(ref comment) = archive_comment {
+        println!("  comment: {}", display_bytes_lossy(comment));
+    }
+    for (index, file) in archive.files().enumerate() {
+        let compression_info = file.decoded_compression_info().map_err(|err| {
+            format!(
+                "failed to decode RAR 5 compression info for '{}': {err}",
+                display_text(file.name_lossy())
+            )
+        })?;
+        println!(
+            "  #{index}: {} pack={} unp={} algo={} method={} solid={} dict={} flags={:#06x} attr={:#010x} crc={}",
+            display_text(file.name_lossy()),
+            file.packed_size(),
+            file.unpacked_size,
+            compression_info.algorithm_version,
+            compression_info.method,
+            compression_info.solid,
+            compression_info.dictionary_size,
+            file.block.flags,
+            file.attributes,
+            file.data_crc32
+                .map(|crc| format!("{crc:#010x}"))
+                .unwrap_or_else(|| "none".to_string())
+        );
+        if let Some(redirection) = &file.redirection {
+            println!(
+                "       redirection: type={} flags={:#x} target={}",
+                redirection.redirection_type,
+                redirection.flags,
+                display_bytes_lossy(&redirection.target_name)
+            );
+        }
+    }
+    let mut suppressed_archive_cmt = archive_comment.is_some();
+    for service in archive.services() {
+        if suppressed_archive_cmt && service.name == b"CMT" {
+            suppressed_archive_cmt = false;
+            continue;
+        }
+        println!(
+            "  service: {} pack={} unp={} flags={:#06x}",
+            display_text(service.name_lossy()),
+            service.packed_size(),
+            service.unpacked_size,
+            service.block.flags
+        );
+    }
     Ok(())
 }
 
@@ -446,14 +655,12 @@ fn reject_ambiguous_extract_target(paths: &[String]) -> CliResult<()> {
 fn looks_like_archive_path(path: &str) -> CliResult<bool> {
     const ARCHIVE_SNIFF_LIMIT: u64 = 128 * 1024;
 
+    if Path::new(path).is_dir() {
+        return Ok(false);
+    }
     let mut file = match fs::File::open(path) {
         Ok(file) => file,
-        Err(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::IsADirectory
-            ) =>
-        {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(false);
         }
         Err(error) => {
