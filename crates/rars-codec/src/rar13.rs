@@ -242,6 +242,8 @@ impl Unpack15Encoder {
             let mut plan_l_count = self.l_count;
             let mut plan_num_huf = self.num_huf;
             let mut group_enters_stmode = false;
+            let mut group_has_literal = false;
+            let mut group_has_adaptive_lz = false;
 
             while flag_bits < 8 && pos < input.len() {
                 if let Some(token) = self
@@ -261,6 +263,10 @@ impl Unpack15Encoder {
                         },
                         flag_bits,
                     )
+                    .filter(|token| {
+                        !(matches!(token, EncodedToken::LongLz(_) | EncodedToken::OldDist(_))
+                            && (group_has_literal || group_has_adaptive_lz))
+                    })
                     .filter(|token| {
                         !self.options.lazy_matching
                             || !should_lazy_emit_literal(
@@ -293,6 +299,9 @@ impl Unpack15Encoder {
                                 &mut plan_max_dist3,
                             );
                         }
+                        if matches!(token, EncodedToken::LongLz(_) | EncodedToken::OldDist(_)) {
+                            group_has_adaptive_lz = true;
+                        }
                         if let Some((distance, length)) = token.match_state() {
                             plan_remember_match(
                                 &mut plan_old_dist,
@@ -320,6 +329,7 @@ impl Unpack15Encoder {
                 }
                 plan_num_huf += 1;
                 pos += 1;
+                group_has_literal = true;
                 plan_huff_effect(&mut plan_nhfb, &mut plan_nlzb);
             }
 

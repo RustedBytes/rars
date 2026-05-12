@@ -655,14 +655,26 @@ fn reject_ambiguous_extract_target(paths: &[String]) -> CliResult<()> {
 fn looks_like_archive_path(path: &str) -> CliResult<bool> {
     const ARCHIVE_SNIFF_LIMIT: u64 = 128 * 1024;
 
-    if Path::new(path).is_dir() {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(CliError::general(format!(
+                "failed to inspect extract output path '{path}': {error}"
+            )))
+        }
+    };
+    if metadata.is_dir() {
         return Ok(false);
     }
+    if !metadata.is_file() {
+        return Err(CliError::general(format!(
+            "extract destination '{path}' is not a regular file or directory"
+        )));
+    }
+
     let mut file = match fs::File::open(path) {
         Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(false);
-        }
         Err(error) => {
             return Err(CliError::general(format!(
                 "failed to inspect extract output path '{path}': {error}"

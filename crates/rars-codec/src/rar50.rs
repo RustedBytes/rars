@@ -1289,7 +1289,8 @@ fn estimated_match_cost(
         .checked_sub(length_bonus(distance))
         .ok_or(Error::InvalidData("RAR 5 adjusted match length underflows"))?;
     let (length_slot, _) = length_slot_for_match(encoded_length)?;
-    Ok(10 + usize::from(length_slot_extra_bits(length_slot)?)
+    Ok(10
+        + usize::from(length_slot_extra_bits(length_slot)?)
         + distance_slot_bit_count(distance_slot)?)
 }
 

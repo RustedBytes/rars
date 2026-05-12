@@ -13,7 +13,7 @@ use rars::ArchiveVersion;
                   2  invalid command line\n  \
                   3  password required, wrong password, or corrupt encrypted data",
     propagate_version = true,
-    disable_help_subcommand = true,
+    disable_help_subcommand = true
 )]
 pub(crate) struct Cli {
     #[command(subcommand)]

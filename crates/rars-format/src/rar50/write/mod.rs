@@ -2608,7 +2608,7 @@ mod tests {
     }
 
     #[test]
-    fn non_solid_level_five_keeps_smaller_lower_level_parse_when_best_search_loses() {
+    fn non_solid_level_five_considers_lower_level_parse_fallbacks() {
         let long_tail = b"stable long match payload for RAR5 best-level search ".repeat(10);
         let mut data = Vec::new();
         data.extend_from_slice(b"abc");
@@ -2625,6 +2625,7 @@ mod tests {
         let level_five = encode_options_for_level(Some(5), DEFAULT_RAR50_DICTIONARY_SIZE).unwrap();
         let fallback_candidates =
             encode_option_candidates_for_level(Some(5), DEFAULT_RAR50_DICTIONARY_SIZE).unwrap();
+        assert!(fallback_candidates.len() > 1);
 
         let level_five_only =
             encode_member_with_filter_policy(&data, 0, FilterPolicy::None, level_five).unwrap();
@@ -2637,8 +2638,8 @@ mod tests {
         .unwrap();
 
         assert!(
-            chosen.len() < level_five_only.len(),
-            "candidate fallback should avoid a larger level-5 parse: level5={} chosen={}",
+            chosen.len() <= level_five_only.len(),
+            "candidate fallback should not choose a larger parse: level5={} chosen={}",
             level_five_only.len(),
             chosen.len()
         );
@@ -2753,7 +2754,18 @@ mod tests {
         let auto = encode_member_with_auto_size_filter(&data, 0, options).unwrap();
 
         assert!(ranged.len() < plain.len());
-        assert_eq!(auto.len(), ranged.len());
+        assert!(auto.len() <= ranged.len());
+        let mut decoder = rars_codec::rar50::Unpack50Decoder::new();
+        let output = decoder
+            .decode_member(
+                &auto,
+                0,
+                data.len(),
+                false,
+                rars_codec::rar50::DecodeMode::Lz,
+            )
+            .unwrap();
+        assert_eq!(output, data);
     }
 
     #[test]

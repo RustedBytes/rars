@@ -1609,6 +1609,30 @@ mod tests {
             .collect())
     }
 
+    fn synthetic_log_payload(lines: usize) -> Vec<u8> {
+        let mut data = Vec::new();
+        for index in 0..lines {
+            data.extend_from_slice(
+                format!(
+                    "2026-05-12T12:{:02}:{:02}.000Z INFO worker-{:02} request_id={:04x}-{:05} path=/api/v1/items/{} status={} elapsed_ms={} bytes={} message=processed archive chunk retry={} user=service-{}\n",
+                    index % 60,
+                    (index * 7) % 60,
+                    index % 16,
+                    index % 10000,
+                    (index * 17) % 100000,
+                    index % 2048,
+                    200 + (index % 5),
+                    (index * 37) % 5000,
+                    (index * 911) % 65536,
+                    index % 3,
+                    index % 32
+                )
+                .as_bytes(),
+            );
+        }
+        data
+    }
+
     #[test]
     fn writes_and_reads_stored_archive() {
         let input = [
@@ -1977,6 +2001,27 @@ mod tests {
                 "RAR 1.4 level {level} must not emit old-distance tokens"
             );
         }
+    }
+
+    #[test]
+    fn compressed_writer_keeps_adaptive_lz_planning_in_sync_after_literals() {
+        let data = synthetic_log_payload(8000);
+        let input = [FileEntry {
+            name: b"synthetic.log",
+            data: &data,
+            file_time: 0,
+            file_attr: 0x20,
+            password: None,
+            file_comment: None,
+        }];
+
+        let bytes =
+            write_compressed_archive(&input, WriterOptions::default().with_compression_level(2))
+                .unwrap();
+        let archive = Archive::parse(&bytes).unwrap();
+        let extracted = collect_extract(&archive, None).unwrap();
+
+        assert_eq!(extracted[0].data, data);
     }
 
     #[test]

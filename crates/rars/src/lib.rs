@@ -611,6 +611,16 @@ mod tests {
         is_directory: bool,
     }
 
+    fn deterministic_noise(len: usize) -> Vec<u8> {
+        let mut state = 0x1234_5678u32;
+        (0..len)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state >> 24) as u8
+            })
+            .collect()
+    }
+
     fn rar15_40_fixture(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../rars-format/tests/fixtures/rar15_40")
@@ -4192,8 +4202,14 @@ mod tests {
     fn direct_writer_creates_rar50_multi_file_solid_compressed_volumes() {
         let mut features = FeatureSet::store_only();
         features.solid = true;
-        let first = b"facade rar5 multi-file solid split shared phrase\n".repeat(12);
-        let second = b"facade rar5 multi-file solid split shared phrase\nsecond\n".repeat(10);
+        let mut first = b"facade rar5 multi-file solid split shared phrase\n"
+            .repeat(8)
+            .to_vec();
+        first.extend_from_slice(&deterministic_noise(2048));
+        let mut second = b"facade rar5 multi-file solid split shared phrase\nsecond\n"
+            .repeat(8)
+            .to_vec();
+        second.extend_from_slice(&deterministic_noise(2048));
         let entries = [
             rar50::CompressedEntry {
                 name: b"solid-volume-one.txt",
@@ -4215,7 +4231,7 @@ mod tests {
             features,
         ))
         .compressed_entries(&entries)
-        .max_payload_per_volume(96)
+        .max_payload_per_volume(512)
         .finish()
         .unwrap();
         let archives: Vec<_> = parts

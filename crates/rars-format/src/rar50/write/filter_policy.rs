@@ -112,7 +112,16 @@ pub(super) fn encode_option_candidates_for_level(
     level: Option<u8>,
     dictionary_size: u64,
 ) -> Result<Vec<EncodeOptions>> {
-    Ok(vec![encode_options_for_level(level, dictionary_size)?])
+    let mut candidates = vec![encode_options_for_level(level, dictionary_size)?];
+    if matches!(level, Some(5)) {
+        for fallback_level in (1..5).rev() {
+            candidates.push(encode_options_for_level(
+                Some(fallback_level),
+                dictionary_size,
+            )?);
+        }
+    }
+    Ok(candidates)
 }
 
 pub(super) fn validate_compression_level(options: WriterOptions) -> Result<()> {

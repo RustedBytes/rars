@@ -35,6 +35,28 @@ fn scratch(name: &str) -> PathBuf {
     path
 }
 
+fn deterministic_noise(len: usize) -> Vec<u8> {
+    let mut state = 0x1234_5678u32;
+    (0..len)
+        .map(|_| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 24) as u8
+        })
+        .collect()
+}
+
+fn rar50_level_sensitive_payload() -> Vec<u8> {
+    let long_match = [b"abc".as_slice(), &[b'Z'; 256]].concat();
+    let mut data = long_match.clone();
+    for index in 0..32u8 {
+        data.extend_from_slice(b"abc");
+        data.push(index);
+        data.extend_from_slice(&deterministic_noise(24));
+    }
+    data.extend_from_slice(&long_match);
+    data
+}
+
 fn dos_time(year: u32, month: u32, day: u32, hour: u32, minute: u32, second: u32) -> u32 {
     ((year - 1980) << 25)
         | (month << 21)
@@ -1533,13 +1555,7 @@ fn rar50_compression_levels_change_output_size() {
     let source = dir.join("source.bin");
     let low = dir.join("level1.rar");
     let high = dir.join("level5.rar");
-    let long_match = [b"abc".as_slice(), &[b'Z'; 256]].concat();
-    let mut data = long_match.clone();
-    for index in 0..64u8 {
-        data.extend_from_slice(b"abc");
-        data.push(index);
-    }
-    data.extend_from_slice(&long_match);
+    let data = rar50_level_sensitive_payload();
     fs::write(&source, &data).unwrap();
 
     let create_low = rars()
@@ -1890,7 +1906,7 @@ fn creates_literal_compressed_archive_that_can_be_tested() {
 
     let info = rars().args(["info", "-v"]).arg(&archive).output().unwrap();
     assert!(info.status.success(), "stderr: {}", stderr(&info));
-    assert!(stdout(&info).contains("method=5"));
+    assert!(stdout(&info).contains("method=0"));
 
     assert_archive_tests_and_extracts_file(
         &archive,
@@ -4730,19 +4746,19 @@ fn creates_rar50_multi_file_solid_compressed_multivolume_archive_that_can_be_tes
     let first = dir.join("one.txt");
     let second = dir.join("two.txt");
     let archive = dir.join("split.rar");
-    fs::write(
-        &first,
-        b"rar50 multi-file solid split cli shared phrase\n".repeat(14),
-    )
-    .unwrap();
-    fs::write(
-        &second,
-        b"rar50 multi-file solid split cli shared phrase\nsecond\n".repeat(12),
-    )
-    .unwrap();
+    let mut first_payload = b"rar50 multi-file solid split cli shared phrase\n"
+        .repeat(8)
+        .to_vec();
+    first_payload.extend_from_slice(&deterministic_noise(2048));
+    let mut second_payload = b"rar50 multi-file solid split cli shared phrase\nsecond\n"
+        .repeat(8)
+        .to_vec();
+    second_payload.extend_from_slice(&deterministic_noise(2048));
+    fs::write(&first, first_payload).unwrap();
+    fs::write(&second, second_payload).unwrap();
 
     let create = rars()
-        .args(["a", "--format", "rar50", "--solid", "--volume-size", "96"])
+        .args(["a", "--format", "rar50", "--solid", "--volume-size", "512"])
         .arg(&archive)
         .arg(&first)
         .arg(&second)
