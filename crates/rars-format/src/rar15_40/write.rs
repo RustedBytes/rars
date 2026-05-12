@@ -1595,6 +1595,8 @@ fn write_file_header_and_data(out: &mut Vec<u8>, record: FileRecord<'_>) -> Resu
 fn write_file_header(out: &mut Vec<u8>, record: &FileRecord<'_>) -> Result<()> {
     let start = out.len();
     let flags = record.flags | record.dictionary_flags;
+    let (host_os, file_attr) =
+        rar15_compatible_metadata(record.target, record.host_os, record.file_attr);
     let packed_size = u32::try_from(record.packed.len())
         .map_err(|_| Error::InvalidHeader("RAR 1.5 packed size overflows u32"))?;
     let unpacked_size = u32::try_from(record.unpacked_size)
@@ -1618,13 +1620,13 @@ fn write_file_header(out: &mut Vec<u8>, record: &FileRecord<'_>) -> Result<()> {
     out.extend_from_slice(&head_size.to_le_bytes());
     out.extend_from_slice(&packed_size.to_le_bytes());
     out.extend_from_slice(&unpacked_size.to_le_bytes());
-    out.push(record.host_os);
+    out.push(host_os);
     out.extend_from_slice(&record.file_crc.to_le_bytes());
     out.extend_from_slice(&record.file_time.to_le_bytes());
     out.push(unp_ver);
     out.push(record.method);
     out.extend_from_slice(&(record.name.len() as u16).to_le_bytes());
-    out.extend_from_slice(&record.file_attr.to_le_bytes());
+    out.extend_from_slice(&file_attr.to_le_bytes());
     out.extend_from_slice(record.name);
     if let Some(salt) = record.salt {
         out.extend_from_slice(&salt);
@@ -1632,6 +1634,25 @@ fn write_file_header(out: &mut Vec<u8>, record: &FileRecord<'_>) -> Result<()> {
     out.extend_from_slice(record.extra);
     write_file_header_crc(out, start, record.name.len(), flags);
     Ok(())
+}
+
+fn rar15_compatible_metadata(target: ArchiveVersion, host_os: u8, file_attr: u32) -> (u8, u32) {
+    const HOST_DOS: u8 = 0;
+    const HOST_UNIX: u8 = 3;
+    const DOS_ARCHIVE: u32 = 0x20;
+    const DOS_DIRECTORY: u32 = 0x10;
+    const UNIX_FILE_TYPE_MASK: u32 = 0o170000;
+    const UNIX_DIRECTORY: u32 = 0o040000;
+
+    if target == ArchiveVersion::Rar15 && host_os == HOST_UNIX {
+        let dos_attr = if file_attr & UNIX_FILE_TYPE_MASK == UNIX_DIRECTORY {
+            DOS_DIRECTORY
+        } else {
+            DOS_ARCHIVE
+        };
+        return (HOST_DOS, dos_attr);
+    }
+    (host_os, file_attr)
 }
 
 fn dictionary_flags_for_target(target: ArchiveVersion) -> u16 {

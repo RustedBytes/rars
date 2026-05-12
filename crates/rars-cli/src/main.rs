@@ -277,9 +277,7 @@ fn cmd_info(args: &[String]) -> CliResult<()> {
                 }
                 let archive_comment = archive
                     .archive_comment_with_password(password.as_deref())
-                    .map_err(|err| {
-                        format!("failed to decode archive comment '{path}': {err}")
-                    })?;
+                    .map_err(|err| format!("failed to decode archive comment '{path}': {err}"))?;
                 if let Some(ref comment) = archive_comment {
                     println!("  comment: {}", display_bytes_lossy(comment));
                 }

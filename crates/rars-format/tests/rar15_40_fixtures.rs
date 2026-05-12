@@ -1834,6 +1834,46 @@ fn writes_rar3_newsub_archive_comment_that_reader_decodes() {
 }
 
 #[test]
+fn rar15_writer_downgrades_unix_metadata_for_unrar_compatibility() {
+    let unix_regular_file = 0o100664;
+    let entries = [StoredEntry {
+        name: b"unix-mode.txt",
+        data: b"RAR15 stored data\n",
+        file_time: 0x5a21_0000,
+        file_attr: unix_regular_file,
+        host_os: 3,
+        password: None,
+        file_comment: None,
+    }];
+
+    let rar15 = write_stored_archive(
+        &entries,
+        WriterOptions::new(ArchiveVersion::Rar15, FeatureSet::store_only()),
+    )
+    .unwrap();
+    let archive = Archive::parse(&rar15).unwrap();
+    let file = archive.files().next().unwrap();
+
+    assert_eq!(file.unp_ver, 15);
+    assert_eq!(file.host_os, 0);
+    assert_eq!(file.attr, 0x20);
+    assert!(!file.is_directory());
+    assert_eq!(collect_extract(&archive).unwrap()[0].data, entries[0].data);
+
+    let rar20 = write_stored_archive(
+        &entries,
+        WriterOptions::new(ArchiveVersion::Rar20, FeatureSet::store_only()),
+    )
+    .unwrap();
+    let archive = Archive::parse(&rar20).unwrap();
+    let file = archive.files().next().unwrap();
+
+    assert_eq!(file.unp_ver, 20);
+    assert_eq!(file.host_os, 3);
+    assert_eq!(file.attr, unix_regular_file);
+}
+
+#[test]
 fn writes_compressed_rar15_archive_that_reader_extracts() {
     let entries = [
         FileEntry {
