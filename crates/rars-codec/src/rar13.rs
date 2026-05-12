@@ -3,6 +3,7 @@ use std::io::{Read, Write};
 
 const MATCH_HASH_BUCKETS: usize = 4096;
 const MAX_LONG_MATCH_CANDIDATES: usize = 64;
+const MAX_LONG_LZ_DISTANCE: usize = 0x7fff;
 
 const DEC_L1: &[u16] = &[
     0x8000, 0xa000, 0xc000, 0xd000, 0xe000, 0xea00, 0xee00, 0xf000, 0xf200, 0xf200, 0xffff,
@@ -100,7 +101,7 @@ impl EncodeOptions {
             old_distance_tokens: true,
             lazy_matching: true,
             stmode_literal_runs: true,
-            max_long_match_distance: 0x8000,
+            max_long_match_distance: MAX_LONG_LZ_DISTANCE,
         }
     }
 
@@ -1203,7 +1204,7 @@ pub fn find_long_lz(input: &[u8], pos: usize, max_match_distance: usize) -> Opti
         return None;
     }
 
-    let max_distance = pos.min(0x8000).min(max_match_distance);
+    let max_distance = pos.min(MAX_LONG_LZ_DISTANCE).min(max_match_distance);
     if max_distance < 257 {
         return None;
     }
@@ -1241,7 +1242,7 @@ fn find_long_lz_with_buckets(
         return None;
     }
 
-    let max_distance = pos.min(0x8000).min(max_match_distance);
+    let max_distance = pos.min(MAX_LONG_LZ_DISTANCE).min(max_match_distance);
     if max_distance < 257 {
         return None;
     }
@@ -2299,6 +2300,22 @@ mod tests {
                 length: 64
             })
         );
+    }
+
+    #[test]
+    fn long_lz_search_rejects_unencodable_32k_distance() {
+        let mut input = Vec::with_capacity(0x8000 + 64);
+        let mut state = 0x1234_5678u32;
+        for _ in 0..0x8000 + 64 {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            input.push((state >> 24) as u8);
+        }
+        let repeated = input[..64].to_vec();
+        input[0x8000..0x8000 + 64].copy_from_slice(&repeated);
+
+        let token = find_long_lz(&input, 0x8000, 0x8000);
+
+        assert_ne!(token.map(|token| token.distance), Some(0x8000));
     }
 
     #[test]

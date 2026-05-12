@@ -1073,7 +1073,8 @@ pub fn write_compressed_archive_with_comment(
         } else if options.compression_level == Some(0) {
             entry.data.to_vec()
         } else {
-            unpack15_encode_with_options(entry.data, encode_options)?
+            encode_verified_rar15_payload(entry.data, encode_options)?
+                .unwrap_or_else(|| entry.data.to_vec())
         };
         let method = if options.compression_level == Some(0)
             || (!solid && packed.len() >= entry.data.len())
@@ -1168,17 +1169,24 @@ pub fn write_compressed_volumes(
     )?;
 
     validate_compression_level(options)?;
-    let packed = unpack15_encode_with_options(
+    let mut packed = encode_verified_rar15_payload(
         entry.data,
         rar15_encode_options_for_level(options.compression_level)?,
-    )?;
+    )?
+    .unwrap_or_else(|| entry.data.to_vec());
+    let method = if packed.len() >= entry.data.len() {
+        packed = entry.data.to_vec();
+        METHOD_STORE
+    } else {
+        METHOD_BEST
+    };
     write_split_volumes(SplitVolumeRecord {
         name: entry.name,
         unpacked: entry.data,
         packed: &packed,
         file_time: entry.file_time,
         file_attr: entry.file_attr,
-        method: METHOD_BEST,
+        method,
         base_flags: 0,
         features: options.features,
         max_packed_per_volume,
@@ -1276,6 +1284,42 @@ fn rar15_encode_options_for_level(level: Option<u8>) -> Result<Rar15EncodeOption
         _ => Err(Error::InvalidHeader(
             "RAR compression level must be in the range 0..5",
         )),
+    }
+}
+
+fn encode_verified_rar15_payload(
+    data: &[u8],
+    options: Rar15EncodeOptions,
+) -> Result<Option<Vec<u8>>> {
+    for candidate_options in rar15_encode_fallback_options(options) {
+        let packed = unpack15_encode_with_options(data, candidate_options)?;
+        if unpack15_payload_matches(&packed, data)? {
+            return Ok(Some(packed));
+        }
+    }
+    Ok(None)
+}
+
+fn rar15_encode_fallback_options(options: Rar15EncodeOptions) -> Vec<Rar15EncodeOptions> {
+    let mut candidates = vec![options];
+    let distance_limited = options.with_max_long_match_distance(24 * 1024);
+    if distance_limited != options {
+        candidates.push(distance_limited);
+    }
+    let conservative = options
+        .with_lazy_matching(false)
+        .with_stmode_literal_runs(false)
+        .with_max_long_match_distance(8 * 1024);
+    if !candidates.contains(&conservative) {
+        candidates.push(conservative);
+    }
+    candidates
+}
+
+fn unpack15_payload_matches(packed: &[u8], data: &[u8]) -> Result<bool> {
+    match unpack15_decode(packed, data.len()) {
+        Ok(decoded) => Ok(decoded == data),
+        Err(_) => Ok(false),
     }
 }
 
