@@ -272,7 +272,8 @@ fn encode_rar29_auto_filtered_member(
             method: lz_method,
         },
     ]);
-    for range in auto_x86_filter_ranges(data, false) {
+    let e8_candidates = auto_x86_filter_ranges(data, false);
+    for range in e8_candidates.iter().cloned() {
         candidates.push(EncodedPayload {
             data: encode_rar29_filtered_member(
                 data,
@@ -282,7 +283,7 @@ fn encode_rar29_auto_filtered_member(
             method: lz_method,
         });
     }
-    let e8_ranges = disjoint_filter_ranges(auto_x86_filter_ranges(data, false));
+    let e8_ranges = disjoint_filter_ranges(e8_candidates);
     if e8_ranges.len() > 1 {
         let filters: Vec<_> = e8_ranges
             .into_iter()
@@ -293,7 +294,8 @@ fn encode_rar29_auto_filtered_member(
             method: lz_method,
         });
     }
-    for range in auto_x86_filter_ranges(data, true) {
+    let e8e9_candidates = auto_x86_filter_ranges(data, true);
+    for range in e8e9_candidates.iter().cloned() {
         candidates.push(EncodedPayload {
             data: encode_rar29_filtered_member(
                 data,
@@ -303,7 +305,7 @@ fn encode_rar29_auto_filtered_member(
             method: lz_method,
         });
     }
-    let e8e9_ranges = disjoint_filter_ranges(auto_x86_filter_ranges(data, true));
+    let e8e9_ranges = disjoint_filter_ranges(e8e9_candidates);
     if e8e9_ranges.len() > 1 {
         let filters: Vec<_> = e8e9_ranges
             .into_iter()

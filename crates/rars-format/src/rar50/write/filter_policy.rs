@@ -295,7 +295,8 @@ pub(super) fn encode_member_with_auto_size_filter(
             }
         }
     }
-    for range in auto_x86_filter_ranges(data, false) {
+    let e8_candidates = auto_x86_filter_ranges(data, false);
+    for range in e8_candidates.iter().cloned() {
         let packed = encode_member_with_filter_spec(
             data,
             algorithm_version,
@@ -307,7 +308,7 @@ pub(super) fn encode_member_with_auto_size_filter(
             best = packed;
         }
     }
-    let e8_ranges = disjoint_filter_ranges(auto_x86_filter_ranges(data, false));
+    let e8_ranges = disjoint_filter_ranges(e8_candidates);
     if e8_ranges.len() > 1 {
         let filters: Vec<_> = e8_ranges
             .into_iter()
@@ -319,7 +320,8 @@ pub(super) fn encode_member_with_auto_size_filter(
             best = packed;
         }
     }
-    for range in auto_x86_filter_ranges(data, true) {
+    let e8e9_candidates = auto_x86_filter_ranges(data, true);
+    for range in e8e9_candidates.iter().cloned() {
         let packed = encode_member_with_filter_spec(
             data,
             algorithm_version,
@@ -331,7 +333,7 @@ pub(super) fn encode_member_with_auto_size_filter(
             best = packed;
         }
     }
-    let e8e9_ranges = disjoint_filter_ranges(auto_x86_filter_ranges(data, true));
+    let e8e9_ranges = disjoint_filter_ranges(e8e9_candidates);
     if e8e9_ranges.len() > 1 {
         let filters: Vec<_> = e8e9_ranges
             .into_iter()
