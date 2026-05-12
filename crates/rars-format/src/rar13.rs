@@ -1248,26 +1248,29 @@ fn validate_compression_level(options: WriterOptions) -> Result<()> {
 
 fn rar15_encode_options_for_level(level: Option<u8>) -> Result<Rar15EncodeOptions> {
     let level = level.unwrap_or(5);
+    // DOS RAR 1.402 rejects some streams produced with the old-distance
+    // short-LZ codes, even though the rars decoder can read them. Keep the
+    // writer on the older compatible subset until that encoding is pinned
+    // against a real oracle.
+    let compatible = Rar15EncodeOptions::new().with_old_distance_tokens(false);
     match level {
-        0 => Ok(Rar15EncodeOptions::new()
-            .with_old_distance_tokens(false)
+        0 => Ok(compatible
             .with_lazy_matching(false)
             .with_stmode_literal_runs(false)
             .with_max_long_match_distance(0)),
-        1 => Ok(Rar15EncodeOptions::new()
-            .with_old_distance_tokens(false)
+        1 => Ok(compatible
             .with_lazy_matching(false)
             .with_stmode_literal_runs(false)
             .with_max_long_match_distance(4 * 1024)),
-        2 => Ok(Rar15EncodeOptions::new()
+        2 => Ok(compatible
             .with_lazy_matching(false)
             .with_stmode_literal_runs(false)
             .with_max_long_match_distance(8 * 1024)),
-        3 => Ok(Rar15EncodeOptions::new()
+        3 => Ok(compatible
             .with_lazy_matching(false)
             .with_max_long_match_distance(16 * 1024)),
-        4 => Ok(Rar15EncodeOptions::new().with_max_long_match_distance(24 * 1024)),
-        5 => Ok(Rar15EncodeOptions::new()),
+        4 => Ok(compatible.with_max_long_match_distance(24 * 1024)),
+        5 => Ok(compatible),
         _ => Err(Error::InvalidHeader(
             "RAR compression level must be in the range 0..5",
         )),
@@ -1961,6 +1964,17 @@ mod tests {
         assert!(level_five_file.header.pack_size < level_one_file.header.pack_size);
         assert_eq!(collect_extract(&level_one, None).unwrap()[0].data, data);
         assert_eq!(collect_extract(&level_five, None).unwrap()[0].data, data);
+    }
+
+    #[test]
+    fn rar14_writer_uses_dos_compatible_old_distance_policy() {
+        for level in 0..=5 {
+            let options = rar15_encode_options_for_level(Some(level)).unwrap();
+            assert!(
+                !options.old_distance_tokens_enabled(),
+                "RAR 1.4 level {level} must not emit old-distance tokens"
+            );
+        }
     }
 
     #[test]

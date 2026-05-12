@@ -41,33 +41,107 @@ pub fn unpack20_decode(input: &[u8], output_size: usize) -> Result<Vec<u8>> {
 }
 
 pub fn unpack20_encode_literals(input: &[u8]) -> Result<Vec<u8>> {
-    encode_member(input, &[], None)
+    unpack20_encode_literals_with_options(input, EncodeOptions::default())
+}
+
+pub fn unpack20_encode_literals_with_options(
+    input: &[u8],
+    options: EncodeOptions,
+) -> Result<Vec<u8>> {
+    encode_member(input, &[], None, options)
 }
 
 pub fn unpack20_encode_auto(input: &[u8]) -> Result<Vec<u8>> {
-    let lz = unpack20_encode_literals(input)?;
+    unpack20_encode_auto_with_options(input, EncodeOptions::default())
+}
+
+pub fn unpack20_encode_auto_with_options(input: &[u8], options: EncodeOptions) -> Result<Vec<u8>> {
+    let lz = unpack20_encode_literals_with_options(input, options)?;
     let mut best = lz;
-    for channels in 1..=MAX_CHANNELS {
-        if input.len() < channels * 64 {
-            continue;
-        }
-        let audio = encode_audio_member(input, channels)?;
-        if audio.len() < best.len() {
-            best = audio;
+    if options.try_audio {
+        for channels in 1..=MAX_CHANNELS {
+            if input.len() < channels * 64 {
+                continue;
+            }
+            let audio = encode_audio_member(input, channels)?;
+            if audio.len() < best.len() {
+                best = audio;
+            }
         }
     }
     Ok(best)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct EncodeOptions {
+    pub max_match_candidates: usize,
+    pub max_match_distance: usize,
+    pub lazy_matching: bool,
+    pub lazy_lookahead: usize,
+    pub try_audio: bool,
+}
+
+impl EncodeOptions {
+    pub const fn new(max_match_candidates: usize) -> Self {
+        Self {
+            max_match_candidates,
+            max_match_distance: MAX_ENCODER_MATCH_OFFSET,
+            lazy_matching: false,
+            lazy_lookahead: 1,
+            try_audio: true,
+        }
+    }
+
+    pub const fn with_max_match_distance(mut self, distance: usize) -> Self {
+        self.max_match_distance = if distance > MAX_ENCODER_MATCH_OFFSET {
+            MAX_ENCODER_MATCH_OFFSET
+        } else {
+            distance
+        };
+        self
+    }
+
+    pub const fn with_lazy_matching(mut self, enabled: bool) -> Self {
+        self.lazy_matching = enabled;
+        self
+    }
+
+    pub const fn with_lazy_lookahead(mut self, bytes: usize) -> Self {
+        self.lazy_lookahead = bytes;
+        self
+    }
+
+    pub const fn with_try_audio(mut self, enabled: bool) -> Self {
+        self.try_audio = enabled;
+        self
+    }
+}
+
+impl Default for EncodeOptions {
+    fn default() -> Self {
+        Self::new(MAX_MATCH_CANDIDATES)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct Unpack20Encoder {
     history: Vec<u8>,
     table: Option<FixedEncodeTable>,
+    options: EncodeOptions,
 }
 
 impl Unpack20Encoder {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_options(options: EncodeOptions) -> Self {
+        Self {
+            history: Vec::new(),
+            table: None,
+            options,
+        }
     }
 
     pub fn encode_member(&mut self, input: &[u8]) -> Result<Vec<u8>> {
@@ -82,14 +156,17 @@ impl Unpack20Encoder {
                 table
             }
         };
-        let packed = encode_member(input, &self.history, Some(table))?;
+        let packed = encode_member(input, &self.history, Some(table), self.options)?;
         self.remember(input);
         Ok(packed)
     }
 
     fn remember(&mut self, input: &[u8]) {
         self.history.extend_from_slice(input);
-        let keep_from = self.history.len().saturating_sub(MAX_HISTORY);
+        let keep_from = self
+            .history
+            .len()
+            .saturating_sub(self.options.max_match_distance);
         if keep_from != 0 {
             self.history.drain(..keep_from);
         }
@@ -100,12 +177,13 @@ fn encode_member(
     input: &[u8],
     history: &[u8],
     fixed_table: Option<FixedEncodeTable>,
+    options: EncodeOptions,
 ) -> Result<Vec<u8>> {
     if input.is_empty() {
         return Ok(Vec::new());
     }
 
-    let tokens = encode_tokens(input, history);
+    let tokens = encode_tokens(input, history, options);
     let mut used_main_symbols = [false; MAIN_COUNT];
     let mut used_length_slots = [false; LENGTH_COUNT];
     for token in &tokens {
@@ -318,10 +396,10 @@ enum EncodeToken {
     },
 }
 
-fn encode_tokens(input: &[u8], history: &[u8]) -> Vec<EncodeToken> {
+fn encode_tokens(input: &[u8], history: &[u8], options: EncodeOptions) -> Vec<EncodeToken> {
     let mut tokens = Vec::new();
     let mut buckets = vec![Vec::new(); MATCH_HASH_BUCKETS];
-    let history = &history[history.len().saturating_sub(MAX_ENCODER_MATCH_OFFSET)..];
+    let history = &history[history.len().saturating_sub(options.max_match_distance)..];
     let mut combined = Vec::with_capacity(history.len() + input.len());
     combined.extend_from_slice(history);
     combined.extend_from_slice(input);
@@ -334,28 +412,22 @@ fn encode_tokens(input: &[u8], history: &[u8]) -> Vec<EncodeToken> {
     let mut last_match = None;
     let mut old_offsets = [0usize; 4];
     while pos < end {
-        let fresh = best_match(&combined, pos, end, &buckets);
-        let old = best_old_offset_match(&combined, pos, end, &old_offsets);
-        let selected = match (fresh, old) {
-            (Some((fresh_length, _)), Some((index, old_length, old_offset)))
-                if old_length + 1 >= fresh_length =>
-            {
-                Some(SelectedMatch::OldOffset {
-                    index,
-                    length: old_length,
-                    offset: old_offset,
-                })
-            }
-            (Some((length, offset)), _) => Some(SelectedMatch::Fresh { length, offset }),
-            (None, Some((index, length, offset))) => Some(SelectedMatch::OldOffset {
-                index,
-                length,
-                offset,
-            }),
-            (None, None) => best_short_offset_match(&combined, pos, end)
-                .map(|offset| SelectedMatch::ShortOffset { offset }),
-        };
+        let selected = select_match(&combined, pos, end, &buckets, options, &old_offsets);
         if let Some(selected) = selected {
+            if should_lazy_emit_literal(
+                &combined,
+                pos,
+                end,
+                &buckets,
+                options,
+                &old_offsets,
+                selected,
+            ) {
+                tokens.push(EncodeToken::Literal(combined[pos]));
+                insert_match_position(&combined, pos, &mut buckets);
+                pos += 1;
+                continue;
+            }
             let (length, offset) = match selected {
                 SelectedMatch::Fresh { length, offset } => {
                     if last_match == Some((length, offset)) {
@@ -420,15 +492,94 @@ enum SelectedMatch {
     },
 }
 
+impl SelectedMatch {
+    fn length(self) -> usize {
+        match self {
+            SelectedMatch::Fresh { length, .. } | SelectedMatch::OldOffset { length, .. } => length,
+            SelectedMatch::ShortOffset { .. } => 2,
+        }
+    }
+
+    fn score(self) -> isize {
+        let length_score = self.length() as isize * 8;
+        let cost = match self {
+            SelectedMatch::OldOffset { .. } | SelectedMatch::ShortOffset { .. } => 4,
+            SelectedMatch::Fresh { offset, .. } => 8 + OFFSET_BITS[offset_slot_index(offset)],
+        };
+        length_score - isize::from(cost)
+    }
+}
+
+fn select_match(
+    input: &[u8],
+    pos: usize,
+    end: usize,
+    buckets: &[Vec<usize>],
+    options: EncodeOptions,
+    old_offsets: &[usize; 4],
+) -> Option<SelectedMatch> {
+    let fresh = best_match(input, pos, end, buckets, options);
+    let old = best_old_offset_match(input, pos, end, old_offsets);
+    match (fresh, old) {
+        (Some((fresh_length, _)), Some((index, old_length, old_offset)))
+            if old_length + 1 >= fresh_length =>
+        {
+            Some(SelectedMatch::OldOffset {
+                index,
+                length: old_length,
+                offset: old_offset,
+            })
+        }
+        (Some((length, offset)), _) => Some(SelectedMatch::Fresh { length, offset }),
+        (None, Some((index, length, offset))) => Some(SelectedMatch::OldOffset {
+            index,
+            length,
+            offset,
+        }),
+        (None, None) => best_short_offset_match(input, pos, end)
+            .map(|offset| SelectedMatch::ShortOffset { offset }),
+    }
+}
+
+fn should_lazy_emit_literal(
+    input: &[u8],
+    pos: usize,
+    end: usize,
+    buckets: &[Vec<usize>],
+    options: EncodeOptions,
+    old_offsets: &[usize; 4],
+    current: SelectedMatch,
+) -> bool {
+    if !options.lazy_matching || pos + 1 >= end {
+        return false;
+    }
+    let lookahead = options.lazy_lookahead.max(1);
+    (1..=lookahead)
+        .take_while(|offset| pos + offset < end)
+        .any(|offset| {
+            select_match(input, pos + offset, end, buckets, options, old_offsets).is_some_and(
+                |next| {
+                    let skipped_literal_score = offset as isize * 8;
+                    next.score() > current.score() + skipped_literal_score
+                },
+            )
+        })
+}
+
 fn best_match(
     input: &[u8],
     pos: usize,
     end: usize,
     buckets: &[Vec<usize>],
+    options: EncodeOptions,
 ) -> Option<(usize, usize)> {
-    let max_offset = pos.min(MAX_ENCODER_MATCH_OFFSET);
+    let max_offset = pos.min(options.max_match_distance);
     let max_length = (end - pos).min(MAX_ENCODER_MATCH_LENGTH);
-    if max_offset == 0 || max_length < 3 || pos + 2 >= input.len() {
+    if options.max_match_candidates == 0
+        || max_offset == 0
+        || max_length < 3
+        || pos + 2 >= input.len()
+    {
         return None;
     }
     let bucket = &buckets[match_hash(input, pos)];
@@ -458,11 +609,17 @@ fn best_match(
                 break;
             }
         }
-        if checked >= MAX_MATCH_CANDIDATES {
+        if checked >= options.max_match_candidates {
             break;
         }
     }
     best
+}
+
+fn offset_slot_index(offset: usize) -> usize {
+    offset_slot_for_match(offset)
+        .map(|(slot, _)| slot)
+        .unwrap_or(OFFSET_BITS.len() - 1)
 }
 
 fn best_old_offset_match(
@@ -1555,8 +1712,8 @@ impl BitWriter {
 #[cfg(test)]
 mod tests {
     use super::{
-        encode_tokens, unpack20_decode, unpack20_encode_literals, BitWriter, EncodeToken, Error,
-        Huffman, Unpack20, Unpack20Encoder,
+        encode_tokens, unpack20_decode, unpack20_encode_literals, BitWriter, EncodeOptions,
+        EncodeToken, Error, Huffman, Unpack20, Unpack20Encoder,
     };
 
     const AUTOREJ_PACKED: &[u8] = &[
@@ -1638,6 +1795,46 @@ mod tests {
 
         assert!(auto.len() < lz.len());
         assert_eq!(decoded, input);
+    }
+
+    #[test]
+    fn default_encode_options_match_legacy_entry_points() {
+        let input = b"rar20 option plumbing preserves default output ".repeat(128);
+        assert_eq!(
+            unpack20_encode_literals(&input).unwrap(),
+            super::unpack20_encode_literals_with_options(&input, EncodeOptions::default()).unwrap()
+        );
+        assert_eq!(
+            super::unpack20_encode_auto(&input).unwrap(),
+            super::unpack20_encode_auto_with_options(&input, EncodeOptions::default()).unwrap()
+        );
+
+        let first = b"solid rar20 option seed ".repeat(64);
+        let second = b"solid rar20 option seed with suffix ".repeat(32);
+        let mut legacy = Unpack20Encoder::new();
+        let mut explicit = Unpack20Encoder::with_options(EncodeOptions::default());
+        assert_eq!(
+            legacy.encode_member(&first).unwrap(),
+            explicit.encode_member(&first).unwrap()
+        );
+        assert_eq!(
+            legacy.encode_member(&second).unwrap(),
+            explicit.encode_member(&second).unwrap()
+        );
+    }
+
+    #[test]
+    fn encode_options_can_disable_fresh_lz_matches() {
+        let input = b"abcdefabcdefabcdefabcdef";
+        let default_tokens = encode_tokens(input, &[], EncodeOptions::default());
+        let literalish_tokens = encode_tokens(input, &[], EncodeOptions::new(0));
+
+        assert!(default_tokens
+            .iter()
+            .any(|token| matches!(token, EncodeToken::Match { .. })));
+        assert!(!literalish_tokens
+            .iter()
+            .any(|token| matches!(token, EncodeToken::Match { .. })));
     }
 
     #[test]
@@ -1751,7 +1948,7 @@ mod tests {
     #[test]
     fn encoder_emits_rar20_repeat_last_matches_for_regular_streams() {
         let input = b"\x00\x01\x02\x03".repeat(4096);
-        let tokens = encode_tokens(&input, &[]);
+        let tokens = encode_tokens(&input, &[], EncodeOptions::default());
         let packed = unpack20_encode_literals(&input).unwrap();
 
         assert!(tokens
@@ -1764,7 +1961,7 @@ mod tests {
     #[test]
     fn encoder_emits_rar20_minimum_length_fresh_matches() {
         let input = b"abcabc";
-        let tokens = encode_tokens(input, &[]);
+        let tokens = encode_tokens(input, &[], EncodeOptions::default());
         let packed = unpack20_encode_literals(input).unwrap();
 
         assert!(matches!(
@@ -1785,7 +1982,7 @@ mod tests {
     #[test]
     fn encoder_emits_rar20_short_offset_matches() {
         let input = b"abab";
-        let tokens = encode_tokens(input, &[]);
+        let tokens = encode_tokens(input, &[], EncodeOptions::default());
         let packed = unpack20_encode_literals(input).unwrap();
 
         assert!(matches!(
@@ -1802,7 +1999,7 @@ mod tests {
     #[test]
     fn encoder_emits_rar20_old_offset_matches() {
         let input = b"abcdabcdXYZXYZwxyzwxyz";
-        let tokens = encode_tokens(input, &[]);
+        let tokens = encode_tokens(input, &[], EncodeOptions::default());
         let packed = unpack20_encode_literals(input).unwrap();
 
         assert!(tokens
@@ -1819,7 +2016,7 @@ mod tests {
         input.extend(std::iter::repeat_n(0, 300 * 1024));
         input.extend_from_slice(phrase);
         input.extend_from_slice(phrase);
-        let tokens = encode_tokens(&input, &[]);
+        let tokens = encode_tokens(&input, &[], EncodeOptions::default());
         let packed = unpack20_encode_literals(&input).unwrap();
 
         assert!(tokens.iter().any(|token| matches!(
@@ -1885,7 +2082,7 @@ mod tests {
         let mut encoder = Unpack20Encoder::new();
         let first_packed = encoder.encode_member(&first).unwrap();
         let second_packed = encoder.encode_member(&second).unwrap();
-        let tokens = encode_tokens(&second, &first);
+        let tokens = encode_tokens(&second, &first, EncodeOptions::default());
 
         assert!(matches!(tokens.first(), Some(EncodeToken::Match { .. })));
         assert!(second_packed.len() < independent.len());

@@ -2,6 +2,8 @@
 
 ## Hardening
 - Add adversarial PPMd fixtures as corpus bugs appear.
+- Pin RAR 1.4 old-distance writer tokens against DOS RAR 1.402 before
+  re-enabling them in the compatibility writer profile.
 
 ## Optional Oracles
 

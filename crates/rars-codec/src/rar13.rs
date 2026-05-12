@@ -120,6 +120,10 @@ impl EncodeOptions {
         self.max_long_match_distance = distance;
         self
     }
+
+    pub const fn old_distance_tokens_enabled(self) -> bool {
+        self.old_distance_tokens
+    }
 }
 
 impl Default for EncodeOptions {
