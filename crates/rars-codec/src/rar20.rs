@@ -297,7 +297,7 @@ fn encode_member_with_tables(
     fixed_table: Option<FixedEncodeTable>,
     table_lengths: &[u8; TABLE_COUNT],
 ) -> Result<Vec<u8>> {
-    let level_tokens = encode_table_level_tokens(&table_lengths);
+    let level_tokens = encode_table_level_tokens(table_lengths);
     let level_lengths = level_code_lengths_for_tokens(&level_tokens);
     let level_codes = canonical_codes(&level_lengths)?;
     let main_codes = canonical_codes(&table_lengths[..MAIN_COUNT])?;
@@ -450,16 +450,15 @@ fn encode_tokens(
             cost_model,
         );
         if let Some(selected) = selected {
-            if should_lazy_emit_literal(
-                &combined,
-                pos,
+            let lazy = LazyMatchContext {
+                input: &combined,
                 end,
-                &buckets,
+                buckets: &buckets,
                 options,
-                &old_offsets,
+                old_offsets: &old_offsets,
                 cost_model,
-                selected,
-            ) {
+            };
+            if should_lazy_emit_literal(pos, selected, lazy) {
                 tokens.push(EncodeToken::Literal(combined[pos]));
                 insert_match_position(&combined, pos, &mut buckets);
                 pos += 1;
@@ -663,37 +662,43 @@ fn select_match(
     }
 }
 
-fn should_lazy_emit_literal(
-    input: &[u8],
-    pos: usize,
+struct LazyMatchContext<'a> {
+    input: &'a [u8],
     end: usize,
-    buckets: &[Vec<usize>],
+    buckets: &'a [Vec<usize>],
     options: EncodeOptions,
-    old_offsets: &[usize; 4],
-    cost_model: Option<&CostModel<'_>>,
+    old_offsets: &'a [usize; 4],
+    cost_model: Option<&'a CostModel<'a>>,
+}
+
+fn should_lazy_emit_literal(
+    pos: usize,
     current: SelectedMatch,
+    context: LazyMatchContext<'_>,
 ) -> bool {
-    if !options.lazy_matching || pos + 1 >= end {
+    if !context.options.lazy_matching || pos + 1 >= context.end {
         return false;
     }
-    let lookahead = options.lazy_lookahead.max(1);
+    let lookahead = context.options.lazy_lookahead.max(1);
     (1..=lookahead)
-        .take_while(|offset| pos + offset < end)
+        .take_while(|offset| pos + offset < context.end)
         .any(|offset| {
             select_match(
-                input,
+                context.input,
                 pos + offset,
-                end,
-                buckets,
-                options,
-                old_offsets,
-                cost_model,
+                context.end,
+                context.buckets,
+                context.options,
+                context.old_offsets,
+                context.cost_model,
             )
             .is_some_and(|next| {
-                let current_score = cost_model
+                let current_score = context
+                    .cost_model
                     .and_then(|cost_model| cost_model.selected_score(current))
                     .unwrap_or_else(|| current.score());
-                let next_score = cost_model
+                let next_score = context
+                    .cost_model
                     .and_then(|cost_model| cost_model.selected_score(next))
                     .unwrap_or_else(|| next.score());
                 let skipped_literal_score = offset as isize * 8;
