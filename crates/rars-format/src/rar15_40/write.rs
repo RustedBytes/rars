@@ -1940,6 +1940,59 @@ mod tests {
     }
 
     #[test]
+    fn auto_x86_policy_considers_tight_ranges_inside_sparse_spans() {
+        let mut data = Vec::new();
+        data.extend((0..1024).map(|index| (index * 37 + 11) as u8));
+        let first_cluster_start = data.len();
+        for index in 0..16usize {
+            data.extend_from_slice(&[0x55, 0x8b, 0xec, 0x83, 0xec, (index & 0x7f) as u8]);
+            let call_pos = data.len();
+            data.push(0xe8);
+            let target = first_cluster_start + 0x500;
+            let relative = (target as i64 - (call_pos + 5) as i64) as i32;
+            data.extend_from_slice(&relative.to_le_bytes());
+            data.extend_from_slice(&[0x83, 0xc4, 0x04, 0x5d, 0xc3]);
+        }
+        data.extend((0..3200).map(|index| (index * 251 + 17) as u8));
+        let second_cluster_start = data.len();
+        for index in 0..16usize {
+            data.extend_from_slice(&[0x56, 0x8b, 0xf1, 0x83, 0xec, (index & 0x7f) as u8]);
+            let call_pos = data.len();
+            data.push(0xe8);
+            let target = second_cluster_start + 0x500;
+            let relative = (target as i64 - (call_pos + 5) as i64) as i32;
+            data.extend_from_slice(&relative.to_le_bytes());
+            data.extend_from_slice(&[0x83, 0xc4, 0x04, 0x5e, 0xc3]);
+        }
+        data.extend((0..1024).map(|index| (index * 53 + 7) as u8));
+
+        let ranges = disjoint_filter_ranges(auto_x86_filter_ranges(&data, false));
+        let filters: Vec<_> = ranges
+            .iter()
+            .cloned()
+            .map(|range| FilterSpec::range(FilterKind::E8, range))
+            .collect();
+        let broad_range = first_cluster_start..second_cluster_start + 16 * 16;
+        let broad = encode_rar29_filtered_member(
+            &data,
+            FilterSpec::range(FilterKind::E8, broad_range),
+            EncodeOptions::default(),
+        )
+        .unwrap();
+        let tight = encode_rar29_filtered_members(&data, &filters, EncodeOptions::default())
+            .expect("tight sparse x86 filters should encode");
+        let auto = encode_rar29_auto_filtered_member(&data, EncodeOptions::default(), 0x35, false)
+            .unwrap();
+
+        assert!(
+            tight.len() < broad.len(),
+            "tight x86 ranges should avoid filtering sparse data gaps"
+        );
+        assert!(auto.data.len() <= tight.len());
+        assert_eq!(unpack29_decode(&auto.data, data.len()).unwrap(), data);
+    }
+
+    #[test]
     fn auto_delta_filter_range_skips_container_edges_and_aligns_channels() {
         let data = vec![0u8; 512];
 

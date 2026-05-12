@@ -24,10 +24,6 @@
   filtering, and conservative solid reset policy are present. Remaining work is
   deeper optimal parsing and oracle-guided filter range tuning against WinRAR
   6.x/7.x oracles.
-- Expand RAR7-specific writer policy beyond the current dictionary-field
-  upgrade path. RAR70 now uses v1 compression-info fields when `--dict-size`
-  cannot be represented as RAR5 v0, with writer and CLI coverage, but the
-  default benchmark corpus still emits RAR5-compatible streams.
 - Refine non-zero `--level` mappings for RAR13/RAR15 after the bench
   harness reports which policy differences matter.
 

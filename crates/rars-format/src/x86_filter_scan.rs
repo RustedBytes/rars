@@ -1,6 +1,7 @@
 use std::ops::Range;
 
 const AUTO_X86_CLUSTER_GAP: usize = 4096;
+const AUTO_X86_TIGHT_CLUSTER_GAP: usize = 512;
 const AUTO_X86_SPAN_CLUSTER_GAP: usize = 32768;
 const AUTO_X86_RANGE_PADDING: usize = 16;
 const AUTO_X86_MAX_RANGES: usize = 8;
@@ -8,6 +9,23 @@ const AUTO_X86_MAX_SPAN_RANGES: usize = 4;
 const AUTO_X86_MIN_SPAN_OPCODES: usize = 4;
 
 pub(crate) fn auto_x86_filter_ranges(data: &[u8], include_e9: bool) -> Vec<Range<usize>> {
+    let mut ranges =
+        auto_x86_filter_ranges_with_cluster_gap(data, include_e9, AUTO_X86_CLUSTER_GAP);
+    for range in
+        auto_x86_filter_ranges_with_cluster_gap(data, include_e9, AUTO_X86_TIGHT_CLUSTER_GAP)
+    {
+        if !ranges.contains(&range) {
+            ranges.push(range);
+        }
+    }
+    ranges
+}
+
+fn auto_x86_filter_ranges_with_cluster_gap(
+    data: &[u8],
+    include_e9: bool,
+    cluster_gap: usize,
+) -> Vec<Range<usize>> {
     if data.len() <= 5 {
         return Vec::new();
     }
@@ -21,7 +39,7 @@ pub(crate) fn auto_x86_filter_ranges(data: &[u8], include_e9: bool) -> Vec<Range
         }
 
         match current {
-            Some((start, last, count)) if pos - last <= AUTO_X86_CLUSTER_GAP => {
+            Some((start, last, count)) if pos - last <= cluster_gap => {
                 current = Some((start, pos, count + 1));
             }
             Some(cluster) => {
@@ -135,6 +153,35 @@ mod tests {
 
         assert_eq!(ranges.len(), 1);
         assert_eq!(ranges[0], 1008..1151);
+    }
+
+    #[test]
+    fn includes_tighter_ranges_inside_sparse_code_spans() {
+        let mut data = vec![0x41u8; 8_000];
+        for pos in [1024, 1088, 3600, 3664] {
+            data[pos] = 0xe8;
+        }
+
+        let ranges = auto_x86_filter_ranges(&data, false);
+
+        assert!(
+            ranges
+                .iter()
+                .any(|range| range.start <= 1024 && range.end > 3664 && range.len() > 2000),
+            "missing broad sparse-code span: {ranges:?}"
+        );
+        assert!(
+            ranges.iter().any(|range| range.contains(&1024)
+                && range.contains(&1088)
+                && !range.contains(&3600)),
+            "missing first tight code cluster: {ranges:?}"
+        );
+        assert!(
+            ranges.iter().any(|range| range.contains(&3600)
+                && range.contains(&3664)
+                && !range.contains(&1088)),
+            "missing second tight code cluster: {ranges:?}"
+        );
     }
 
     #[test]
