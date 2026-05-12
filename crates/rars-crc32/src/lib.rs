@@ -11,9 +11,7 @@ impl Crc32 {
     }
 
     pub fn update(&mut self, input: &[u8]) {
-        for &byte in input {
-            self.value = update_raw_byte(self.value, byte);
-        }
+        self.value = update_raw(self.value, input);
     }
 
     pub fn update_zeroes(&mut self, len: u64) {
@@ -48,11 +46,7 @@ pub fn crc32(input: &[u8]) -> u32 {
 }
 
 pub fn crc32_raw(input: &[u8]) -> u32 {
-    let mut crc = 0xffff_ffff;
-    for &byte in input {
-        crc = update_raw_byte(crc, byte);
-    }
-    crc
+    update_raw(0xffff_ffff, input)
 }
 
 pub fn table_entry(index: u8) -> u32 {
@@ -61,6 +55,26 @@ pub fn table_entry(index: u8) -> u32 {
 
 fn update_raw_byte(crc: u32, byte: u8) -> u32 {
     (crc >> 8) ^ table_entry((crc as u8) ^ byte)
+}
+
+fn update_raw(mut crc: u32, mut input: &[u8]) -> u32 {
+    while input.len() >= 8 {
+        let word = u32::from_le_bytes([input[0], input[1], input[2], input[3]]);
+        crc ^= word;
+        crc = TABLES[7][(crc & 0xff) as usize]
+            ^ TABLES[6][((crc >> 8) & 0xff) as usize]
+            ^ TABLES[5][((crc >> 16) & 0xff) as usize]
+            ^ TABLES[4][((crc >> 24) & 0xff) as usize]
+            ^ TABLES[3][input[4] as usize]
+            ^ TABLES[2][input[5] as usize]
+            ^ TABLES[1][input[6] as usize]
+            ^ TABLES[0][input[7] as usize];
+        input = &input[8..];
+    }
+    for &byte in input {
+        crc = update_raw_byte(crc, byte);
+    }
+    crc
 }
 
 fn zero_byte_matrix() -> [u32; 32] {
@@ -95,10 +109,11 @@ fn gf2_matrix_square(matrix: &[u32; 32]) -> [u32; 32] {
     square
 }
 
-const TABLE: [u32; 256] = crc32_table();
+const TABLES: [[u32; 256]; 8] = crc32_tables();
+const TABLE: [u32; 256] = TABLES[0];
 
-const fn crc32_table() -> [u32; 256] {
-    let mut table = [0; 256];
+const fn crc32_tables() -> [[u32; 256]; 8] {
+    let mut tables = [[0; 256]; 8];
     let mut i = 0;
     while i < 256 {
         let mut value = i as u32;
@@ -108,10 +123,21 @@ const fn crc32_table() -> [u32; 256] {
             value = (value >> 1) ^ (0xedb8_8320 & mask);
             bit += 1;
         }
-        table[i] = value;
+        tables[0][i] = value;
         i += 1;
     }
-    table
+
+    let mut table = 1;
+    while table < 8 {
+        let mut i = 0;
+        while i < 256 {
+            let previous = tables[table - 1][i];
+            tables[table][i] = (previous >> 8) ^ tables[0][(previous & 0xff) as usize];
+            i += 1;
+        }
+        table += 1;
+    }
+    tables
 }
 
 #[cfg(test)]

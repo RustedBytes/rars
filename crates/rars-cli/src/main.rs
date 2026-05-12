@@ -32,6 +32,7 @@ use repair::cmd_repair;
 use std::collections::HashSet;
 use std::env;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use time::{current_filetime, format_filetime_utc};
 use volumes::{
@@ -585,8 +586,10 @@ fn reject_ambiguous_extract_target(paths: &[String]) -> CliResult<()> {
 }
 
 fn looks_like_archive_path(path: &str) -> CliResult<bool> {
-    let bytes = match fs::read(path) {
-        Ok(bytes) => bytes,
+    const ARCHIVE_SNIFF_LIMIT: u64 = 128 * 1024;
+
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
         Err(error)
             if matches!(
                 error.kind(),
@@ -601,6 +604,15 @@ fn looks_like_archive_path(path: &str) -> CliResult<bool> {
             )))
         }
     };
+    let mut bytes = Vec::new();
+    std::io::Read::by_ref(&mut file)
+        .take(ARCHIVE_SNIFF_LIMIT)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            CliError::general(format!(
+                "failed to inspect extract output path '{path}': {error}"
+            ))
+        })?;
     Ok(ArchiveReader::detect(&bytes).is_ok())
 }
 
