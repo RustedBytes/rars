@@ -1,0 +1,223 @@
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use rars::ArchiveVersion;
+
+#[derive(Parser)]
+#[command(
+    name = "rars",
+    version,
+    about = "Pure-Rust RAR archive toolkit",
+    long_about = "rars reads, writes, and repairs RAR archives across the RAR 1.3 through RAR 7.x family.",
+    after_help = "Exit codes:\n  \
+                  0  success\n  \
+                  1  operation failed\n  \
+                  2  invalid command line\n  \
+                  3  password required, wrong password, or corrupt encrypted data",
+    propagate_version = true,
+    disable_help_subcommand = true,
+)]
+pub(crate) struct Cli {
+    #[command(subcommand)]
+    pub command: Command,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum Command {
+    /// Display archive metadata
+    Info(InfoArgs),
+    /// Verify archive integrity by extracting to a sink
+    Test(TestArgs),
+    /// Extract archive contents
+    #[command(visible_alias = "x")]
+    Extract(ExtractArgs),
+    /// Repair a damaged archive using its recovery record
+    Repair(RepairArgs),
+    /// Create a new archive
+    #[command(visible_alias = "a")]
+    Add(AddArgs),
+}
+
+#[derive(Args)]
+pub(crate) struct PasswordArgs {
+    /// Archive password (visible in process list — prefer --password-file or the TTY prompt)
+    #[arg(short = 'p', long, value_name = "PASSWORD")]
+    pub password: Option<String>,
+    /// Read password from file ("-" for stdin); trailing newlines are stripped
+    #[arg(long, value_name = "PATH", conflicts_with = "password")]
+    pub password_file: Option<String>,
+}
+
+#[derive(Args)]
+pub(crate) struct InfoArgs {
+    #[command(flatten)]
+    pub password: PasswordArgs,
+    /// One or more archive paths
+    #[arg(value_name = "ARCHIVE", required = true)]
+    pub paths: Vec<String>,
+}
+
+#[derive(Args)]
+pub(crate) struct TestArgs {
+    #[command(flatten)]
+    pub password: PasswordArgs,
+    /// Archive path (first volume of a multi-part set), optionally followed by sibling parts
+    #[arg(value_name = "ARCHIVE", required = true)]
+    pub paths: Vec<String>,
+}
+
+#[derive(Args)]
+pub(crate) struct ExtractArgs {
+    #[command(flatten)]
+    pub password: PasswordArgs,
+    /// Behaviour when an extracted file already exists on disk
+    #[arg(long, value_enum, default_value_t = OverwriteCli::Never)]
+    pub overwrite: OverwriteCli,
+    /// Archive (and optional sibling parts) followed by an output directory
+    #[arg(value_name = "PATH", required = true, num_args = 2..)]
+    pub paths: Vec<String>,
+}
+
+#[derive(Args)]
+pub(crate) struct RepairArgs {
+    #[command(flatten)]
+    pub password: PasswordArgs,
+    /// Either <archive> <repaired-archive>, or <rar-parts-and-rev-files...> <outdir>
+    #[arg(value_name = "PATH", required = true, num_args = 2..)]
+    pub paths: Vec<String>,
+}
+
+#[derive(Args)]
+pub(crate) struct AddArgs {
+    #[command(flatten)]
+    pub password: PasswordArgs,
+    /// Target archive format (default: rar50, the modern widely-compatible format)
+    #[arg(long, value_enum, default_value_t = TargetFormat::Rar50)]
+    pub format: TargetFormat,
+    /// Store files without compression (equivalent to --level 0)
+    #[arg(long)]
+    pub store: bool,
+    /// Compression level (0..5; 0 implies --store)
+    #[arg(long, value_name = "LEVEL")]
+    pub level: Option<u8>,
+    /// Dictionary size (e.g. 4m, 128k)
+    #[arg(long, value_name = "SIZE", value_parser = crate::parse_size_string)]
+    pub dict_size: Option<usize>,
+    /// Use solid compression (treats inputs as one continuous stream)
+    #[arg(long)]
+    pub solid: bool,
+    /// Encrypt archive headers (requires --password)
+    #[arg(long = "encrypt-headers")]
+    pub encrypt_headers: bool,
+    /// Emit a quick-open service block (RAR 5+ only)
+    #[arg(long = "quick-open")]
+    pub quick_open: bool,
+    /// Archive-level comment
+    #[arg(long, value_name = "TEXT")]
+    pub comment: Option<String>,
+    /// Archive name to embed in archive metadata service (RAR 5+)
+    #[arg(long = "archive-name", value_name = "NAME")]
+    pub archive_name: Option<String>,
+    /// Per-file comment
+    #[arg(long = "file-comment", value_name = "TEXT")]
+    pub file_comment: Option<String>,
+    /// Add a recovery record at the given percentage (1..100; RAR 5+)
+    #[arg(long = "recovery-percent", value_name = "PERCENT")]
+    pub recovery_percent: Option<u64>,
+    /// Split archive into volumes of this size
+    #[arg(long = "volume-size", value_name = "SIZE", value_parser = crate::parse_size_string)]
+    pub volume_size: Option<usize>,
+    /// Delta filter with the given channel count
+    #[arg(long = "delta-filter", value_name = "CHANNELS")]
+    pub delta_filter: Option<usize>,
+    /// E8 x86 call filter
+    #[arg(long = "e8-filter", conflicts_with = "e8e9_filter")]
+    pub e8_filter: bool,
+    /// E8E9 x86 call/jump filter
+    #[arg(long = "e8e9-filter")]
+    pub e8e9_filter: bool,
+    /// Itanium filter
+    #[arg(long = "itanium-filter")]
+    pub itanium_filter: bool,
+    /// RGB image filter with the given pixel width
+    #[arg(long = "rgb-filter", value_name = "WIDTH")]
+    pub rgb_filter: Option<usize>,
+    /// Audio filter with the given channel count
+    #[arg(long = "audio-filter", value_name = "CHANNELS")]
+    pub audio_filter: Option<usize>,
+    /// ARM filter
+    #[arg(long = "arm-filter")]
+    pub arm_filter: bool,
+    /// Auto-detect data filter
+    #[arg(long = "auto-filter")]
+    pub auto_filter: bool,
+    /// Use the PPMd compression algorithm (RAR 2.9/3.x/4.x only)
+    #[arg(long)]
+    pub ppmd: bool,
+    /// Output archive path
+    #[arg(value_name = "ARCHIVE")]
+    pub archive: String,
+    /// Files (and directories) to add to the archive
+    #[arg(value_name = "FILE", required = true)]
+    pub files: Vec<String>,
+}
+
+#[derive(Copy, Clone, ValueEnum)]
+pub(crate) enum TargetFormat {
+    Rar14,
+    Rar15,
+    Rar20,
+    Rar29,
+    Rar30,
+    Rar40,
+    Rar50,
+    Rar70,
+}
+
+impl TargetFormat {
+    pub(crate) fn archive_version(self) -> ArchiveVersion {
+        match self {
+            Self::Rar14 => ArchiveVersion::Rar14,
+            Self::Rar15 => ArchiveVersion::Rar15,
+            Self::Rar20 => ArchiveVersion::Rar20,
+            Self::Rar29 => ArchiveVersion::Rar29,
+            Self::Rar30 => ArchiveVersion::Rar30,
+            Self::Rar40 => ArchiveVersion::Rar40,
+            Self::Rar50 => ArchiveVersion::Rar50,
+            Self::Rar70 => ArchiveVersion::Rar70,
+        }
+    }
+}
+
+#[derive(Copy, Clone, ValueEnum)]
+pub(crate) enum OverwriteCli {
+    Never,
+    Always,
+}
+
+impl From<OverwriteCli> for crate::output::OverwritePolicy {
+    fn from(value: OverwriteCli) -> Self {
+        match value {
+            OverwriteCli::Never => Self::Never,
+            OverwriteCli::Always => Self::Always,
+        }
+    }
+}
+
+pub(crate) fn parse() -> Cli {
+    match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(err) => {
+            use clap::error::ErrorKind;
+            let message = err.to_string();
+            match err.kind() {
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => {
+                    print!("{message}");
+                    std::process::exit(0);
+                }
+                _ => {
+                    eprint!("{message}");
+                    std::process::exit(2);
+                }
+            }
+        }
+    }
+}

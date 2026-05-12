@@ -1,6 +1,7 @@
-use crate::password::{parse_password, read_archive_path_prompting};
+use crate::cli::RepairArgs;
+use crate::password::read_archive_path_prompting;
 use crate::volumes::{infer_part_index, parse_rar3_rev_volume, path_has_extension};
-use crate::{CliError, CliResult};
+use crate::{resolve_password_args, CliError, CliResult};
 use rars::Error;
 use rars_crc32::crc32;
 use std::fs;
@@ -8,13 +9,9 @@ use std::path::{Path, PathBuf};
 
 const RAR50_SIGNATURE: &[u8] = b"Rar!\x1a\x07\x01\x00";
 
-pub(crate) fn cmd_repair(args: &[String]) -> CliResult<()> {
-    let (mut password, paths) = parse_password(args)?;
-    if paths.len() < 2 {
-        return Err(CliError::usage(
-            "usage: rars repair [--password <password>] <archive> <repaired-archive>\n       rars repair <rar-parts-and-rev-files...> <outdir>",
-        ));
-    }
+pub(crate) fn cmd_repair(args: RepairArgs) -> CliResult<()> {
+    let mut password = resolve_password_args(&args.password)?;
+    let paths = args.paths;
     if paths.len() > 2 {
         if password.is_some() {
             return Err("REV repair does not use archive passwords".into());
@@ -157,7 +154,7 @@ fn cmd_repair_rev3(paths: &[String]) -> CliResult<()> {
             slots[index] = Some(bytes.as_slice());
         }
     }
-    let recovery: Vec<_> = recovery_inputs
+    let recovery: Vec<(usize, &[u8])> = recovery_inputs
         .iter()
         .map(|(index, bytes)| (*index, bytes.as_slice()))
         .collect();

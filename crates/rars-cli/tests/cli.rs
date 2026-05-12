@@ -722,36 +722,40 @@ fn password_file_and_stdin_password_unlock_encrypted_archives() {
 fn password_options_reject_missing_and_duplicate_sources() {
     let missing_value = rars().args(["test", "--password-file"]).output().unwrap();
     assert!(!missing_value.status.success());
-    assert!(stderr(&missing_value).contains("missing --password-file value"));
+    assert!(stderr(&missing_value).contains("--password-file"));
 
     let duplicate = rars()
         .args(["test", "--password", "one", "--password", "two"])
         .output()
         .unwrap();
     assert!(!duplicate.status.success());
-    assert!(stderr(&duplicate).contains("password was provided more than once"));
+    assert!(stderr(&duplicate).contains("cannot be used multiple times"));
 }
 
 #[test]
 fn prints_usage_without_command() {
     let output = rars().output().unwrap();
     assert_eq!(output.status.code(), Some(2));
-    assert!(stderr(&output).contains("usage:"));
+    assert!(stderr(&output).contains("Usage:"));
 }
 
 #[test]
 fn prints_usage_for_help_command() {
     let output = rars().arg("--help").output().unwrap();
     assert!(output.status.success(), "stderr: {}", stderr(&output));
-    assert!(stderr(&output).contains("rars info [--password <password>|--password-file <path>]"));
-    assert!(stderr(&output).contains("exit codes:"));
+    let stdout = stdout(&output);
+    assert!(stdout.contains("Usage: rars <COMMAND>"));
+    assert!(stdout.contains("Exit codes:"));
+    assert!(stdout.contains("info"));
+    assert!(stdout.contains("extract"));
+    assert!(stdout.contains("add"));
 }
 
 #[test]
 fn rejects_unknown_command() {
     let output = rars().arg("wat").output().unwrap();
     assert_eq!(output.status.code(), Some(2));
-    assert!(stderr(&output).contains("unknown command: wat"));
+    assert!(stderr(&output).contains("unrecognized subcommand 'wat'"));
 }
 
 #[test]
@@ -759,7 +763,7 @@ fn rejects_missing_subcommand_arguments() {
     for args in [&["info"][..], &["test"][..], &["x"][..]] {
         let output = rars().args(args).output().unwrap();
         assert_eq!(output.status.code(), Some(2), "args: {args:?}");
-        assert!(stderr(&output).contains("usage:"), "args: {args:?}");
+        assert!(stderr(&output).contains("Usage:"), "args: {args:?}");
     }
 }
 
@@ -780,7 +784,9 @@ fn rejects_non_rar_input_to_info() {
 fn rejects_bad_add_invocation_shape() {
     let output = rars().args(["a", "--format", "rar5"]).output().unwrap();
     assert!(!output.status.success());
-    assert!(stderr(&output).contains("usage: rars a"));
+    let stderr = stderr(&output);
+    assert!(stderr.contains("invalid value 'rar5'"));
+    assert!(stderr.contains("--format"));
 }
 
 #[test]
@@ -795,7 +801,10 @@ fn rejects_missing_add_option_values() {
     ] {
         let output = rars().args(args).output().unwrap();
         assert_eq!(output.status.code(), Some(2), "args: {args:?}");
-        assert!(stderr(&output).contains("missing"), "args: {args:?}");
+        assert!(
+            stderr(&output).contains("a value is required for"),
+            "args: {args:?}"
+        );
     }
 }
 
@@ -835,7 +844,7 @@ fn subcommands_print_help_and_version() {
             "args: {args:?}, stderr: {}",
             stderr(&help)
         );
-        assert!(stderr(&help).contains("usage:"), "args: {args:?}");
+        assert!(stdout(&help).contains("Usage:"), "args: {args:?}");
     }
 }
 
@@ -4955,7 +4964,9 @@ fn rejects_add_without_inputs() {
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
-    assert!(stderr(&output).contains("no input files"));
+    let stderr = stderr(&output);
+    assert!(stderr.contains("required"));
+    assert!(stderr.contains("<FILE>"));
 }
 
 #[test]
@@ -4972,7 +4983,7 @@ fn rejects_unknown_add_option() {
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
-    assert!(stderr(&output).contains("unknown add option: --not-a-real-option"));
+    assert!(stderr(&output).contains("unexpected argument '--not-a-real-option'"));
 }
 
 fn stdout(output: &std::process::Output) -> String {

@@ -17,37 +17,18 @@ fn read_options(password: Option<&[u8]>) -> ArchiveReadOptions<'_> {
     }
 }
 
-pub(crate) fn parse_password(args: &[String]) -> CliResult<(Option<Password>, Vec<String>)> {
-    let mut password = None;
-    let mut rest = Vec::new();
-    let mut iter = args.iter();
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--password" | "-p" => {
-                let value = iter
-                    .next()
-                    .ok_or_else(|| CliError::usage("missing password value"))?;
-                set_password(&mut password, read_password_value(value)?)?;
-            }
-            "--password-file" => {
-                let path = iter
-                    .next()
-                    .ok_or_else(|| CliError::usage("missing --password-file value"))?;
-                let bytes = Zeroizing::new(fs::read(path)?);
-                set_password(&mut password, trim_password_line(bytes))?;
-            }
-            _ => rest.push(arg.clone()),
-        }
+pub(crate) fn resolve_password(
+    inline: Option<&str>,
+    path: Option<&str>,
+) -> CliResult<Option<Password>> {
+    if let Some(value) = inline {
+        return Ok(Some(read_password_value(value)?));
     }
-    Ok((password, rest))
-}
-
-fn set_password(slot: &mut Option<Password>, value: Password) -> CliResult<()> {
-    if slot.is_some() {
-        return Err(CliError::usage("password was provided more than once"));
+    if let Some(path) = path {
+        let bytes = Zeroizing::new(fs::read(path)?);
+        return Ok(Some(trim_password_line(bytes)));
     }
-    *slot = Some(value);
-    Ok(())
+    Ok(None)
 }
 
 fn read_password_value(value: &str) -> CliResult<Password> {
