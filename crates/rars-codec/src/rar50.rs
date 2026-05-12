@@ -1241,7 +1241,7 @@ fn consider_match_candidate(
     length: usize,
     distance: usize,
 ) {
-    if length < 4 || length_slot_for_match_length(length, distance).is_none() {
+    if length < 4 {
         return;
     }
     let Ok(cost) = estimated_match_cost(state, length, distance, distance_size) else {
@@ -1272,22 +1272,25 @@ fn estimated_match_cost(
     distance: usize,
     distance_size: usize,
 ) -> Result<usize> {
-    match state.encode_match(length, distance, distance_size)? {
-        EncodedMatch::LastLengthRepeat => Ok(2),
-        EncodedMatch::RepeatDistance { length_slot, .. } => {
-            Ok(5 + usize::from(length_slot_extra_bits(length_slot)?))
-        }
-        EncodedMatch::New {
-            length_slot,
-            distance_bit_count,
-            ..
-        } => Ok(10 + usize::from(length_slot_extra_bits(length_slot)?) + distance_bit_count),
+    if distance == state.reps[0] && length == state.last_length && state.last_length != 0 {
+        return Ok(2);
     }
-}
+    if state
+        .reps
+        .iter()
+        .any(|&repeat_distance| repeat_distance == distance && repeat_distance != 0)
+    {
+        let (length_slot, _) = length_slot_for_match(length)?;
+        return Ok(5 + usize::from(length_slot_extra_bits(length_slot)?));
+    }
 
-fn length_slot_for_match_length(length: usize, distance: usize) -> Option<(usize, usize)> {
-    let encoded_length = length.checked_sub(length_bonus(distance))?;
-    length_slot_for_match(encoded_length).ok()
+    let (distance_slot, _) = distance_slot_for_match(distance, distance_size)?;
+    let encoded_length = length
+        .checked_sub(length_bonus(distance))
+        .ok_or(Error::InvalidData("RAR 5 adjusted match length underflows"))?;
+    let (length_slot, _) = length_slot_for_match(encoded_length)?;
+    Ok(10 + usize::from(length_slot_extra_bits(length_slot)?)
+        + distance_slot_bit_count(distance_slot)?)
 }
 
 fn insert_match_position(input: &[u8], pos: usize, buckets: &mut [Vec<usize>]) {

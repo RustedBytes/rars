@@ -91,8 +91,8 @@ pub(super) fn encode_options_for_level(
         Some(1) => 8,
         Some(2) => 32,
         Some(3) => 64,
-        Some(4) => 96,
-        Some(5) => 128,
+        Some(4) => 48,
+        Some(5) => 64,
         Some(_) => {
             return Err(Error::InvalidHeader(
                 "RAR 5 compression level must be in the range 0..5",
