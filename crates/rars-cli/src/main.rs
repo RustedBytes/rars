@@ -1519,7 +1519,10 @@ fn cmd_add(args: &[String]) -> CliResult<()> {
         AddWritePlan::Rar13 => {
             let mut features = FeatureSet::store_only();
             features.solid = solid;
-            let options = Rar13WriterOptions::new(target, features);
+            let mut options = Rar13WriterOptions::new(target, features);
+            if let Some(level) = compression_level {
+                options = options.with_compression_level(level);
+            }
             if let Some(volume_size) = volume_size {
                 // Invariant: parse_add_command rejects add commands without inputs.
                 let entry = owned.first().expect("one input checked above");

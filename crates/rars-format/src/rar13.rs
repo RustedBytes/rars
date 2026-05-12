@@ -4,7 +4,10 @@ use crate::features::FeatureSet;
 use crate::io_util::{read_exact_at, read_u16, read_u32};
 pub(crate) use crate::source::ArchiveSource;
 use crate::version::{ArchiveFamily, ArchiveVersion};
-use rars_codec::rar13::{unpack15_decode, unpack15_encode, Unpack15, Unpack15Encoder};
+use rars_codec::rar13::{
+    unpack15_decode, unpack15_encode, unpack15_encode_with_options,
+    EncodeOptions as Rar15EncodeOptions, Unpack15, Unpack15Encoder,
+};
 use rars_crypto::rar13::{Rar13Cipher, Rar13DecryptReader};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -100,11 +103,21 @@ pub struct ExtractedEntryMeta {
 pub struct WriterOptions {
     pub target: ArchiveVersion,
     pub features: FeatureSet,
+    pub compression_level: Option<u8>,
 }
 
 impl WriterOptions {
     pub const fn new(target: ArchiveVersion, features: FeatureSet) -> Self {
-        Self { target, features }
+        Self {
+            target,
+            features,
+            compression_level: None,
+        }
+    }
+
+    pub const fn with_compression_level(mut self, level: u8) -> Self {
+        self.compression_level = Some(level);
+        self
     }
 }
 
@@ -113,6 +126,7 @@ impl Default for WriterOptions {
         Self {
             target: ArchiveVersion::Rar14,
             features: FeatureSet::store_only(),
+            compression_level: None,
         }
     }
 }
@@ -1040,21 +1054,30 @@ pub fn write_compressed_archive_with_comment(
     }
     options.features.validate_for(options.target)?;
     validate_compressed_writer_features(options.target, options.features)?;
+    validate_compression_level(options)?;
 
     let mut out = Vec::new();
     write_main_header(&mut out, options.features, archive_comment)?;
 
-    let mut solid_encoder = options.features.solid.then(Unpack15Encoder::new);
+    let encode_options = rar15_encode_options_for_level(options.compression_level)?;
+    let mut solid_encoder = options
+        .features
+        .solid
+        .then(|| Unpack15Encoder::with_options(encode_options));
 
     for entry in entries {
         validate_file_entry(entry.name, entry.data)?;
         let solid = solid_encoder.is_some();
         let mut packed = if let Some(encoder) = solid_encoder.as_mut() {
             encoder.encode_member(entry.data)?
+        } else if options.compression_level == Some(0) {
+            entry.data.to_vec()
         } else {
-            unpack15_encode(entry.data)?
+            unpack15_encode_with_options(entry.data, encode_options)?
         };
-        let method = if !solid && packed.len() >= entry.data.len() {
+        let method = if options.compression_level == Some(0)
+            || (!solid && packed.len() >= entry.data.len())
+        {
             packed = entry.data.to_vec();
             METHOD_STORE
         } else {
@@ -1144,7 +1167,11 @@ pub fn write_compressed_volumes(
         options,
     )?;
 
-    let packed = unpack15_encode(entry.data)?;
+    validate_compression_level(options)?;
+    let packed = unpack15_encode_with_options(
+        entry.data,
+        rar15_encode_options_for_level(options.compression_level)?,
+    )?;
     write_split_volumes(SplitVolumeRecord {
         name: entry.name,
         unpacked: entry.data,
@@ -1208,6 +1235,43 @@ fn validate_compressed_writer_features(
         "authenticity_verification",
     )?;
     Ok(())
+}
+
+fn validate_compression_level(options: WriterOptions) -> Result<()> {
+    if matches!(options.compression_level, Some(level) if level > 5) {
+        return Err(Error::InvalidHeader(
+            "RAR compression level must be in the range 0..5",
+        ));
+    }
+    Ok(())
+}
+
+fn rar15_encode_options_for_level(level: Option<u8>) -> Result<Rar15EncodeOptions> {
+    let level = level.unwrap_or(5);
+    match level {
+        0 => Ok(Rar15EncodeOptions::new()
+            .with_old_distance_tokens(false)
+            .with_lazy_matching(false)
+            .with_stmode_literal_runs(false)
+            .with_max_long_match_distance(0)),
+        1 => Ok(Rar15EncodeOptions::new()
+            .with_old_distance_tokens(false)
+            .with_lazy_matching(false)
+            .with_stmode_literal_runs(false)
+            .with_max_long_match_distance(4 * 1024)),
+        2 => Ok(Rar15EncodeOptions::new()
+            .with_lazy_matching(false)
+            .with_stmode_literal_runs(false)
+            .with_max_long_match_distance(8 * 1024)),
+        3 => Ok(Rar15EncodeOptions::new()
+            .with_lazy_matching(false)
+            .with_max_long_match_distance(16 * 1024)),
+        4 => Ok(Rar15EncodeOptions::new().with_max_long_match_distance(24 * 1024)),
+        5 => Ok(Rar15EncodeOptions::new()),
+        _ => Err(Error::InvalidHeader(
+            "RAR compression level must be in the range 0..5",
+        )),
+    }
 }
 
 fn reject_writer_feature(
@@ -1869,6 +1933,37 @@ mod tests {
     }
 
     #[test]
+    fn compressed_writer_levels_control_rar15_encoder_policy() {
+        let mut data: Vec<_> = (0..5000).map(|index| (index * 73 + 19) as u8).collect();
+        data.extend_from_within(..256);
+        let input = [FileEntry {
+            name: b"level-policy.bin",
+            data: &data,
+            file_time: 0,
+            file_attr: 0x20,
+            password: None,
+            file_comment: None,
+        }];
+
+        let level_one =
+            write_compressed_archive(&input, WriterOptions::default().with_compression_level(1))
+                .unwrap();
+        let level_five =
+            write_compressed_archive(&input, WriterOptions::default().with_compression_level(5))
+                .unwrap();
+        let level_one = Archive::parse(&level_one).unwrap();
+        let level_five = Archive::parse(&level_five).unwrap();
+        let level_one_file = &level_one.entries[0];
+        let level_five_file = &level_five.entries[0];
+
+        assert_eq!(level_one_file.header.method, METHOD_BEST);
+        assert_eq!(level_five_file.header.method, METHOD_BEST);
+        assert!(level_five_file.header.pack_size < level_one_file.header.pack_size);
+        assert_eq!(collect_extract(&level_one, None).unwrap()[0].data, data);
+        assert_eq!(collect_extract(&level_five, None).unwrap()[0].data, data);
+    }
+
+    #[test]
     fn compressed_writer_emits_short_lz_matches() {
         let data = b"abcabcabcabcabcabcabcabcabcabcabcabc";
         let input = [FileEntry {
@@ -1897,7 +1992,7 @@ mod tests {
         let mut data = short_lz_resistant_prefix(300);
         data.extend_from_within(..32);
         assert_eq!(
-            find_long_lz(&data, 300),
+            find_long_lz(&data, 300, 0x8000),
             Some(LongLz {
                 distance: 300,
                 length: 32
@@ -2001,6 +2096,7 @@ mod tests {
         let options = WriterOptions {
             target: ArchiveVersion::Rar14,
             features,
+            ..WriterOptions::default()
         };
 
         let bytes = write_compressed_archive(&input, options).unwrap();
@@ -2172,6 +2268,7 @@ mod tests {
         let options = WriterOptions {
             target: ArchiveVersion::Rar13,
             features,
+            ..WriterOptions::default()
         };
         let err = write_stored_archive(&[], options).unwrap_err();
         assert_eq!(
@@ -2191,6 +2288,7 @@ mod tests {
         let options = WriterOptions {
             target: ArchiveVersion::Rar14,
             features,
+            ..WriterOptions::default()
         };
         let err = write_stored_archive(&[], options).unwrap_err();
         assert_eq!(
@@ -2549,6 +2647,7 @@ mod tests {
         let options = WriterOptions {
             target: ArchiveVersion::Rar14,
             features,
+            ..WriterOptions::default()
         };
         let input = [
             FileEntry {
@@ -2718,6 +2817,7 @@ mod tests {
             WriterOptions {
                 target: ArchiveVersion::Rar14,
                 features,
+                ..WriterOptions::default()
             },
             16,
         )

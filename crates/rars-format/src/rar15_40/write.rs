@@ -1,7 +1,9 @@
 use super::*;
 use crate::io_util::align16 as checked_align16;
 use crate::x86_filter_scan::auto_x86_filter_ranges;
-use rars_codec::rar13::{unpack15_encode, Unpack15Encoder};
+use rars_codec::rar13::{
+    unpack15_encode_with_options, EncodeOptions as Rar15EncodeOptions, Unpack15Encoder,
+};
 use rars_codec::rar20::{unpack20_encode_auto, Unpack20Encoder};
 use rars_codec::rar29::{
     unpack29_encode_literals, unpack29_encode_literals_with_options, unpack29_encode_ppmd,
@@ -851,6 +853,34 @@ fn rar29_encode_options_for_options(options: WriterOptions) -> Result<Rar29Encod
         .with_max_match_distance(dictionary_size_for_options(options)?))
 }
 
+fn rar15_encode_options_for_level(level: Option<u8>) -> Result<Rar15EncodeOptions> {
+    let level = level.unwrap_or(5);
+    match level {
+        0 => Ok(Rar15EncodeOptions::new()
+            .with_old_distance_tokens(false)
+            .with_lazy_matching(false)
+            .with_stmode_literal_runs(false)
+            .with_max_long_match_distance(0)),
+        1 => Ok(Rar15EncodeOptions::new()
+            .with_old_distance_tokens(false)
+            .with_lazy_matching(false)
+            .with_stmode_literal_runs(false)
+            .with_max_long_match_distance(4 * 1024)),
+        2 => Ok(Rar15EncodeOptions::new()
+            .with_lazy_matching(false)
+            .with_stmode_literal_runs(false)
+            .with_max_long_match_distance(8 * 1024)),
+        3 => Ok(Rar15EncodeOptions::new()
+            .with_lazy_matching(false)
+            .with_max_long_match_distance(16 * 1024)),
+        4 => Ok(Rar15EncodeOptions::new().with_max_long_match_distance(24 * 1024)),
+        5 => Ok(Rar15EncodeOptions::new()),
+        _ => Err(Error::InvalidHeader(
+            "RAR compression level must be in the range 0..5",
+        )),
+    }
+}
+
 fn rar29_default_dictionary_size(target: ArchiveVersion) -> usize {
     match target {
         ArchiveVersion::Rar29 => 1024 * 1024,
@@ -902,6 +932,7 @@ fn compression_method_for_level(options: WriterOptions) -> Result<u8> {
     if matches!(
         options.target,
         ArchiveVersion::Rar20
+            | ArchiveVersion::Rar15
             | ArchiveVersion::Rar29
             | ArchiveVersion::Rar30
             | ArchiveVersion::Rar40
@@ -923,7 +954,9 @@ impl SolidEncoder {
             return Ok(None);
         }
         let encoder = match options.target {
-            ArchiveVersion::Rar15 => Self::Rar15(Box::new(Unpack15Encoder::new())),
+            ArchiveVersion::Rar15 => Self::Rar15(Box::new(Unpack15Encoder::with_options(
+                rar15_encode_options_for_level(options.compression_level)?,
+            ))),
             ArchiveVersion::Rar20 => Self::Rar20(Unpack20Encoder::new()),
             ArchiveVersion::Rar29 | ArchiveVersion::Rar30 | ArchiveVersion::Rar40 => Self::Rar29(
                 Unpack29Encoder::with_options(rar29_encode_options_for_options(options)?),
@@ -965,7 +998,7 @@ fn encode_or_store_payload(
         }
         return encode_rar29_auto_filtered_member(data, encode_options, lz_method, true);
     }
-    let compressed = encode_compressed_payload(data, target, solid_encoder.as_mut())?;
+    let compressed = encode_compressed_payload(data, options, solid_encoder.as_mut())?;
     if should_store_fallback(target, solid, data.len(), compressed.len()) {
         if solid {
             *solid_encoder = SolidEncoder::for_target(options, true)?;
@@ -983,14 +1016,19 @@ fn encode_or_store_payload(
 
 fn encode_compressed_payload(
     data: &[u8],
-    target: ArchiveVersion,
+    options: WriterOptions,
     solid_encoder: Option<&mut SolidEncoder>,
 ) -> Result<Vec<u8>> {
+    let target = options.target;
     match (target, solid_encoder) {
         (ArchiveVersion::Rar15, Some(SolidEncoder::Rar15(encoder))) => {
             encoder.encode_member(data).map_err(Error::from)
         }
-        (ArchiveVersion::Rar15, None) => unpack15_encode(data).map_err(Error::from),
+        (ArchiveVersion::Rar15, None) => unpack15_encode_with_options(
+            data,
+            rar15_encode_options_for_level(options.compression_level)?,
+        )
+        .map_err(Error::from),
         (ArchiveVersion::Rar20, None) => unpack20_encode_auto(data).map_err(Error::from),
         (ArchiveVersion::Rar20, Some(SolidEncoder::Rar20(encoder))) => {
             encoder.encode_member(data).map_err(Error::from)

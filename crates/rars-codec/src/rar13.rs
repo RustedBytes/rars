@@ -36,11 +36,15 @@ const SHORT_XOR2: [u8; 15] = [
 ];
 
 pub fn unpack15_encode(input: &[u8]) -> Result<Vec<u8>> {
+    unpack15_encode_with_options(input, EncodeOptions::default())
+}
+
+pub fn unpack15_encode_with_options(input: &[u8], options: EncodeOptions) -> Result<Vec<u8>> {
     if input.is_empty() {
         return Ok(Vec::new());
     }
 
-    let mut encoder = Unpack15Encoder::new();
+    let mut encoder = Unpack15Encoder::with_options(options);
     encoder.encode_member(input)
 }
 
@@ -51,6 +55,7 @@ pub fn unpack15_decode(input: &[u8], output_size: usize) -> Result<Vec<u8>> {
 
 pub struct Unpack15Encoder {
     bits: BitWriter,
+    options: EncodeOptions,
     // State names follow RAR13_FORMAT_SPECIFICATION.md §6 so the codec state
     // lines up directly with the documented Unpack15 tables and traces.
     ch_set: [u16; 256],
@@ -78,10 +83,60 @@ pub struct Unpack15Encoder {
     stmode_literal_count: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EncodeOptions {
+    old_distance_tokens: bool,
+    lazy_matching: bool,
+    stmode_literal_runs: bool,
+    max_long_match_distance: usize,
+}
+
+impl EncodeOptions {
+    pub const fn new() -> Self {
+        Self {
+            old_distance_tokens: true,
+            lazy_matching: true,
+            stmode_literal_runs: true,
+            max_long_match_distance: 0x8000,
+        }
+    }
+
+    pub const fn with_old_distance_tokens(mut self, enabled: bool) -> Self {
+        self.old_distance_tokens = enabled;
+        self
+    }
+
+    pub const fn with_lazy_matching(mut self, enabled: bool) -> Self {
+        self.lazy_matching = enabled;
+        self
+    }
+
+    pub const fn with_stmode_literal_runs(mut self, enabled: bool) -> Self {
+        self.stmode_literal_runs = enabled;
+        self
+    }
+
+    pub const fn with_max_long_match_distance(mut self, distance: usize) -> Self {
+        self.max_long_match_distance = distance;
+        self
+    }
+}
+
+impl Default for EncodeOptions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Unpack15Encoder {
     pub fn new() -> Self {
+        Self::with_options(EncodeOptions::default())
+    }
+
+    pub fn with_options(options: EncodeOptions) -> Self {
         let mut encoder = Self {
             bits: BitWriter::new(),
+            options,
             ch_set: [0; 256],
             ch_set_c: [0; 256],
             ch_set_b: [0; 256],
@@ -148,7 +203,9 @@ impl Unpack15Encoder {
             self.emit_flags_byte(flags)?;
             self.emit_payloads(payloads)?;
             if group_enters_stmode {
-                self.emit_stmode_literal_run(input, &mut pos, false)?;
+                if self.options.stmode_literal_runs {
+                    self.emit_stmode_literal_run(input, &mut pos, false)?;
+                }
                 self.emit_stmode_exit()?;
             }
         }
@@ -195,7 +252,16 @@ impl Unpack15Encoder {
                         },
                         flag_bits,
                     )
-                    .filter(|token| !should_lazy_emit_literal(input, pos, *token, plan_max_dist3))
+                    .filter(|token| {
+                        !self.options.lazy_matching
+                            || !should_lazy_emit_literal(
+                                input,
+                                pos,
+                                *token,
+                                plan_max_dist3,
+                                self.options,
+                            )
+                    })
                 {
                     let flag = token.flag_bits(plan_nlzb, plan_nhfb);
                     let next_pos = pos + token.length() as usize;
@@ -250,7 +316,9 @@ impl Unpack15Encoder {
             self.emit_flags_byte(flags)?;
             self.emit_payloads(payloads)?;
             if group_enters_stmode {
-                self.emit_stmode_literal_run(input, &mut pos, true)?;
+                if self.options.stmode_literal_runs {
+                    self.emit_stmode_literal_run(input, &mut pos, true)?;
+                }
                 self.emit_stmode_exit()?;
             }
         }
@@ -264,15 +332,7 @@ impl Unpack15Encoder {
         state: LzPlanState,
         flag_bits: usize,
     ) -> Option<EncodedToken> {
-        let candidates = find_lz_tokens(
-            input,
-            pos,
-            state.last_dist,
-            state.last_length,
-            state.old_dist,
-            state.old_dist_ptr,
-            state.max_dist3,
-        );
+        let candidates = find_lz_tokens(input, pos, state, self.options);
         candidates
             .into_iter()
             .filter(|token| {
@@ -431,11 +491,17 @@ impl Unpack15Encoder {
                 && find_lz_token(
                     input,
                     *pos,
-                    self.last_dist,
-                    self.last_length,
-                    self.old_dist,
-                    self.old_dist_ptr,
-                    self.max_dist3,
+                    LzPlanState {
+                        last_dist: self.last_dist,
+                        last_length: self.last_length,
+                        old_dist: self.old_dist,
+                        old_dist_ptr: self.old_dist_ptr,
+                        max_dist3: self.max_dist3,
+                        nlzb: self.nlzb,
+                        nhfb: self.nhfb,
+                        l_count: self.l_count,
+                    },
+                    self.options,
                 )
                 .is_some()
             {
@@ -1000,48 +1066,40 @@ fn plan_long_lz_adaptive_effect(
 fn find_lz_token(
     input: &[u8],
     pos: usize,
-    last_dist: u32,
-    last_length: u32,
-    old_dist: [u32; 4],
-    old_dist_ptr: usize,
-    max_dist3: u32,
+    state: LzPlanState,
+    options: EncodeOptions,
 ) -> Option<EncodedToken> {
-    find_lz_tokens(
-        input,
-        pos,
-        last_dist,
-        last_length,
-        old_dist,
-        old_dist_ptr,
-        max_dist3,
-    )
-    .into_iter()
-    .next()
+    find_lz_tokens(input, pos, state, options)
+        .into_iter()
+        .next()
 }
 
 fn find_lz_tokens(
     input: &[u8],
     pos: usize,
-    last_dist: u32,
-    last_length: u32,
-    old_dist: [u32; 4],
-    old_dist_ptr: usize,
-    max_dist3: u32,
+    state: LzPlanState,
+    options: EncodeOptions,
 ) -> Vec<EncodedToken> {
     let mut tokens = Vec::with_capacity(4);
-    if let Some(repeat) = find_repeat_last_lz(input, pos, last_dist, last_length) {
+    if let Some(repeat) = find_repeat_last_lz(input, pos, state.last_dist, state.last_length) {
         tokens.push(EncodedToken::RepeatLast(repeat));
     }
-    if old_distance_encoder_enabled() {
-        if let Some(old_lz) = find_old_dist_lz(input, pos, old_dist, old_dist_ptr, max_dist3) {
+    if options.old_distance_tokens {
+        if let Some(old_lz) = find_old_dist_lz(
+            input,
+            pos,
+            state.old_dist,
+            state.old_dist_ptr,
+            state.max_dist3,
+        ) {
             tokens.push(EncodedToken::OldDist(old_lz));
         }
     }
     if let Some(short_lz) = find_short_lz(input, pos) {
         tokens.push(EncodedToken::ShortLz(short_lz));
     }
-    if let Some(long_lz) = find_long_lz(input, pos)
-        .filter(|long_lz| long_lz_length_code_for_distance(*long_lz, max_dist3).is_some())
+    if let Some(long_lz) = find_long_lz(input, pos, options.max_long_match_distance)
+        .filter(|long_lz| long_lz_length_code_for_distance(*long_lz, state.max_dist3).is_some())
     {
         tokens.push(EncodedToken::LongLz(long_lz));
     }
@@ -1053,6 +1111,7 @@ fn should_lazy_emit_literal(
     pos: usize,
     current: EncodedToken,
     max_dist3: u32,
+    options: EncodeOptions,
 ) -> bool {
     if !matches!(current, EncodedToken::ShortLz(_) | EncodedToken::LongLz(_))
         || pos + 1 >= input.len()
@@ -1060,7 +1119,21 @@ fn should_lazy_emit_literal(
         return false;
     }
 
-    let next = find_lz_token(input, pos + 1, u32::MAX, 0, [u32::MAX; 4], 0, max_dist3);
+    let next = find_lz_token(
+        input,
+        pos + 1,
+        LzPlanState {
+            last_dist: u32::MAX,
+            last_length: 0,
+            old_dist: [u32::MAX; 4],
+            old_dist_ptr: 0,
+            max_dist3,
+            nlzb: 0,
+            nhfb: 0,
+            l_count: 0,
+        },
+        options,
+    );
     next.is_some_and(|next| {
         matches!(next, EncodedToken::ShortLz(_) | EncodedToken::LongLz(_))
             && next.length() >= current.length() + 2
@@ -1162,12 +1235,6 @@ fn find_old_dist_lz(
     (best.length >= 3).then_some(best)
 }
 
-fn old_distance_encoder_enabled() -> bool {
-    // Compatibility-checked by scripts/reference-rar14-writer.sh against
-    // DOS RAR 1.402 extraction.
-    true
-}
-
 fn old_dist_lz_is_encodable(length: u32, distance: u32, short_code: u32) -> bool {
     old_dist_lz_length_code(length, distance, 0x2001, short_code).is_some()
         && old_dist_lz_length_code(length, distance, 0x7f00, short_code).is_some()
@@ -1193,12 +1260,15 @@ fn long_lz_length_code_for_distance(long_lz: LongLz, max_dist3: u32) -> Option<u
     long_lz.length.checked_sub(3 + decoded_bonus)
 }
 
-pub fn find_long_lz(input: &[u8], pos: usize) -> Option<LongLz> {
+pub fn find_long_lz(input: &[u8], pos: usize, max_match_distance: usize) -> Option<LongLz> {
     if pos < 257 {
         return None;
     }
 
-    let max_distance = pos.min(0x8000);
+    let max_distance = pos.min(0x8000).min(max_match_distance);
+    if max_distance < 257 {
+        return None;
+    }
     let mut best = LongLz {
         distance: 0,
         length: 0,
@@ -1961,8 +2031,8 @@ fn corr_huff(char_set: &mut [u16; 256], num_to_place: &mut [u8; 256]) {
 mod tests {
     use super::{
         find_long_lz, find_lz_token, find_old_dist_lz, should_lazy_emit_literal, unpack15_decode,
-        unpack15_encode, EncodedToken, LongLz, LzPlanState, OldDistLz, ShortLz, Unpack15,
-        Unpack15Encoder,
+        unpack15_encode, EncodeOptions, EncodedToken, LongLz, LzPlanState, OldDistLz, ShortLz,
+        Unpack15, Unpack15Encoder,
     };
 
     #[test]
@@ -2003,7 +2073,7 @@ mod tests {
         input.extend_from_within(..258);
 
         assert_eq!(
-            find_long_lz(&input, 300),
+            find_long_lz(&input, 300, 0x8000),
             Some(LongLz {
                 distance: 300,
                 length: 258
@@ -2128,15 +2198,62 @@ mod tests {
     }
 
     #[test]
+    fn encoder_options_can_disable_stmode_literal_runs() {
+        let input: Vec<_> = (0..128).map(|index| (index * 73 + 19) as u8).collect();
+        let mut encoder =
+            Unpack15Encoder::with_options(EncodeOptions::new().with_stmode_literal_runs(false));
+        let packed = encoder.encode_member(&input).unwrap();
+
+        assert_eq!(encoder.stmode_literal_count, 0);
+        assert_eq!(unpack15_decode(&packed, input.len()).unwrap(), input);
+    }
+
+    #[test]
+    fn encoder_options_bound_long_lz_search_distance() {
+        let mut input: Vec<_> = (0u8..=255).cycle().take(300).collect();
+        input.extend_from_within(..64);
+
+        assert_eq!(find_long_lz(&input, 300, 256), None);
+        assert_eq!(
+            find_long_lz(&input, 300, 0x8000),
+            Some(LongLz {
+                distance: 300,
+                length: 64
+            })
+        );
+    }
+
+    #[test]
     fn lazy_match_prefers_longer_next_position_match() {
         let input = b"abcXbcQRSTabcQRSTUV";
-        let token = find_lz_token(input, 10, u32::MAX, 0, [u32::MAX; 4], 0, 0x2001).unwrap();
+        let token = find_lz_token(
+            input,
+            10,
+            LzPlanState {
+                last_dist: u32::MAX,
+                last_length: 0,
+                old_dist: [u32::MAX; 4],
+                old_dist_ptr: 0,
+                max_dist3: 0x2001,
+                nlzb: 0,
+                nhfb: 0,
+                l_count: 0,
+            },
+            EncodeOptions::default(),
+        )
+        .unwrap();
 
         assert!(matches!(
             token,
             EncodedToken::ShortLz(super::ShortLz { length: 3, .. })
         ));
-        assert!(should_lazy_emit_literal(input, 10, token, 0x2001));
+        assert!(should_lazy_emit_literal(
+            input,
+            10,
+            token,
+            0x2001,
+            EncodeOptions::default()
+        ));
 
         let packed = unpack15_encode(input).unwrap();
         assert_eq!(unpack15_decode(&packed, input.len()).unwrap(), input);
