@@ -2,23 +2,14 @@
 
 A Rust implementation of RAR.
 
+* [🏠 home](https://bitplane.net/rust/rars)
+* [🦀 crate](https://crates.io/crates/rars)
+* [🐱 source](https://github.com/bitplane/rars)
+
 ## Current Status
 
-`rars` covers the RAR lineage from early `RE~^` archives through RAR 7:
-
-- auto-detect archive families, including SFX-prefixed archives;
-- parse RAR 1.3/1.4, RAR 1.5-4.x, RAR 5.0, and RAR 7.x headers;
-- stream extraction through callback writers instead of buffering full archives;
-- decode historical LZ codecs, RAR 2.9/RAR 3.x PPMd, RARVM filters, solid
-  archives, encrypted members, comments, and split volumes;
-- write selectable RAR versions with stored and compressed members, encryption,
-  comments, RARVM filters, solid mode, volumes, and RAR5 recovery records;
-- repair supported RAR 2.x/3.x recovery records and RAR5 inline/REV recovery
-  data.
-
-Some advanced compatibility targets remain active research areas: compression
-policy parity with WinRAR, full historical AV verification, SFX writer/stub
-generation, and external oracle maintenance.
+`rars` covers the RAR lineage from early `RE~^` archives through RAR 7,
+compression and decompression. It's not fast, but it works. ish.
 
 ## CLI
 
