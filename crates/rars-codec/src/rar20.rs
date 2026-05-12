@@ -184,32 +184,34 @@ fn encode_member(
     }
 
     let tokens = encode_tokens(input, history, options);
-    let mut used_main_symbols = [false; MAIN_COUNT];
-    let mut used_length_slots = [false; LENGTH_COUNT];
+    let mut main_frequencies = [0usize; MAIN_COUNT];
+    let mut offset_frequencies = [0usize; OFFSET_COUNT];
+    let mut length_frequencies = [0usize; LENGTH_COUNT];
     for token in &tokens {
         match *token {
-            EncodeToken::Literal(byte) => used_main_symbols[byte as usize] = true,
-            EncodeToken::RepeatLast => used_main_symbols[256] = true,
+            EncodeToken::Literal(byte) => main_frequencies[byte as usize] += 1,
+            EncodeToken::RepeatLast => main_frequencies[256] += 1,
             EncodeToken::OldOffset {
                 index,
                 length,
                 offset,
             } => {
-                used_main_symbols[257 + index] = true;
+                main_frequencies[257 + index] += 1;
                 let (slot, _) = old_length_slot_for_match(length, offset)?;
-                used_length_slots[slot] = true;
+                length_frequencies[slot] += 1;
             }
             EncodeToken::ShortOffset { offset } => {
                 let (slot, _) = short_slot_for_match(offset)?;
-                used_main_symbols[261 + slot] = true;
+                main_frequencies[261 + slot] += 1;
             }
             EncodeToken::Match { length, offset } => {
                 let encoded_length = length.checked_sub(match_length_adjustment(offset)).ok_or(
                     Error::InvalidData("RAR 2.0 adjusted match length underflows"),
                 )?;
                 let (slot, _) = length_slot_for_match(encoded_length)?;
-                offset_slot_for_match(offset)?;
-                used_main_symbols[270 + slot] = true;
+                main_frequencies[270 + slot] += 1;
+                let (offset_slot, _) = offset_slot_for_match(offset)?;
+                offset_frequencies[offset_slot] += 1;
             }
         }
     }
@@ -217,16 +219,18 @@ fn encode_member(
     let literal_len = if let Some(table) = fixed_table {
         table.length
     } else {
-        let mut used_offset_slots = [false; OFFSET_COUNT];
-        for token in &tokens {
-            if let EncodeToken::Match { offset, .. } = *token {
-                let (slot, _) = offset_slot_for_match(offset)?;
-                used_offset_slots[slot] = true;
-            }
-        }
-        let main_symbol_count = used_main_symbols.iter().filter(|&&used| used).count()
-            + used_offset_slots.iter().filter(|&&used| used).count()
-            + used_length_slots.iter().filter(|&&used| used).count();
+        let main_symbol_count = main_frequencies
+            .iter()
+            .filter(|&&frequency| frequency != 0)
+            .count()
+            + offset_frequencies
+                .iter()
+                .filter(|&&frequency| frequency != 0)
+                .count()
+            + length_frequencies
+                .iter()
+                .filter(|&&frequency| frequency != 0)
+                .count();
         literal_code_len(main_symbol_count)?
     };
 
@@ -248,34 +252,18 @@ fn encode_member(
             *len = literal_len;
         }
     } else {
-        for (symbol, used) in used_main_symbols.iter().enumerate() {
-            if *used {
-                table_lengths[symbol] = literal_len;
-            }
-        }
-        let mut used_offset_slots = [false; OFFSET_COUNT];
-        for token in &tokens {
-            if let EncodeToken::Match { offset, .. } = *token {
-                let (slot, _) = offset_slot_for_match(offset)?;
-                used_offset_slots[slot] = true;
-            }
-        }
-        for (slot, used) in used_offset_slots.iter().enumerate() {
-            if *used {
-                table_lengths[MAIN_COUNT + slot] = literal_len;
-            }
-        }
-        for (slot, used) in used_length_slots.iter().enumerate() {
-            if *used {
-                table_lengths[MAIN_COUNT + OFFSET_COUNT + slot] = literal_len;
-            }
-        }
+        table_lengths[..MAIN_COUNT]
+            .copy_from_slice(&validated_lengths_for_frequencies(&main_frequencies, 15));
+        table_lengths[MAIN_COUNT..MAIN_COUNT + OFFSET_COUNT]
+            .copy_from_slice(&validated_lengths_for_frequencies(&offset_frequencies, 15));
+        table_lengths[MAIN_COUNT + OFFSET_COUNT..TABLE_COUNT]
+            .copy_from_slice(&validated_lengths_for_frequencies(&length_frequencies, 15));
     }
 
-    let level_symbols = encode_table_level_symbols(&table_lengths, literal_len);
-    let level_lengths = level_code_lengths(&level_symbols, literal_len);
+    let level_symbols = encode_table_level_symbols(&table_lengths);
+    let level_lengths = level_code_lengths_for_symbols(&level_symbols);
     let level_codes = canonical_codes(&level_lengths)?;
-    let main_codes = canonical_codes(&table_lengths)?;
+    let main_codes = canonical_codes(&table_lengths[..MAIN_COUNT])?;
 
     let mut bits = BitWriter::default();
     if fixed_table.is_none() || history.is_empty() {
@@ -792,17 +780,21 @@ fn literal_code_len(symbol_count: usize) -> Result<u8> {
     u8::try_from(len.max(1)).map_err(|_| Error::InvalidData("RAR 2.0 literal table is too large"))
 }
 
-fn encode_table_level_symbols(lengths: &[u8; TABLE_COUNT], literal_len: u8) -> Vec<usize> {
-    lengths
-        .iter()
-        .map(|&len| if len == 0 { 0 } else { literal_len as usize })
-        .collect()
+fn encode_table_level_symbols(lengths: &[u8; TABLE_COUNT]) -> Vec<usize> {
+    lengths.iter().map(|&len| len as usize).collect()
 }
 
-fn level_code_lengths(_symbols: &[usize], literal_len: u8) -> [u8; LEVEL_COUNT] {
-    let mut lengths = [0u8; LEVEL_COUNT];
-    lengths[0] = 1;
-    lengths[literal_len as usize] = 1;
+fn validated_lengths_for_frequencies<const N: usize>(
+    frequencies: &[usize; N],
+    max_bits: u8,
+) -> [u8; N] {
+    let mut lengths = [0u8; N];
+    lengths.copy_from_slice(&huffman::lengths_for_frequencies(frequencies, max_bits));
+    if canonical_codes(&lengths).is_ok() {
+        return lengths;
+    }
+
+    lengths.copy_from_slice(&huffman::uniform_lengths_for_frequencies(frequencies));
     lengths
 }
 
