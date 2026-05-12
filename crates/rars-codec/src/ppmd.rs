@@ -223,7 +223,7 @@ impl PpmdDecoder {
             }
             self.prev_success = 0;
             self.range.decode(hi_cnt, summ_freq - hi_cnt);
-            self.hi_bits_flag = hi_bits_flag(self.state(self.found_state).symbol, 3);
+            self.hi_bits_flag = hi_bits_flag(self.state(self.found_state)?.symbol, 3);
             for state in &self.contexts[min].states {
                 mask[state.symbol as usize] = false;
             }
@@ -345,7 +345,7 @@ impl PpmdDecoder {
             }
             self.prev_success = 0;
             output.encode(start, summ_freq - start, summ_freq);
-            self.hi_bits_flag = hi_bits_flag(self.state(self.found_state).symbol, 3);
+            self.hi_bits_flag = hi_bits_flag(self.state(self.found_state)?.symbol, 3);
             for state in &self.contexts[min].states {
                 mask[state.symbol as usize] = false;
             }
@@ -484,7 +484,7 @@ impl PpmdDecoder {
             .suffix
             .ok_or(Error::InvalidData("RAR PPMd binary context has no suffix"))?;
         let suffix_stats = self.contexts[suffix].states.len();
-        self.hi_bits_flag = hi_bits_flag(self.state(self.found_state).symbol, 3);
+        self.hi_bits_flag = hi_bits_flag(self.state(self.found_state)?.symbol, 3);
         let row = state.freq as usize - 1;
         let col = self.prev_success as usize
             + ((self.run_length >> 26) as usize & 0x20)
@@ -548,12 +548,12 @@ impl PpmdDecoder {
 
     fn update1_0(&mut self) -> Result<()> {
         let fs = self.found_state;
-        let freq = self.state(fs).freq as u32;
+        let freq = self.state(fs)?.freq as u32;
         let summ_freq = self.contexts[fs.context].summ_freq as u32;
         self.prev_success = u32::from(2 * freq > summ_freq);
         self.run_length += self.prev_success as i32;
         self.contexts[fs.context].summ_freq = self.contexts[fs.context].summ_freq.wrapping_add(4);
-        self.state_mut(fs).freq = (freq + 4) as u8;
+        self.state_mut(fs)?.freq = (freq + 4) as u8;
         if freq + 4 > MAX_FREQ {
             self.rescale();
         }
@@ -562,9 +562,9 @@ impl PpmdDecoder {
 
     fn update1(&mut self) -> Result<()> {
         let fs = self.found_state;
-        let freq = self.state(fs).freq as u32 + 4;
+        let freq = self.state(fs)?.freq as u32 + 4;
         self.contexts[fs.context].summ_freq = self.contexts[fs.context].summ_freq.wrapping_add(4);
-        self.state_mut(fs).freq = freq as u8;
+        self.state_mut(fs)?.freq = freq as u8;
         if fs.index > 0
             && self.contexts[fs.context].states[fs.index].freq
                 > self.contexts[fs.context].states[fs.index - 1].freq
@@ -582,10 +582,10 @@ impl PpmdDecoder {
 
     fn update2(&mut self) -> Result<()> {
         let fs = self.found_state;
-        let freq = self.state(fs).freq as u32 + 4;
+        let freq = self.state(fs)?.freq as u32 + 4;
         self.run_length = self.init_rl;
         self.contexts[fs.context].summ_freq = self.contexts[fs.context].summ_freq.wrapping_add(4);
-        self.state_mut(fs).freq = freq as u8;
+        self.state_mut(fs)?.freq = freq as u8;
         if freq > MAX_FREQ {
             self.rescale();
         }
@@ -594,15 +594,15 @@ impl PpmdDecoder {
 
     fn update_bin(&mut self) -> Result<()> {
         let fs = self.found_state;
-        let freq = self.state(fs).freq;
-        self.state_mut(fs).freq = freq.wrapping_add(u8::from(freq < 128));
+        let freq = self.state(fs)?.freq;
+        self.state_mut(fs)?.freq = freq.wrapping_add(u8::from(freq < 128));
         self.prev_success = 1;
         self.run_length += 1;
         self.next_context()
     }
 
     fn next_context(&mut self) -> Result<()> {
-        let successor = self.state(self.found_state).successor;
+        let successor = self.state(self.found_state)?.successor;
         if let Successor::Context(context) = successor {
             if self.order_fall == 0 {
                 self.max_context = context;
@@ -614,7 +614,7 @@ impl PpmdDecoder {
     }
 
     fn update_model(&mut self) -> Result<()> {
-        let fs = self.state(self.found_state);
+        let fs = self.state(self.found_state)?;
         let found_symbol = fs.symbol;
         if fs.freq < (MAX_FREQ / 4) as u8 && self.contexts[self.min_context].suffix.is_some() {
             let suffix = self.contexts[self.min_context].suffix.unwrap();
@@ -650,7 +650,7 @@ impl PpmdDecoder {
             };
             self.max_context = context;
             self.min_context = context;
-            self.state_mut(self.found_state).successor = Successor::Context(context);
+            self.state_mut(self.found_state)?.successor = Successor::Context(context);
             return Ok(());
         }
 
@@ -670,7 +670,7 @@ impl PpmdDecoder {
                 self.text.pop();
             }
         } else {
-            self.state_mut(self.found_state).successor = max_successor;
+            self.state_mut(self.found_state)?.successor = max_successor;
             min_successor = Successor::Context(self.min_context);
         }
 
@@ -746,7 +746,7 @@ impl PpmdDecoder {
     }
 
     fn create_successors(&mut self) -> Option<usize> {
-        let up_branch = match self.state(self.found_state).successor {
+        let up_branch = match self.state(self.found_state).ok()?.successor {
             Successor::Raw(pos) => pos,
             Successor::Context(context) if self.order_fall == 0 => return Some(context),
             _ => return None,
@@ -761,10 +761,11 @@ impl PpmdDecoder {
                 break;
             };
             c = suffix;
+            let found_symbol = self.state(self.found_state).ok()?.symbol;
             let index = self.contexts[c]
                 .states
                 .iter()
-                .position(|state| state.symbol == self.state(self.found_state).symbol)?;
+                .position(|state| state.symbol == found_symbol)?;
             let successor = self.contexts[c].states[index].successor;
             if successor != Successor::Raw(up_branch) {
                 if let Successor::Context(context) = successor {
@@ -810,7 +811,7 @@ impl PpmdDecoder {
                 summ_freq: 0,
                 suffix: Some(c),
             })?;
-            self.state_mut(state_ref).successor = Successor::Context(context);
+            self.state_mut(state_ref).ok()?.successor = Successor::Context(context);
             c = context;
         }
         Some(c)
@@ -871,12 +872,19 @@ impl PpmdDecoder {
         self.found_state.index = 0;
     }
 
-    fn state(&self, state: StateRef) -> State {
-        self.contexts[state.context].states[state.index]
+    fn state(&self, state: StateRef) -> Result<State> {
+        self.contexts
+            .get(state.context)
+            .and_then(|context| context.states.get(state.index))
+            .copied()
+            .ok_or(Error::InvalidData("RAR PPMd state reference is invalid"))
     }
 
-    fn state_mut(&mut self, state: StateRef) -> &mut State {
-        &mut self.contexts[state.context].states[state.index]
+    fn state_mut(&mut self, state: StateRef) -> Result<&mut State> {
+        self.contexts
+            .get_mut(state.context)
+            .and_then(|context| context.states.get_mut(state.index))
+            .ok_or(Error::InvalidData("RAR PPMd state reference is invalid"))
     }
 }
 
@@ -1254,5 +1262,29 @@ mod tests {
             decoder.update_model(),
             Err(Error::InvalidData("RAR PPMd model frequency is invalid"))
         ));
+    }
+
+    #[test]
+    fn update_paths_reject_invalid_state_reference_without_panic() {
+        let mut decoder = PpmdDecoder::new();
+        decoder.init_model(4);
+        decoder.found_state = StateRef {
+            context: 99,
+            index: 0,
+        };
+
+        assert_eq!(
+            decoder.update1_0(),
+            Err(Error::InvalidData("RAR PPMd state reference is invalid"))
+        );
+
+        decoder.found_state = StateRef {
+            context: 0,
+            index: 999,
+        };
+        assert_eq!(
+            decoder.update_bin(),
+            Err(Error::InvalidData("RAR PPMd state reference is invalid"))
+        );
     }
 }
