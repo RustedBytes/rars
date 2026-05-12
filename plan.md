@@ -4,9 +4,6 @@
 - Add adversarial PPMd fixtures as corpus bugs appear.
 - Pin RAR 1.4 old-distance writer tokens against DOS RAR 1.402 before
   re-enabling them in the compatibility writer profile.
-- Replace the RAR 5 streaming decoder history `Vec::drain` window with a
-  ring buffer or logical-start window so large streamed members avoid
-  repeated dictionary-sized memmoves.
 - Stream compressed split-volume RAR 5 members through verification/writer
   sinks instead of returning a full unpacked `Vec`.
 

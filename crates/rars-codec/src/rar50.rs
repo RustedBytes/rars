@@ -1,5 +1,6 @@
 use crate::filters::{self, DeltaErrorMessages, FilterOp};
 use crate::{huffman, Error, Result};
+use std::collections::VecDeque;
 use std::io::Read;
 use std::ops::Range;
 
@@ -1720,7 +1721,7 @@ impl Unpack50Decoder {
 }
 
 struct StreamingOutput {
-    history: Vec<u8>,
+    history: VecDeque<u8>,
     pending: Vec<u8>,
     written: usize,
     output_limit: usize,
@@ -1738,7 +1739,7 @@ impl StreamingOutput {
     ) -> Self {
         Self {
             all_zero: history.iter().all(|&byte| byte == 0),
-            history,
+            history: history.into(),
             pending: Vec::with_capacity(STREAM_FLUSH_THRESHOLD),
             written: 0,
             output_limit,
@@ -1820,7 +1821,7 @@ impl StreamingOutput {
         .map_err(StreamDecodeError::Sink)?;
         self.written += count;
         if self.history.is_empty() && self.history_limit != 0 {
-            self.history.push(0);
+            self.history.push_back(0);
         }
         Ok(())
     }
@@ -1866,7 +1867,10 @@ impl StreamingOutput {
             if history_distance > self.history.len() {
                 return Err(Error::InvalidData("RAR 5 match distance exceeds window"));
             }
-            Ok(self.history[self.history.len() - history_distance])
+            Ok(*self
+                .history
+                .get(self.history.len() - history_distance)
+                .ok_or(Error::InvalidData("RAR 5 match distance exceeds window"))?)
         }
     }
 
@@ -1878,11 +1882,10 @@ impl StreamingOutput {
             return Ok(());
         }
         sink(DecodedChunk::Bytes(&self.pending)).map_err(StreamDecodeError::Sink)?;
-        self.history.extend_from_slice(&self.pending);
+        self.history.extend(self.pending.iter().copied());
         self.pending.clear();
-        if self.history.len() > self.history_limit {
-            let discard = self.history.len() - self.history_limit;
-            self.history.drain(..discard);
+        while self.history.len() > self.history_limit {
+            self.history.pop_front();
         }
         Ok(())
     }
@@ -1895,7 +1898,7 @@ impl StreamingOutput {
     }
 
     fn into_history(self) -> Vec<u8> {
-        self.history
+        self.history.into()
     }
 }
 
@@ -3583,6 +3586,61 @@ mod tests {
                 .unwrap(),
             b"BAAB"
         );
+        assert_eq!(decoder.history, b"BABAAB");
+    }
+
+    #[test]
+    fn streaming_decoder_history_is_capped_without_reordering() {
+        let mut decoder = Unpack50Decoder::new();
+        let first_payload = literal_only_payload(b"ABBA");
+        let first =
+            encode_compressed_block(&first_payload, first_payload.len() * 8, true, true).unwrap();
+        let second_payload = literal_only_payload(b"BAAB");
+        let second =
+            encode_compressed_block(&second_payload, second_payload.len() * 8, true, true).unwrap();
+        let mut decoded = Vec::new();
+
+        decoder
+            .decode_member_from_reader_with_dictionary_to_sink(
+                &mut std::io::Cursor::new(&first),
+                0,
+                4,
+                6,
+                false,
+                |chunk| {
+                    match chunk {
+                        DecodedChunk::Bytes(bytes) => decoded.extend_from_slice(bytes),
+                        DecodedChunk::Repeated { byte, len } => {
+                            decoded.extend(std::iter::repeat_n(byte, len));
+                        }
+                    }
+                    Ok::<(), std::io::Error>(())
+                },
+            )
+            .unwrap();
+        assert_eq!(decoded, b"ABBA");
+        assert_eq!(decoder.history, b"ABBA");
+
+        decoded.clear();
+        decoder
+            .decode_member_from_reader_with_dictionary_to_sink(
+                &mut std::io::Cursor::new(&second),
+                0,
+                4,
+                6,
+                true,
+                |chunk| {
+                    match chunk {
+                        DecodedChunk::Bytes(bytes) => decoded.extend_from_slice(bytes),
+                        DecodedChunk::Repeated { byte, len } => {
+                            decoded.extend(std::iter::repeat_n(byte, len));
+                        }
+                    }
+                    Ok::<(), std::io::Error>(())
+                },
+            )
+            .unwrap();
+        assert_eq!(decoded, b"BAAB");
         assert_eq!(decoder.history, b"BABAAB");
     }
 
