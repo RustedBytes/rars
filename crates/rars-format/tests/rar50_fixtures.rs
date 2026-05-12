@@ -1363,7 +1363,7 @@ fn writes_multi_file_solid_compressed_rar50_volume_set_that_reader_reassembles()
     let parts = write_compressed_volume_set(
         &entries,
         rar50::WriterOptions::new(ArchiveVersion::Rar50, features),
-        96,
+        32,
     )
     .unwrap();
 

@@ -305,31 +305,35 @@ pub fn encode_table_lengths_with_bit_count(
         return Err(Error::InvalidData("RAR 5 table length count mismatch"));
     }
 
-    let mut writer = BitWriter::new();
-    for _ in 0..LEVEL_TABLE_SIZE {
-        writer.write_bits(5, 4);
-    }
-
     let flattened = lengths
         .main
         .iter()
         .chain(lengths.distance.iter())
         .chain(lengths.align.iter())
-        .chain(lengths.length.iter());
-    let mut zero_run = 0usize;
-    for &length in flattened {
+        .chain(lengths.length.iter())
+        .copied()
+        .collect::<Vec<_>>();
+    for &length in &flattened {
         if length > 15 {
             return Err(Error::InvalidData("RAR 5 Huffman length is too large"));
         }
-        if length == 0 {
-            zero_run += 1;
-        } else {
-            write_zero_lengths(&mut writer, zero_run);
-            zero_run = 0;
-            writer.write_bits(usize::from(length), 5);
+    }
+
+    let level_tokens = encode_table_level_tokens(&flattened);
+    let level_lengths = level_code_lengths_for_tokens(&level_tokens);
+    let level_table = HuffmanTable::from_lengths(&level_lengths)?;
+    let mut writer = BitWriter::new();
+    write_level_lengths(&mut writer, &level_lengths);
+    for token in level_tokens {
+        let (code, len) = level_table.code_for_symbol(token.symbol)?;
+        writer.write_bits(usize::from(code), usize::from(len));
+        if token.extra_bits != 0 {
+            writer.write_bits(
+                usize::from(token.extra_value),
+                usize::from(token.extra_bits),
+            );
         }
     }
-    write_zero_lengths(&mut writer, zero_run);
     let bit_count = writer.bit_pos;
     Ok((writer.finish(), bit_count))
 }
@@ -2357,21 +2361,168 @@ fn validate_huffman_counts(count: &[u16; 16]) -> Result<()> {
     Ok(())
 }
 
-fn write_zero_lengths(writer: &mut BitWriter, mut count: usize) {
-    while count >= 11 {
-        let run = count.min(138);
-        writer.write_bits(19, 5);
-        writer.write_bits(run - 11, 7);
-        count -= run;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LevelToken {
+    symbol: usize,
+    extra_bits: u8,
+    extra_value: u8,
+}
+
+impl LevelToken {
+    const fn plain(symbol: usize) -> Self {
+        Self {
+            symbol,
+            extra_bits: 0,
+            extra_value: 0,
+        }
     }
-    while count >= 3 {
-        let run = count.min(10);
-        writer.write_bits(18, 5);
-        writer.write_bits(run - 3, 3);
-        count -= run;
+
+    const fn repeat_previous_short(count: usize) -> Self {
+        Self {
+            symbol: 16,
+            extra_bits: 3,
+            extra_value: (count - 3) as u8,
+        }
     }
-    for _ in 0..count {
-        writer.write_bits(0, 5);
+
+    const fn repeat_previous_long(count: usize) -> Self {
+        Self {
+            symbol: 17,
+            extra_bits: 7,
+            extra_value: (count - 11) as u8,
+        }
+    }
+
+    const fn zero_run_short(count: usize) -> Self {
+        Self {
+            symbol: 18,
+            extra_bits: 3,
+            extra_value: (count - 3) as u8,
+        }
+    }
+
+    const fn zero_run_long(count: usize) -> Self {
+        Self {
+            symbol: 19,
+            extra_bits: 7,
+            extra_value: (count - 11) as u8,
+        }
+    }
+}
+
+fn encode_table_level_tokens(lengths: &[u8]) -> Vec<LevelToken> {
+    let mut tokens = Vec::new();
+    let mut pos = 0usize;
+    let mut previous = None;
+    while pos < lengths.len() {
+        let value = lengths[pos];
+        let mut run = 1usize;
+        while pos + run < lengths.len() && lengths[pos + run] == value {
+            run += 1;
+        }
+
+        if value == 0 {
+            emit_zero_level_run(&mut tokens, run);
+            previous = Some(0);
+            pos += run;
+            continue;
+        }
+
+        if previous == Some(value) && run >= 3 {
+            emit_repeat_level_run(&mut tokens, run);
+            pos += run;
+            continue;
+        }
+
+        tokens.push(LevelToken::plain(value as usize));
+        previous = Some(value);
+        pos += 1;
+    }
+    tokens
+}
+
+fn emit_repeat_level_run(tokens: &mut Vec<LevelToken>, mut run: usize) {
+    while run != 0 {
+        if run >= 11 {
+            let mut chunk = run.min(138);
+            if matches!(run - chunk, 1 | 2) && chunk >= 14 {
+                chunk -= 3;
+            }
+            tokens.push(LevelToken::repeat_previous_long(chunk));
+            run -= chunk;
+        } else if run >= 3 {
+            let chunk = run.min(10);
+            tokens.push(LevelToken::repeat_previous_short(chunk));
+            run -= chunk;
+        } else {
+            break;
+        }
+    }
+}
+
+fn emit_zero_level_run(tokens: &mut Vec<LevelToken>, mut run: usize) {
+    while run != 0 {
+        if run >= 11 {
+            let mut chunk = run.min(138);
+            if matches!(run - chunk, 1 | 2) && chunk >= 14 {
+                chunk -= 3;
+            }
+            tokens.push(LevelToken::zero_run_long(chunk));
+            run -= chunk;
+        } else if run >= 3 {
+            let chunk = run.min(10);
+            tokens.push(LevelToken::zero_run_short(chunk));
+            run -= chunk;
+        } else {
+            tokens.extend(std::iter::repeat_n(LevelToken::plain(0), run));
+            break;
+        }
+    }
+}
+
+fn level_code_lengths_for_tokens(tokens: &[LevelToken]) -> [u8; LEVEL_TABLE_SIZE] {
+    let mut used = [false; LEVEL_TABLE_SIZE];
+    for token in tokens {
+        used[token.symbol] = true;
+    }
+    let used_count = used.iter().filter(|&&used| used).count();
+    let len = huffman::bits_for_symbol_count(used_count);
+    let mut lengths = [0u8; LEVEL_TABLE_SIZE];
+    for (symbol, is_used) in used.into_iter().enumerate() {
+        if is_used {
+            lengths[symbol] = len;
+        }
+    }
+    lengths
+}
+
+fn write_level_lengths(writer: &mut BitWriter, lengths: &[u8; LEVEL_TABLE_SIZE]) {
+    let mut pos = 0usize;
+    while pos < LEVEL_TABLE_SIZE {
+        let length = lengths[pos];
+        if length == 0 {
+            let mut count = 1usize;
+            while pos + count < LEVEL_TABLE_SIZE && lengths[pos + count] == 0 {
+                count += 1;
+            }
+            while count >= 3 {
+                let chunk = count.min(17);
+                writer.write_bits(15, 4);
+                writer.write_bits(chunk - 2, 4);
+                pos += chunk;
+                count -= chunk;
+            }
+            for _ in 0..count {
+                writer.write_bits(0, 4);
+                pos += 1;
+            }
+        } else {
+            writer.write_bits(usize::from(length), 4);
+            if length == 15 {
+                writer.write_bits(0, 4);
+            }
+            pos += 1;
+        }
     }
 }
 
@@ -2536,6 +2687,22 @@ mod tests {
 
         assert_eq!(decoded, lengths);
         assert_eq!(decoded_bits, bit_count);
+    }
+
+    #[test]
+    fn table_level_encoder_uses_rar5_run_symbols() {
+        let mut lengths =
+            vec![
+                0u8;
+                MAIN_TABLE_SIZE + DISTANCE_TABLE_SIZE_50 + ALIGN_TABLE_SIZE + LENGTH_TABLE_SIZE
+            ];
+        lengths[..4].fill(6);
+        lengths[8..21].fill(0);
+
+        let tokens = encode_table_level_tokens(&lengths);
+
+        assert!(tokens.contains(&LevelToken::repeat_previous_short(3)));
+        assert!(tokens.iter().any(|token| token.symbol == 19));
     }
 
     #[test]

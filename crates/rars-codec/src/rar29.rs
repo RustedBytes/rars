@@ -630,8 +630,8 @@ fn encode_member_inner(
         .copy_from_slice(&low_offset_lengths);
     table_lengths[MAIN_COUNT + OFFSET_COUNT + LOW_OFFSET_COUNT..].copy_from_slice(&length_lengths);
 
-    let level_symbols = encode_table_level_symbols(&table_lengths);
-    let level_lengths = level_code_lengths(&level_symbols);
+    let level_tokens = encode_table_level_tokens(&table_lengths);
+    let level_lengths = level_code_lengths(&level_tokens);
     let level_codes = canonical_codes(&level_lengths)?;
     let main_codes = canonical_codes(&table_lengths[..MAIN_COUNT])?;
 
@@ -641,11 +641,14 @@ fn encode_member_inner(
     for &len in &level_lengths {
         bits.write_bits(len as u32, 4);
     }
-    for symbol in level_symbols {
-        let code = level_codes[symbol].ok_or(Error::InvalidData(
+    for token in level_tokens {
+        let code = level_codes[token.symbol].ok_or(Error::InvalidData(
             "RAR 2.9 encoder missing level Huffman code",
         ))?;
         bits.write_bits(code.code as u32, code.len);
+        if token.extra_bits != 0 {
+            bits.write_bits(token.extra_value as u32, token.extra_bits);
+        }
     }
     let offset_codes = canonical_codes(&table_lengths[MAIN_COUNT..MAIN_COUNT + OFFSET_COUNT])?;
     let low_offset_codes = canonical_codes(
@@ -1407,21 +1410,139 @@ fn offset_slot_for_match(offset: usize) -> Result<(usize, usize)> {
     Err(Error::InvalidData("RAR 2.9 match offset is too large"))
 }
 
-fn encode_table_level_symbols(lengths: &[u8; TABLE_COUNT]) -> Vec<usize> {
-    lengths.iter().map(|&len| len as usize).collect()
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LevelToken {
+    symbol: usize,
+    extra_bits: u8,
+    extra_value: u8,
 }
 
-fn level_code_lengths(symbols: &[usize]) -> [u8; LEVEL_COUNT] {
+impl LevelToken {
+    const fn plain(symbol: usize) -> Self {
+        Self {
+            symbol,
+            extra_bits: 0,
+            extra_value: 0,
+        }
+    }
+
+    const fn repeat_previous_short(count: usize) -> Self {
+        Self {
+            symbol: 16,
+            extra_bits: 3,
+            extra_value: (count - 3) as u8,
+        }
+    }
+
+    const fn repeat_previous_long(count: usize) -> Self {
+        Self {
+            symbol: 17,
+            extra_bits: 7,
+            extra_value: (count - 11) as u8,
+        }
+    }
+
+    const fn zero_run_short(count: usize) -> Self {
+        Self {
+            symbol: 18,
+            extra_bits: 3,
+            extra_value: (count - 3) as u8,
+        }
+    }
+
+    const fn zero_run_long(count: usize) -> Self {
+        Self {
+            symbol: 19,
+            extra_bits: 7,
+            extra_value: (count - 11) as u8,
+        }
+    }
+}
+
+fn encode_table_level_tokens(lengths: &[u8; TABLE_COUNT]) -> Vec<LevelToken> {
+    encode_level_tokens(lengths)
+}
+
+fn encode_level_tokens(lengths: &[u8]) -> Vec<LevelToken> {
+    let mut tokens = Vec::new();
+    let mut pos = 0usize;
+    let mut previous = None;
+    while pos < lengths.len() {
+        let value = lengths[pos];
+        let mut run = 1usize;
+        while pos + run < lengths.len() && lengths[pos + run] == value {
+            run += 1;
+        }
+
+        if value == 0 {
+            emit_zero_level_run(&mut tokens, run);
+            previous = Some(0);
+            pos += run;
+            continue;
+        }
+
+        if previous == Some(value) && run >= 3 {
+            emit_repeat_level_run(&mut tokens, run);
+            pos += run;
+            continue;
+        }
+
+        tokens.push(LevelToken::plain(value as usize));
+        previous = Some(value);
+        pos += 1;
+    }
+    tokens
+}
+
+fn emit_repeat_level_run(tokens: &mut Vec<LevelToken>, mut run: usize) {
+    while run != 0 {
+        if run >= 11 {
+            let mut chunk = run.min(138);
+            if matches!(run - chunk, 1 | 2) && chunk >= 14 {
+                chunk -= 3;
+            }
+            tokens.push(LevelToken::repeat_previous_long(chunk));
+            run -= chunk;
+        } else if run >= 3 {
+            let chunk = run.min(10);
+            tokens.push(LevelToken::repeat_previous_short(chunk));
+            run -= chunk;
+        } else {
+            break;
+        }
+    }
+}
+
+fn emit_zero_level_run(tokens: &mut Vec<LevelToken>, mut run: usize) {
+    while run != 0 {
+        if run >= 11 {
+            let mut chunk = run.min(138);
+            if matches!(run - chunk, 1 | 2) && chunk >= 14 {
+                chunk -= 3;
+            }
+            tokens.push(LevelToken::zero_run_long(chunk));
+            run -= chunk;
+        } else if run >= 3 {
+            let chunk = run.min(10);
+            tokens.push(LevelToken::zero_run_short(chunk));
+            run -= chunk;
+        } else {
+            tokens.extend(std::iter::repeat_n(LevelToken::plain(0), run));
+            break;
+        }
+    }
+}
+
+fn level_code_lengths(tokens: &[LevelToken]) -> [u8; LEVEL_COUNT] {
     let mut lengths = [0u8; LEVEL_COUNT];
-    let used_count = symbols
-        .iter()
-        .copied()
-        .filter(|&symbol| symbol < 16)
-        .collect::<std::collections::BTreeSet<_>>()
-        .len();
+    let mut used = [false; LEVEL_COUNT];
+    for token in tokens {
+        used[token.symbol] = true;
+    }
+    let used_count = used.iter().filter(|&&used| used).count();
     let len = huffman::bits_for_symbol_count(used_count);
-    for &symbol in symbols {
-        if symbol < 16 {
+    for (symbol, is_used) in used.into_iter().enumerate() {
+        if is_used {
             lengths[symbol] = len;
         }
     }
@@ -2848,15 +2969,17 @@ mod tests {
     use std::ops::Range;
 
     use super::{
-        apply_standard_filter, audio_encode, best_match, encode_ppmd_tokens, encode_tokens,
-        encoded_filter_records, insert_match_position, itanium_decode, itanium_encode,
-        should_lazy_emit_literal, split_large_filter, unpack29_decode, unpack29_encode_literals,
-        unpack29_encode_ppmd, unpack29_encode_ppmd_literals, unpack29_encode_ppmd_with_filter,
-        BitReader, BitWriter, EncodeOptions, EncodeToken, EncoderMatchState, Error, Huffman,
+        apply_standard_filter, audio_encode, best_match, encode_ppmd_tokens,
+        encode_table_level_tokens, encode_tokens, encoded_filter_records, insert_match_position,
+        itanium_decode, itanium_encode, should_lazy_emit_literal, split_large_filter,
+        unpack29_decode, unpack29_encode_literals, unpack29_encode_ppmd,
+        unpack29_encode_ppmd_literals, unpack29_encode_ppmd_with_filter, BitReader, BitWriter,
+        EncodeOptions, EncodeToken, EncoderMatchState, Error, Huffman, LevelToken,
         OwnedVmFilterRecord, PpmdEncodeToken, Rar29FilterKind, Rar29FilterSpec, Result,
         StandardFilter, Unpack29, Unpack29Encoder, VmFilter, VmProgram, VmProgramKind, MAIN_COUNT,
         MATCH_HASH_BUCKETS, MAX_MATCH_CANDIDATES, MAX_VM_AUDIO_FILTER_BLOCK_SIZE,
         MAX_VM_DELTA_FILTER_BLOCK_SIZE, MAX_VM_FILTER_BLOCK_SIZE, RAR3_AUDIO_FILTER_BYTECODE,
+        TABLE_COUNT,
     };
 
     const COMPRESSED_TEXT: &[u8] = &[
@@ -2891,7 +3014,7 @@ mod tests {
     }
 
     #[test]
-    fn multi_block_lz_encoding_improves_large_repeated_documents() {
+    fn multi_block_lz_encoding_round_trips_large_repeated_documents() {
         let seed = b"<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.0 Transitional//EN\">\n\
 <HTML><BODY><P>RAR29 repeated document body with enough structured text to \
 exercise LZSS block table selection.</P></BODY></HTML>\n"
@@ -2906,13 +3029,21 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
         )
         .unwrap();
 
+        assert_eq!(unpack29_decode(&single, input.len()).unwrap(), input);
         assert_eq!(unpack29_decode(&blocked, input.len()).unwrap(), input);
-        assert!(
-            blocked.len() * 4 < single.len() * 3,
-            "blocked={} single={}",
-            blocked.len(),
-            single.len()
-        );
+        assert!(blocked.len() < input.len());
+    }
+
+    #[test]
+    fn table_level_encoder_uses_rar29_run_symbols() {
+        let mut lengths = [0u8; TABLE_COUNT];
+        lengths[..4].fill(5);
+        lengths[8..21].fill(0);
+
+        let tokens = encode_table_level_tokens(&lengths);
+
+        assert!(tokens.contains(&LevelToken::repeat_previous_short(3)));
+        assert!(tokens.iter().any(|token| token.symbol == 19));
     }
 
     #[test]

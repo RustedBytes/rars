@@ -183,11 +183,40 @@ fn encode_member(
         return Ok(Vec::new());
     }
 
-    let tokens = encode_tokens(input, history, options);
+    let tokens = encode_tokens(input, history, options, None);
+    let table_lengths = table_lengths_for_tokens(&tokens, fixed_table)?;
+    let packed = encode_member_with_tables(&tokens, history, fixed_table, &table_lengths)?;
+    if fixed_table.is_some() {
+        return Ok(packed);
+    }
+
+    let cost_model = CostModel::new(&table_lengths);
+    let refined_tokens = encode_tokens(input, history, options, Some(&cost_model));
+    if refined_tokens == tokens {
+        return Ok(packed);
+    }
+    let refined_table_lengths = table_lengths_for_tokens(&refined_tokens, fixed_table)?;
+    let refined_packed = encode_member_with_tables(
+        &refined_tokens,
+        history,
+        fixed_table,
+        &refined_table_lengths,
+    )?;
+    if refined_packed.len() < packed.len() {
+        Ok(refined_packed)
+    } else {
+        Ok(packed)
+    }
+}
+
+fn table_lengths_for_tokens(
+    tokens: &[EncodeToken],
+    fixed_table: Option<FixedEncodeTable>,
+) -> Result<[u8; TABLE_COUNT]> {
     let mut main_frequencies = [0usize; MAIN_COUNT];
     let mut offset_frequencies = [0usize; OFFSET_COUNT];
     let mut length_frequencies = [0usize; LENGTH_COUNT];
-    for token in &tokens {
+    for token in tokens {
         match *token {
             EncodeToken::Literal(byte) => main_frequencies[byte as usize] += 1,
             EncodeToken::RepeatLast => main_frequencies[256] += 1,
@@ -259,9 +288,17 @@ fn encode_member(
         table_lengths[MAIN_COUNT + OFFSET_COUNT..TABLE_COUNT]
             .copy_from_slice(&validated_lengths_for_frequencies(&length_frequencies, 15));
     }
+    Ok(table_lengths)
+}
 
-    let level_symbols = encode_table_level_symbols(&table_lengths);
-    let level_lengths = level_code_lengths_for_symbols(&level_symbols);
+fn encode_member_with_tables(
+    tokens: &[EncodeToken],
+    history: &[u8],
+    fixed_table: Option<FixedEncodeTable>,
+    table_lengths: &[u8; TABLE_COUNT],
+) -> Result<Vec<u8>> {
+    let level_tokens = encode_table_level_tokens(&table_lengths);
+    let level_lengths = level_code_lengths_for_tokens(&level_tokens);
     let level_codes = canonical_codes(&level_lengths)?;
     let main_codes = canonical_codes(&table_lengths[..MAIN_COUNT])?;
 
@@ -271,22 +308,20 @@ fn encode_member(
         for &len in &level_lengths {
             bits.write_bits(len as u32, 4);
         }
-        for symbol in level_symbols {
-            let code = level_codes[symbol].ok_or(Error::InvalidData(
+        for token in level_tokens {
+            let code = level_codes[token.symbol].ok_or(Error::InvalidData(
                 "RAR 2.0 encoder missing level Huffman code",
             ))?;
             bits.write_bits(code.code as u32, code.len);
-            match symbol {
-                17 => bits.write_bits(0, 3),   // run of 3 zero lengths.
-                18 => bits.write_bits(127, 7), // run of 138 zero lengths.
-                _ => {}
+            if token.extra_bits != 0 {
+                bits.write_bits(token.extra_value as u32, token.extra_bits);
             }
         }
     }
     let offset_codes = canonical_codes(&table_lengths[MAIN_COUNT..MAIN_COUNT + OFFSET_COUNT])?;
     let length_codes = canonical_codes(&table_lengths[MAIN_COUNT + OFFSET_COUNT..TABLE_COUNT])?;
     for token in tokens {
-        match token {
+        match *token {
             EncodeToken::Literal(byte) => {
                 let code = main_codes[byte as usize].ok_or(Error::InvalidData(
                     "RAR 2.0 encoder missing literal Huffman code",
@@ -366,7 +401,7 @@ impl FixedEncodeTable {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EncodeToken {
     Literal(u8),
     RepeatLast,
@@ -384,7 +419,12 @@ enum EncodeToken {
     },
 }
 
-fn encode_tokens(input: &[u8], history: &[u8], options: EncodeOptions) -> Vec<EncodeToken> {
+fn encode_tokens(
+    input: &[u8],
+    history: &[u8],
+    options: EncodeOptions,
+    cost_model: Option<&CostModel>,
+) -> Vec<EncodeToken> {
     let mut tokens = Vec::new();
     let mut buckets = vec![Vec::new(); MATCH_HASH_BUCKETS];
     let history = &history[history.len().saturating_sub(options.max_match_distance)..];
@@ -400,7 +440,15 @@ fn encode_tokens(input: &[u8], history: &[u8], options: EncodeOptions) -> Vec<En
     let mut last_match = None;
     let mut old_offsets = [0usize; 4];
     while pos < end {
-        let selected = select_match(&combined, pos, end, &buckets, options, &old_offsets);
+        let selected = select_match(
+            &combined,
+            pos,
+            end,
+            &buckets,
+            options,
+            &old_offsets,
+            cost_model,
+        );
         if let Some(selected) = selected {
             if should_lazy_emit_literal(
                 &combined,
@@ -409,6 +457,7 @@ fn encode_tokens(input: &[u8], history: &[u8], options: EncodeOptions) -> Vec<En
                 &buckets,
                 options,
                 &old_offsets,
+                cost_model,
                 selected,
             ) {
                 tokens.push(EncodeToken::Literal(combined[pos]));
@@ -465,6 +514,60 @@ fn encode_tokens(input: &[u8], history: &[u8], options: EncodeOptions) -> Vec<En
 }
 
 #[derive(Debug, Clone, Copy)]
+struct CostModel<'a> {
+    main: &'a [u8],
+    offsets: &'a [u8],
+    lengths: &'a [u8],
+}
+
+impl<'a> CostModel<'a> {
+    fn new(table_lengths: &'a [u8; TABLE_COUNT]) -> Self {
+        Self {
+            main: &table_lengths[..MAIN_COUNT],
+            offsets: &table_lengths[MAIN_COUNT..MAIN_COUNT + OFFSET_COUNT],
+            lengths: &table_lengths[MAIN_COUNT + OFFSET_COUNT..TABLE_COUNT],
+        }
+    }
+
+    fn selected_cost(self, selected: SelectedMatch) -> Option<usize> {
+        match selected {
+            SelectedMatch::Fresh { length, offset } => {
+                let encoded_length = length.checked_sub(match_length_adjustment(offset))?;
+                let (length_slot, _) = length_slot_for_match(encoded_length).ok()?;
+                let (offset_slot, _) = offset_slot_for_match(offset).ok()?;
+                Some(
+                    usize::from(self.main[270 + length_slot])
+                        + usize::from(LENGTH_BITS[length_slot])
+                        + usize::from(self.offsets[offset_slot])
+                        + usize::from(OFFSET_BITS[offset_slot]),
+                )
+            }
+            SelectedMatch::OldOffset {
+                index,
+                length,
+                offset,
+            } => {
+                let (length_slot, _) = old_length_slot_for_match(length, offset).ok()?;
+                Some(
+                    usize::from(self.main[257 + index])
+                        + usize::from(self.lengths[length_slot])
+                        + usize::from(LENGTH_BITS[length_slot]),
+                )
+            }
+            SelectedMatch::ShortOffset { offset } => {
+                let (slot, _) = short_slot_for_match(offset).ok()?;
+                Some(usize::from(self.main[261 + slot]) + usize::from(SHORT_BITS[slot]))
+            }
+        }
+    }
+
+    fn selected_score(self, selected: SelectedMatch) -> Option<isize> {
+        let cost = self.selected_cost(selected)?;
+        Some(selected.length() as isize * 8 - cost as isize)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
 enum SelectedMatch {
     Fresh {
         length: usize,
@@ -505,9 +608,41 @@ fn select_match(
     buckets: &[Vec<usize>],
     options: EncodeOptions,
     old_offsets: &[usize; 4],
+    cost_model: Option<&CostModel<'_>>,
 ) -> Option<SelectedMatch> {
-    let fresh = best_match(input, pos, end, buckets, options);
-    let old = best_old_offset_match(input, pos, end, old_offsets);
+    let fresh = best_match(input, pos, end, buckets, options, cost_model)
+        .map(|(length, offset)| SelectedMatch::Fresh { length, offset });
+    let old = best_old_offset_match(input, pos, end, old_offsets, cost_model).map(
+        |(index, length, offset)| SelectedMatch::OldOffset {
+            index,
+            length,
+            offset,
+        },
+    );
+    if let Some(cost_model) = cost_model {
+        return [fresh, old, best_short_offset_match(input, pos, end)]
+            .into_iter()
+            .flatten()
+            .max_by_key(|&selected| {
+                (
+                    cost_model.selected_score(selected).unwrap_or(isize::MIN),
+                    selected.length(),
+                )
+            });
+    }
+
+    let fresh = fresh.and_then(|selected| match selected {
+        SelectedMatch::Fresh { length, offset } => Some((length, offset)),
+        _ => None,
+    });
+    let old = old.and_then(|selected| match selected {
+        SelectedMatch::OldOffset {
+            index,
+            length,
+            offset,
+        } => Some((index, length, offset)),
+        _ => None,
+    });
     match (fresh, old) {
         (Some((fresh_length, _)), Some((index, old_length, old_offset)))
             if old_length + 1 >= fresh_length =>
@@ -524,8 +659,7 @@ fn select_match(
             length,
             offset,
         }),
-        (None, None) => best_short_offset_match(input, pos, end)
-            .map(|offset| SelectedMatch::ShortOffset { offset }),
+        (None, None) => best_short_offset_match(input, pos, end),
     }
 }
 
@@ -536,6 +670,7 @@ fn should_lazy_emit_literal(
     buckets: &[Vec<usize>],
     options: EncodeOptions,
     old_offsets: &[usize; 4],
+    cost_model: Option<&CostModel<'_>>,
     current: SelectedMatch,
 ) -> bool {
     if !options.lazy_matching || pos + 1 >= end {
@@ -545,12 +680,25 @@ fn should_lazy_emit_literal(
     (1..=lookahead)
         .take_while(|offset| pos + offset < end)
         .any(|offset| {
-            select_match(input, pos + offset, end, buckets, options, old_offsets).is_some_and(
-                |next| {
-                    let skipped_literal_score = offset as isize * 8;
-                    next.score() > current.score() + skipped_literal_score
-                },
+            select_match(
+                input,
+                pos + offset,
+                end,
+                buckets,
+                options,
+                old_offsets,
+                cost_model,
             )
+            .is_some_and(|next| {
+                let current_score = cost_model
+                    .and_then(|cost_model| cost_model.selected_score(current))
+                    .unwrap_or_else(|| current.score());
+                let next_score = cost_model
+                    .and_then(|cost_model| cost_model.selected_score(next))
+                    .unwrap_or_else(|| next.score());
+                let skipped_literal_score = offset as isize * 8;
+                next_score > current_score + skipped_literal_score
+            })
         })
 }
 
@@ -560,6 +708,7 @@ fn best_match(
     end: usize,
     buckets: &[Vec<usize>],
     options: EncodeOptions,
+    cost_model: Option<&CostModel<'_>>,
 ) -> Option<(usize, usize)> {
     let max_offset = pos.min(options.max_match_distance);
     let max_length = (end - pos).min(MAX_ENCODER_MATCH_LENGTH);
@@ -587,11 +736,7 @@ fn best_match(
             length += 1;
         }
         let encodable = length >= 3 + match_length_adjustment(offset);
-        if encodable
-            && best.is_none_or(|(best_length, best_offset)| {
-                length > best_length || (length == best_length && offset < best_offset)
-            })
-        {
+        if encodable && is_better_fresh_match(cost_model, length, offset, best) {
             best = Some((length, offset));
             if length == max_length {
                 break;
@@ -610,11 +755,36 @@ fn offset_slot_index(offset: usize) -> usize {
         .unwrap_or(OFFSET_BITS.len() - 1)
 }
 
+fn is_better_fresh_match(
+    cost_model: Option<&CostModel<'_>>,
+    length: usize,
+    offset: usize,
+    best: Option<(usize, usize)>,
+) -> bool {
+    let Some((best_length, best_offset)) = best else {
+        return true;
+    };
+    if let Some(cost_model) = cost_model {
+        let candidate = SelectedMatch::Fresh { length, offset };
+        let best = SelectedMatch::Fresh {
+            length: best_length,
+            offset: best_offset,
+        };
+        let candidate_score = cost_model.selected_score(candidate).unwrap_or(isize::MIN);
+        let best_score = cost_model.selected_score(best).unwrap_or(isize::MIN);
+        return candidate_score > best_score
+            || (candidate_score == best_score
+                && (length > best_length || (length == best_length && offset < best_offset)));
+    }
+    length > best_length || (length == best_length && offset < best_offset)
+}
+
 fn best_old_offset_match(
     input: &[u8],
     pos: usize,
     end: usize,
     old_offsets: &[usize; 4],
+    cost_model: Option<&CostModel<'_>>,
 ) -> Option<(usize, usize, usize)> {
     let max_length = (end - pos).min(MAX_ENCODER_MATCH_LENGTH);
     let mut best = None;
@@ -624,9 +794,7 @@ fn best_old_offset_match(
         }
         let length = match_length_at_offset(input, pos, max_length, offset);
         if old_length_slot_for_match(length, offset).is_ok()
-            && best.is_none_or(|(_, best_length, best_offset)| {
-                length > best_length || (length == best_length && offset < best_offset)
-            })
+            && is_better_old_offset_match(cost_model, index, length, offset, best)
         {
             best = Some((index, length, offset));
         }
@@ -634,14 +802,46 @@ fn best_old_offset_match(
     best
 }
 
-fn best_short_offset_match(input: &[u8], pos: usize, end: usize) -> Option<usize> {
+fn is_better_old_offset_match(
+    cost_model: Option<&CostModel<'_>>,
+    index: usize,
+    length: usize,
+    offset: usize,
+    best: Option<(usize, usize, usize)>,
+) -> bool {
+    let Some((best_index, best_length, best_offset)) = best else {
+        return true;
+    };
+    if let Some(cost_model) = cost_model {
+        let candidate = SelectedMatch::OldOffset {
+            index,
+            length,
+            offset,
+        };
+        let best = SelectedMatch::OldOffset {
+            index: best_index,
+            length: best_length,
+            offset: best_offset,
+        };
+        let candidate_score = cost_model.selected_score(candidate).unwrap_or(isize::MIN);
+        let best_score = cost_model.selected_score(best).unwrap_or(isize::MIN);
+        return candidate_score > best_score
+            || (candidate_score == best_score
+                && (length > best_length || (length == best_length && offset < best_offset)));
+    }
+    length > best_length || (length == best_length && offset < best_offset)
+}
+
+fn best_short_offset_match(input: &[u8], pos: usize, end: usize) -> Option<SelectedMatch> {
     if end - pos < 2 {
         return None;
     }
     let max_offset = pos.min(256);
-    (1..=max_offset).find(|&offset| {
-        input[pos] == input[pos - offset] && input[pos + 1] == input[pos + 1 - offset]
-    })
+    (1..=max_offset)
+        .find(|&offset| {
+            input[pos] == input[pos - offset] && input[pos + 1] == input[pos + 1 - offset]
+        })
+        .map(|offset| SelectedMatch::ShortOffset { offset })
 }
 
 fn match_length_at_offset(input: &[u8], pos: usize, max_length: usize, offset: usize) -> usize {
@@ -780,8 +980,121 @@ fn literal_code_len(symbol_count: usize) -> Result<u8> {
     u8::try_from(len.max(1)).map_err(|_| Error::InvalidData("RAR 2.0 literal table is too large"))
 }
 
-fn encode_table_level_symbols(lengths: &[u8; TABLE_COUNT]) -> Vec<usize> {
-    lengths.iter().map(|&len| len as usize).collect()
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LevelToken {
+    symbol: usize,
+    extra_bits: u8,
+    extra_value: u8,
+}
+
+impl LevelToken {
+    const fn plain(symbol: usize) -> Self {
+        Self {
+            symbol,
+            extra_bits: 0,
+            extra_value: 0,
+        }
+    }
+
+    const fn repeat_previous(count: usize) -> Self {
+        Self {
+            symbol: 16,
+            extra_bits: 2,
+            extra_value: (count - 3) as u8,
+        }
+    }
+
+    const fn zero_run_short(count: usize) -> Self {
+        Self {
+            symbol: 17,
+            extra_bits: 3,
+            extra_value: (count - 3) as u8,
+        }
+    }
+
+    const fn zero_run_long(count: usize) -> Self {
+        Self {
+            symbol: 18,
+            extra_bits: 7,
+            extra_value: (count - 11) as u8,
+        }
+    }
+}
+
+fn encode_table_level_tokens(lengths: &[u8; TABLE_COUNT]) -> Vec<LevelToken> {
+    encode_level_tokens(lengths)
+}
+
+fn encode_level_tokens(lengths: &[u8]) -> Vec<LevelToken> {
+    let mut tokens = Vec::new();
+    let mut pos = 0usize;
+    let mut previous = None;
+    while pos < lengths.len() {
+        let value = lengths[pos];
+        let mut run = 1usize;
+        while pos + run < lengths.len() && lengths[pos + run] == value {
+            run += 1;
+        }
+
+        if value == 0 {
+            emit_zero_level_run(&mut tokens, run);
+            previous = Some(0);
+            pos += run;
+            continue;
+        }
+
+        if previous == Some(value) && run >= 3 {
+            let mut remaining = run;
+            while remaining != 0 {
+                let chunk = remaining.min(6);
+                if chunk >= 3 {
+                    tokens.push(LevelToken::repeat_previous(chunk));
+                    remaining -= chunk;
+                } else {
+                    tokens.extend(std::iter::repeat_n(
+                        LevelToken::plain(value as usize),
+                        chunk,
+                    ));
+                    remaining = 0;
+                }
+            }
+            pos += run;
+            continue;
+        }
+
+        tokens.push(LevelToken::plain(value as usize));
+        previous = Some(value);
+        pos += 1;
+    }
+    tokens
+}
+
+fn emit_zero_level_run(tokens: &mut Vec<LevelToken>, mut run: usize) {
+    while run != 0 {
+        if run >= 11 {
+            let mut chunk = run.min(138);
+            if matches!(run - chunk, 1 | 2) && chunk >= 14 {
+                chunk -= 3;
+            }
+            tokens.push(LevelToken::zero_run_long(chunk));
+            run -= chunk;
+        } else if run >= 3 {
+            let chunk = run.min(10);
+            tokens.push(LevelToken::zero_run_short(chunk));
+            run -= chunk;
+        } else {
+            tokens.extend(std::iter::repeat_n(LevelToken::plain(0), run));
+            break;
+        }
+    }
+}
+
+fn level_code_lengths_for_tokens(tokens: &[LevelToken]) -> [u8; LEVEL_COUNT] {
+    let mut used = [false; LEVEL_COUNT];
+    for token in tokens {
+        used[token.symbol] = true;
+    }
+    level_code_lengths_for_used_symbols(used)
 }
 
 fn validated_lengths_for_frequencies<const N: usize>(
@@ -862,6 +1175,10 @@ fn level_code_lengths_for_symbols(symbols: &[usize]) -> [u8; LEVEL_COUNT] {
     for &symbol in symbols {
         used[symbol] = true;
     }
+    level_code_lengths_for_used_symbols(used)
+}
+
+fn level_code_lengths_for_used_symbols(used: [bool; LEVEL_COUNT]) -> [u8; LEVEL_COUNT] {
     let used_count = used.iter().filter(|&&used| used).count();
     let len = huffman::bits_for_symbol_count(used_count);
     let mut lengths = [0u8; LEVEL_COUNT];
@@ -1818,8 +2135,8 @@ mod tests {
     #[test]
     fn encode_options_can_disable_fresh_lz_matches() {
         let input = b"abcdefabcdefabcdefabcdef";
-        let default_tokens = encode_tokens(input, &[], EncodeOptions::default());
-        let literalish_tokens = encode_tokens(input, &[], EncodeOptions::new(0));
+        let default_tokens = encode_tokens(input, &[], EncodeOptions::default(), None);
+        let literalish_tokens = encode_tokens(input, &[], EncodeOptions::new(0), None);
 
         assert!(default_tokens
             .iter()
@@ -1827,6 +2144,24 @@ mod tests {
         assert!(!literalish_tokens
             .iter()
             .any(|token| matches!(token, EncodeToken::Match { .. })));
+    }
+
+    #[test]
+    fn table_level_encoder_uses_rar20_run_symbols() {
+        let lengths = [0, 0, 0, 0, 5, 5, 5, 5, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
+        let tokens = super::encode_level_tokens(&lengths);
+
+        assert_eq!(
+            tokens,
+            vec![
+                super::LevelToken::zero_run_short(4),
+                super::LevelToken::plain(5),
+                super::LevelToken::repeat_previous(3),
+                super::LevelToken::plain(7),
+                super::LevelToken::zero_run_short(10),
+                super::LevelToken::plain(2),
+            ]
+        );
     }
 
     #[test]
@@ -1940,7 +2275,7 @@ mod tests {
     #[test]
     fn encoder_emits_rar20_repeat_last_matches_for_regular_streams() {
         let input = b"\x00\x01\x02\x03".repeat(4096);
-        let tokens = encode_tokens(&input, &[], EncodeOptions::default());
+        let tokens = encode_tokens(&input, &[], EncodeOptions::default(), None);
         let packed = unpack20_encode_literals(&input).unwrap();
 
         assert!(tokens
@@ -1953,7 +2288,7 @@ mod tests {
     #[test]
     fn encoder_emits_rar20_minimum_length_fresh_matches() {
         let input = b"abcabc";
-        let tokens = encode_tokens(input, &[], EncodeOptions::default());
+        let tokens = encode_tokens(input, &[], EncodeOptions::default(), None);
         let packed = unpack20_encode_literals(input).unwrap();
 
         assert!(matches!(
@@ -1974,7 +2309,7 @@ mod tests {
     #[test]
     fn encoder_emits_rar20_short_offset_matches() {
         let input = b"abab";
-        let tokens = encode_tokens(input, &[], EncodeOptions::default());
+        let tokens = encode_tokens(input, &[], EncodeOptions::default(), None);
         let packed = unpack20_encode_literals(input).unwrap();
 
         assert!(matches!(
@@ -1991,7 +2326,7 @@ mod tests {
     #[test]
     fn encoder_emits_rar20_old_offset_matches() {
         let input = b"abcdabcdXYZXYZwxyzwxyz";
-        let tokens = encode_tokens(input, &[], EncodeOptions::default());
+        let tokens = encode_tokens(input, &[], EncodeOptions::default(), None);
         let packed = unpack20_encode_literals(input).unwrap();
 
         assert!(tokens
@@ -2008,7 +2343,7 @@ mod tests {
         input.extend(std::iter::repeat_n(0, 300 * 1024));
         input.extend_from_slice(phrase);
         input.extend_from_slice(phrase);
-        let tokens = encode_tokens(&input, &[], EncodeOptions::default());
+        let tokens = encode_tokens(&input, &[], EncodeOptions::default(), None);
         let packed = unpack20_encode_literals(&input).unwrap();
 
         assert!(tokens.iter().any(|token| matches!(
@@ -2074,7 +2409,7 @@ mod tests {
         let mut encoder = Unpack20Encoder::new();
         let first_packed = encoder.encode_member(&first).unwrap();
         let second_packed = encoder.encode_member(&second).unwrap();
-        let tokens = encode_tokens(&second, &first, EncodeOptions::default());
+        let tokens = encode_tokens(&second, &first, EncodeOptions::default(), None);
 
         assert!(matches!(tokens.first(), Some(EncodeToken::Match { .. })));
         assert!(second_packed.len() < independent.len());
