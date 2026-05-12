@@ -90,9 +90,9 @@ pub(super) fn encode_options_for_level(
         Some(0) => 0,
         Some(1) => 8,
         Some(2) => 32,
-        Some(3) => 96,
-        Some(4) => MAX_MATCH_CANDIDATES_DEFAULT,
-        Some(5) => 512,
+        Some(3) => 64,
+        Some(4) => 96,
+        Some(5) => 128,
         Some(_) => {
             return Err(Error::InvalidHeader(
                 "RAR 5 compression level must be in the range 0..5",
@@ -104,7 +104,7 @@ pub(super) fn encode_options_for_level(
     })?;
     Ok(EncodeOptions::new(candidates)
         .with_lazy_matching(matches!(level, None | Some(4..=5)))
-        .with_lazy_lookahead(if matches!(level, Some(5)) { 4 } else { 1 })
+        .with_lazy_lookahead(1)
         .with_max_match_distance(max_match_distance))
 }
 
@@ -112,19 +112,7 @@ pub(super) fn encode_option_candidates_for_level(
     level: Option<u8>,
     dictionary_size: u64,
 ) -> Result<Vec<EncodeOptions>> {
-    let primary = encode_options_for_level(level, dictionary_size)?;
-    let Some(level @ 2..=5) = level else {
-        return Ok(vec![primary]);
-    };
-
-    let mut candidates = vec![primary];
-    for fallback_level in (1..level).rev() {
-        candidates.push(encode_options_for_level(
-            Some(fallback_level),
-            dictionary_size,
-        )?);
-    }
-    Ok(candidates)
+    Ok(vec![encode_options_for_level(level, dictionary_size)?])
 }
 
 pub(super) fn validate_compression_level(options: WriterOptions) -> Result<()> {
@@ -270,6 +258,9 @@ pub(super) fn encode_member_with_auto_size_filter(
         return encode_safe_lz_member(data, algorithm_version, options);
     }
     let mut best = encode_safe_lz_member(data, algorithm_version, options)?;
+    if is_text_like_filter_skip_candidate(data) {
+        return Ok(best);
+    }
     let mut candidates = vec![FilterKind::E8, FilterKind::E8E9, FilterKind::Arm];
     for channels in 1..=4 {
         candidates.push(FilterKind::Delta { channels });
@@ -346,6 +337,19 @@ pub(super) fn encode_member_with_auto_size_filter(
         }
     }
     Ok(best)
+}
+
+fn is_text_like_filter_skip_candidate(data: &[u8]) -> bool {
+    let sample_len = data.len().min(8192);
+    if sample_len == 0 {
+        return false;
+    }
+    let sample = &data[..sample_len];
+    let text_bytes = sample
+        .iter()
+        .filter(|&&byte| matches!(byte, b'\t' | b'\n' | b'\r' | 0x20..=0x7e))
+        .count();
+    text_bytes * 100 / sample_len >= 95
 }
 
 pub(super) fn auto_delta_filter_range(

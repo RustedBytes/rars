@@ -1269,8 +1269,10 @@ fn rar15_encode_options_for_level(level: Option<u8>) -> Result<Rar15EncodeOption
         3 => Ok(compatible
             .with_lazy_matching(false)
             .with_max_long_match_distance(16 * 1024)),
-        4 => Ok(compatible.with_max_long_match_distance(24 * 1024)),
-        5 => Ok(compatible),
+        4 => Ok(compatible
+            .with_lazy_matching(false)
+            .with_max_long_match_distance(24 * 1024)),
+        5 => Ok(compatible.with_lazy_matching(false)),
         _ => Err(Error::InvalidHeader(
             "RAR compression level must be in the range 0..5",
         )),

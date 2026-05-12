@@ -1,6 +1,9 @@
 use crate::{Error, Result};
 use std::io::{Read, Write};
 
+const MATCH_HASH_BUCKETS: usize = 4096;
+const MAX_LONG_MATCH_CANDIDATES: usize = 64;
+
 const DEC_L1: &[u16] = &[
     0x8000, 0xa000, 0xc000, 0xd000, 0xe000, 0xea00, 0xee00, 0xf000, 0xf200, 0xf200, 0xffff,
 ];
@@ -208,7 +211,7 @@ impl Unpack15Encoder {
             self.emit_payloads(payloads)?;
             if group_enters_stmode {
                 if self.options.stmode_literal_runs {
-                    self.emit_stmode_literal_run(input, &mut pos, false)?;
+                    self.emit_stmode_literal_run(input, &[], &mut pos, false)?;
                 }
                 self.emit_stmode_exit()?;
             }
@@ -221,6 +224,7 @@ impl Unpack15Encoder {
             return Ok(Vec::new());
         }
         self.bits = BitWriter::new();
+        let buckets = long_lz_buckets(input);
         let mut pos = 0usize;
         while pos < input.len() {
             let mut flags = 0u8;
@@ -244,6 +248,7 @@ impl Unpack15Encoder {
                     .choose_lz_token(
                         input,
                         pos,
+                        &buckets,
                         LzPlanState {
                             last_dist: plan_last_dist,
                             last_length: plan_last_length,
@@ -261,6 +266,7 @@ impl Unpack15Encoder {
                             || !should_lazy_emit_literal(
                                 input,
                                 pos,
+                                &buckets,
                                 *token,
                                 plan_max_dist3,
                                 self.options,
@@ -321,7 +327,7 @@ impl Unpack15Encoder {
             self.emit_payloads(payloads)?;
             if group_enters_stmode {
                 if self.options.stmode_literal_runs {
-                    self.emit_stmode_literal_run(input, &mut pos, true)?;
+                    self.emit_stmode_literal_run(input, &buckets, &mut pos, true)?;
                 }
                 self.emit_stmode_exit()?;
             }
@@ -333,10 +339,11 @@ impl Unpack15Encoder {
         &self,
         input: &[u8],
         pos: usize,
+        buckets: &[Vec<usize>],
         state: LzPlanState,
         flag_bits: usize,
     ) -> Option<EncodedToken> {
-        let candidates = find_lz_tokens(input, pos, state, self.options);
+        let candidates = find_lz_tokens(input, pos, buckets, state, self.options);
         candidates
             .into_iter()
             .filter(|token| {
@@ -487,6 +494,7 @@ impl Unpack15Encoder {
     fn emit_stmode_literal_run(
         &mut self,
         input: &[u8],
+        buckets: &[Vec<usize>],
         pos: &mut usize,
         allow_lz: bool,
     ) -> Result<()> {
@@ -495,6 +503,7 @@ impl Unpack15Encoder {
                 && find_lz_token(
                     input,
                     *pos,
+                    buckets,
                     LzPlanState {
                         last_dist: self.last_dist,
                         last_length: self.last_length,
@@ -1070,10 +1079,11 @@ fn plan_long_lz_adaptive_effect(
 fn find_lz_token(
     input: &[u8],
     pos: usize,
+    buckets: &[Vec<usize>],
     state: LzPlanState,
     options: EncodeOptions,
 ) -> Option<EncodedToken> {
-    find_lz_tokens(input, pos, state, options)
+    find_lz_tokens(input, pos, buckets, state, options)
         .into_iter()
         .next()
 }
@@ -1081,6 +1091,7 @@ fn find_lz_token(
 fn find_lz_tokens(
     input: &[u8],
     pos: usize,
+    buckets: &[Vec<usize>],
     state: LzPlanState,
     options: EncodeOptions,
 ) -> Vec<EncodedToken> {
@@ -1102,8 +1113,14 @@ fn find_lz_tokens(
     if let Some(short_lz) = find_short_lz(input, pos) {
         tokens.push(EncodedToken::ShortLz(short_lz));
     }
-    if let Some(long_lz) = find_long_lz(input, pos, options.max_long_match_distance)
-        .filter(|long_lz| long_lz_length_code_for_distance(*long_lz, state.max_dist3).is_some())
+    if let Some(long_lz) = find_long_lz_with_buckets(
+        input,
+        pos,
+        options.max_long_match_distance,
+        buckets,
+        MAX_LONG_MATCH_CANDIDATES,
+    )
+    .filter(|long_lz| long_lz_length_code_for_distance(*long_lz, state.max_dist3).is_some())
     {
         tokens.push(EncodedToken::LongLz(long_lz));
     }
@@ -1113,6 +1130,7 @@ fn find_lz_tokens(
 fn should_lazy_emit_literal(
     input: &[u8],
     pos: usize,
+    buckets: &[Vec<usize>],
     current: EncodedToken,
     max_dist3: u32,
     options: EncodeOptions,
@@ -1126,6 +1144,7 @@ fn should_lazy_emit_literal(
     let next = find_lz_token(
         input,
         pos + 1,
+        buckets,
         LzPlanState {
             last_dist: u32::MAX,
             last_length: 0,
@@ -1162,7 +1181,10 @@ fn find_short_lz(input: &[u8], pos: usize) -> Option<ShortLz> {
         {
             length += 1;
         }
-        if length >= 3 && length > best.length as usize {
+        if length >= 3
+            && (length > best.length as usize
+                || (length == best.length as usize && distance < best.distance as usize))
+        {
             best = ShortLz {
                 distance: distance as u32,
                 length: length as u32,
@@ -1296,6 +1318,77 @@ pub fn find_long_lz(input: &[u8], pos: usize, max_match_distance: usize) -> Opti
     (best.length >= 3).then_some(best)
 }
 
+fn find_long_lz_with_buckets(
+    input: &[u8],
+    pos: usize,
+    max_match_distance: usize,
+    buckets: &[Vec<usize>],
+    max_candidates: usize,
+) -> Option<LongLz> {
+    if pos < 257 || pos + 2 >= input.len() || max_candidates == 0 {
+        return None;
+    }
+
+    let max_distance = pos.min(0x8000).min(max_match_distance);
+    if max_distance < 257 {
+        return None;
+    }
+    let max_length = (input.len() - pos).min(258);
+    let mut best = LongLz {
+        distance: 0,
+        length: 0,
+    };
+    let mut checked = 0usize;
+    for &candidate in buckets[match_hash(input, pos)].iter().rev() {
+        if candidate >= pos {
+            continue;
+        }
+        let distance = pos - candidate;
+        if distance > max_distance {
+            break;
+        }
+        if distance < 257 {
+            continue;
+        }
+        checked += 1;
+        let mut length = 0usize;
+        while length < max_length && input[pos + length] == input[pos + length - distance] {
+            length += 1;
+        }
+        if length >= 3
+            && (length > best.length as usize
+                || (length == best.length as usize && distance < best.distance as usize))
+        {
+            best = LongLz {
+                distance: distance as u32,
+                length: length as u32,
+            };
+            if length == max_length {
+                break;
+            }
+        }
+        if checked >= max_candidates {
+            break;
+        }
+    }
+
+    (best.length >= 3).then_some(best)
+}
+
+fn long_lz_buckets(input: &[u8]) -> Vec<Vec<usize>> {
+    let mut buckets = vec![Vec::new(); MATCH_HASH_BUCKETS];
+    for pos in 0..input.len().saturating_sub(2) {
+        buckets[match_hash(input, pos)].push(pos);
+    }
+    buckets
+}
+
+fn match_hash(input: &[u8], pos: usize) -> usize {
+    let value =
+        ((input[pos] as usize) << 8) ^ ((input[pos + 1] as usize) << 4) ^ input[pos + 2] as usize;
+    value & (MATCH_HASH_BUCKETS - 1)
+}
+
 fn emit_long_lz_length(bits: &mut BitWriter, avr_ln2: u32, length_code: u32) -> Result<()> {
     if avr_ln2 >= 122 {
         return emit_decode_num(bits, length_code, 3, DEC_L2, POS_L2);
@@ -1323,13 +1416,9 @@ fn emit_decode_num(
     dec_tab: &[u16],
     pos_tab: &[u16],
 ) -> Result<()> {
-    for len in start_pos as usize..=16 {
-        for code in 0..(1u32 << len) {
-            if decode_num_prefix_is_stable(code, len, target, start_pos, dec_tab, pos_tab) {
-                bits.write_bits(code, len);
-                return Ok(());
-            }
-        }
+    if let Some((code, len)) = encode_decode_num_prefix(target, start_pos, dec_tab, pos_tab) {
+        bits.write_bits(code, len);
+        return Ok(());
     }
     Err(Error::InvalidData(
         "RAR 1.3 DecodeNum value is not encodable",
@@ -1342,16 +1431,44 @@ fn decode_num_bit_cost(
     dec_tab: &[u16],
     pos_tab: &[u16],
 ) -> Option<usize> {
-    for len in start_pos as usize..=16 {
-        for code in 0..(1u32 << len) {
-            if decode_num_prefix_is_stable(code, len, target, start_pos, dec_tab, pos_tab) {
-                return Some(len);
-            }
+    encode_decode_num_prefix(target, start_pos, dec_tab, pos_tab).map(|(_, len)| len)
+}
+
+fn encode_decode_num_prefix(
+    target: u32,
+    start_pos: u32,
+    dec_tab: &[u16],
+    pos_tab: &[u16],
+) -> Option<(u32, usize)> {
+    let end = 16.min(pos_tab.len().saturating_sub(1));
+    for (len, &base) in pos_tab
+        .iter()
+        .enumerate()
+        .take(end + 1)
+        .skip(start_pos as usize)
+    {
+        let dec_index = len.checked_sub(start_pos as usize)?;
+        let upper = u32::from(*dec_tab.get(dec_index)?);
+        let previous = if dec_index == 0 {
+            0
+        } else {
+            u32::from(dec_tab[dec_index - 1])
+        };
+        let max_num = upper.checked_sub(1)? & !0xf;
+        if max_num < previous {
+            continue;
+        }
+        let base = u32::from(base);
+        let max_target = ((max_num - previous) >> (16 - len)) + base;
+        if target >= base && target <= max_target {
+            let num = previous + ((target - base) << (16 - len));
+            return Some((num >> (16 - len), len));
         }
     }
     None
 }
 
+#[cfg(test)]
 fn decode_num_prefix_is_stable(
     code: u32,
     len: usize,
@@ -1371,6 +1488,7 @@ fn decode_num_prefix_is_stable(
     true
 }
 
+#[cfg(test)]
 fn simulate_decode_num(
     bit_field: u32,
     mut start_pos: u32,
@@ -2034,10 +2152,28 @@ fn corr_huff(char_set: &mut [u16; 256], num_to_place: &mut [u8; 256]) {
 #[cfg(test)]
 mod tests {
     use super::{
-        find_long_lz, find_lz_token, find_old_dist_lz, should_lazy_emit_literal, unpack15_decode,
+        decode_num_bit_cost, decode_num_prefix_is_stable, find_long_lz, find_lz_token,
+        find_old_dist_lz, long_lz_buckets, should_lazy_emit_literal, unpack15_decode,
         unpack15_encode, EncodeOptions, EncodedToken, LongLz, LzPlanState, OldDistLz, ShortLz,
-        Unpack15, Unpack15Encoder,
+        Unpack15, Unpack15Encoder, DEC_HF0, DEC_HF1, DEC_HF2, DEC_HF3, DEC_HF4, DEC_L1, DEC_L2,
+        POS_HF0, POS_HF1, POS_HF2, POS_HF3, POS_HF4, POS_L1, POS_L2,
     };
+
+    fn brute_decode_num_bit_cost(
+        target: u32,
+        start_pos: u32,
+        dec_tab: &[u16],
+        pos_tab: &[u16],
+    ) -> Option<usize> {
+        for len in start_pos as usize..=16 {
+            for code in 0..(1u32 << len) {
+                if decode_num_prefix_is_stable(code, len, target, start_pos, dec_tab, pos_tab) {
+                    return Some(len);
+                }
+            }
+        }
+        None
+    }
 
     #[test]
     fn decode_member_from_reader_accepts_incremental_input() {
@@ -2069,6 +2205,30 @@ mod tests {
             .unwrap();
 
         assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn decode_num_bit_cost_matches_prefix_search_at_table_boundaries() {
+        let tables = [
+            (4, DEC_HF0, POS_HF0),
+            (5, DEC_HF1, POS_HF1),
+            (5, DEC_HF2, POS_HF2),
+            (6, DEC_HF3, POS_HF3),
+            (8, DEC_HF4, POS_HF4),
+            (2, DEC_L1, POS_L1),
+            (3, DEC_L2, POS_L2),
+        ];
+        let targets = [0, 1, 2, 3, 7, 8, 16, 24, 32, 33, 53, 117, 233, 255, 256];
+
+        for (start_pos, dec_tab, pos_tab) in tables {
+            for target in targets {
+                assert_eq!(
+                    decode_num_bit_cost(target, start_pos, dec_tab, pos_tab),
+                    brute_decode_num_bit_cost(target, start_pos, dec_tab, pos_tab),
+                    "target {target}, start_pos {start_pos}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2152,10 +2312,12 @@ mod tests {
         input.extend_from_within(pos - 33..pos - 13);
 
         let encoder = Unpack15Encoder::new();
+        let buckets = long_lz_buckets(&input);
         let token = encoder
             .choose_lz_token(
                 &input,
                 pos,
+                &buckets,
                 LzPlanState {
                     last_dist: u32::MAX,
                     last_length: 0,
@@ -2230,9 +2392,11 @@ mod tests {
     #[test]
     fn lazy_match_prefers_longer_next_position_match() {
         let input = b"abcXbcQRSTabcQRSTUV";
+        let buckets = long_lz_buckets(input);
         let token = find_lz_token(
             input,
             10,
+            &buckets,
             LzPlanState {
                 last_dist: u32::MAX,
                 last_length: 0,
@@ -2254,6 +2418,7 @@ mod tests {
         assert!(should_lazy_emit_literal(
             input,
             10,
+            &buckets,
             token,
             0x2001,
             EncodeOptions::default()
@@ -2276,10 +2441,12 @@ mod tests {
 
         let mut encoder = Unpack15Encoder::new();
         encoder.old_dist = [u32::MAX, u32::MAX, u32::MAX, 33];
+        let buckets = long_lz_buckets(&input);
         let token = encoder
             .choose_lz_token(
                 &input,
                 pos,
+                &buckets,
                 LzPlanState {
                     last_dist: u32::MAX,
                     last_length: 0,
@@ -2320,9 +2487,11 @@ mod tests {
 
         let mut encoder = Unpack15Encoder::new();
         encoder.max_dist3 = 0x7f00;
+        let buckets = long_lz_buckets(&input);
         let token = encoder.choose_lz_token(
             &input,
             pos,
+            &buckets,
             LzPlanState {
                 last_dist: u32::MAX,
                 last_length: 0,

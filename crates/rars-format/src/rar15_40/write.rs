@@ -19,7 +19,6 @@ const MIN_STORE_FALLBACK_SIZE: usize = 1024;
 const RAR29_LARGE_TEXT_PPMD_THRESHOLD: usize = 16 * 1024 * 1024;
 const RAR29_TEXT_SAMPLE_SIZE: usize = 8192;
 const RAR29_AUDIO_SAMPLE_SIZE: usize = 8192;
-const RAR29_MAX_MATCH_CANDIDATES_DEFAULT: usize = 256;
 const RAR29_LZ_BLOCK_SIZE: usize = 1024 * 1024;
 const RAR15_ALIGN_OVERFLOW: &str = "RAR 1.5 block size overflows usize";
 
@@ -251,6 +250,19 @@ fn encode_rar29_auto_filtered_member(
         data: unpack29_encode_literals_with_options(data, options).map_err(Error::from)?,
         method: lz_method,
     };
+    if include_ppmd && data.len() <= 1024 * 1024 && is_text_ppmd_candidate(data) {
+        let ppmd = EncodedPayload {
+            data: unpack29_encode_ppmd(data).map_err(Error::from)?,
+            method: 0x35,
+        };
+        if ppmd.data.len() < best.data.len() {
+            best = ppmd;
+        }
+        return Ok(best);
+    }
+    if is_text_ppmd_candidate(data) {
+        return Ok(best);
+    }
     let mut candidates = Vec::new();
     if include_ppmd && is_auto_ppmd_candidate(data) {
         candidates.push(EncodedPayload {
@@ -835,9 +847,9 @@ fn rar29_encode_options_for_level(level: Option<u8>) -> Result<Rar29EncodeOption
         0 => 0,
         1 => 8,
         2 => 32,
-        3 => 96,
-        4 => RAR29_MAX_MATCH_CANDIDATES_DEFAULT,
-        5 => 512,
+        3 => 64,
+        4 => 96,
+        5 => 128,
         _ => {
             return Err(Error::InvalidHeader(
                 "RAR compression level must be in the range 0..5",
@@ -846,7 +858,7 @@ fn rar29_encode_options_for_level(level: Option<u8>) -> Result<Rar29EncodeOption
     };
     Ok(Rar29EncodeOptions::new(candidates)
         .with_lazy_matching(level >= 4)
-        .with_lazy_lookahead(if level >= 5 { 4 } else { 1 })
+        .with_lazy_lookahead(1)
         .with_block_size(RAR29_LZ_BLOCK_SIZE))
 }
 
@@ -860,8 +872,8 @@ fn rar20_encode_options_for_level(level: Option<u8>) -> Result<Rar20EncodeOption
         None | Some(3) => Ok(Rar20EncodeOptions::default()),
         Some(1) => Ok(Rar20EncodeOptions::new(16).with_try_audio(false)),
         Some(2) => Ok(Rar20EncodeOptions::new(64)),
-        Some(4) => Ok(Rar20EncodeOptions::new(512).with_lazy_matching(true)),
-        Some(5) => Ok(Rar20EncodeOptions::new(1024).with_lazy_matching(true)),
+        Some(4) => Ok(Rar20EncodeOptions::new(96).with_lazy_matching(false)),
+        Some(5) => Ok(Rar20EncodeOptions::new(128).with_lazy_matching(false)),
         Some(0) => Ok(Rar20EncodeOptions::new(0)),
         Some(_) => Err(Error::InvalidHeader(
             "RAR compression level must be in the range 0..5",
@@ -893,8 +905,10 @@ fn rar15_encode_options_for_level(level: Option<u8>) -> Result<Rar15EncodeOption
         3 => Ok(Rar15EncodeOptions::new()
             .with_lazy_matching(false)
             .with_max_long_match_distance(16 * 1024)),
-        4 => Ok(Rar15EncodeOptions::new().with_max_long_match_distance(24 * 1024)),
-        5 => Ok(Rar15EncodeOptions::new()),
+        4 => Ok(Rar15EncodeOptions::new()
+            .with_lazy_matching(false)
+            .with_max_long_match_distance(24 * 1024)),
+        5 => Ok(Rar15EncodeOptions::new().with_lazy_matching(false)),
         _ => Err(Error::InvalidHeader(
             "RAR compression level must be in the range 0..5",
         )),
