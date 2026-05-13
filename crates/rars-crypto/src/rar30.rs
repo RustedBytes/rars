@@ -1,4 +1,4 @@
-use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
+use aes::cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
 use aes::Aes128;
 use sha1::{Digest, Sha1 as FastSha1};
 use std::str;
@@ -64,12 +64,14 @@ impl Rar30Cipher {
         for (byte, iv_byte) in block.iter_mut().zip(self.iv) {
             *byte ^= iv_byte;
         }
+        let block: &mut [u8; 16] = block.try_into().expect("AES block size");
         self.cipher.encrypt_block(block.into());
         self.iv.copy_from_slice(block);
     }
 
     fn decrypt_block(&mut self, block: &mut [u8]) {
         let ciphertext: [u8; 16] = block.try_into().expect("AES block size");
+        let block: &mut [u8; 16] = block.try_into().expect("AES block size");
         self.cipher.decrypt_block(block.into());
         for (byte, iv_byte) in block.iter_mut().zip(self.iv) {
             *byte ^= iv_byte;

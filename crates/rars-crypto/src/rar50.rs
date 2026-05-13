@@ -1,4 +1,4 @@
-use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
+use aes::cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
 use aes::Aes256;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -174,12 +174,14 @@ impl Rar50Cipher {
         for (byte, iv_byte) in block.iter_mut().zip(self.iv) {
             *byte ^= iv_byte;
         }
+        let block: &mut [u8; 16] = block.try_into().expect("AES block size");
         self.cipher.encrypt_block(block.into());
         self.iv.copy_from_slice(block);
     }
 
     fn decrypt_block(&mut self, block: &mut [u8]) {
         let ciphertext: [u8; 16] = block.try_into().expect("AES block size");
+        let block: &mut [u8; 16] = block.try_into().expect("AES block size");
         self.cipher.decrypt_block(block.into());
         for (byte, iv_byte) in block.iter_mut().zip(self.iv) {
             *byte ^= iv_byte;
@@ -189,7 +191,8 @@ impl Rar50Cipher {
 }
 
 fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
-    let mut hmac = <HmacSha256 as Mac>::new_from_slice(key).expect("HMAC accepts keys of any size");
+    let mut hmac =
+        <HmacSha256 as KeyInit>::new_from_slice(key).expect("HMAC accepts keys of any size");
     hmac.update(data);
     hmac.finalize().into_bytes().into()
 }

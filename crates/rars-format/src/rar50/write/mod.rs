@@ -1412,7 +1412,7 @@ struct HeaderEncryptionKeys {
 
 fn header_encryption_keys(password: &[u8]) -> Result<HeaderEncryptionKeys> {
     let mut salt = [0u8; 16];
-    getrandom::getrandom(&mut salt)
+    getrandom::fill(&mut salt)
         .map_err(|_| Error::InvalidHeader("RAR 5 writer could not generate encryption salt"))?;
     let keys = Rar50Keys::derive(password, salt, 0).map_err(super::map_rar50_crypto_error)?;
     Ok(HeaderEncryptionKeys { keys, salt })
@@ -1686,9 +1686,9 @@ fn encrypted_payload(
 ) -> Result<EncryptedStoredPayload> {
     let mut salt = [0u8; 16];
     let mut iv = [0u8; 16];
-    getrandom::getrandom(&mut salt)
+    getrandom::fill(&mut salt)
         .map_err(|_| Error::InvalidHeader("RAR 5 writer could not generate encryption salt"))?;
-    getrandom::getrandom(&mut iv)
+    getrandom::fill(&mut iv)
         .map_err(|_| Error::InvalidHeader("RAR 5 writer could not generate encryption IV"))?;
     let keys = Rar50Keys::derive(password, salt, 0).map_err(super::map_rar50_crypto_error)?;
 
@@ -2290,7 +2290,7 @@ fn encrypted_header_block(
 ) -> Result<Vec<u8>> {
     let header = block_header_image(header_type, flags, data_size, type_specific, extra)?;
     let mut iv = [0u8; 16];
-    getrandom::getrandom(&mut iv)
+    getrandom::fill(&mut iv)
         .map_err(|_| Error::InvalidHeader("RAR 5 writer could not generate encryption IV"))?;
     let padded_len = header.len().checked_add(15).ok_or(Error::InvalidHeader(
         "RAR 5 encrypted header size overflows",

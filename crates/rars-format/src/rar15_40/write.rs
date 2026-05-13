@@ -1275,7 +1275,7 @@ fn encrypt_packed_data_for_writer(
 
 fn random_rar30_salt() -> Result<[u8; 8]> {
     let mut salt = [0; 8];
-    getrandom::getrandom(&mut salt)
+    getrandom::fill(&mut salt)
         .map_err(|_| Error::InvalidHeader("RAR 3.x writer could not generate encryption salt"))?;
     Ok(salt)
 }
