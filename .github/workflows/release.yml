@@ -226,20 +226,31 @@ jobs:
 
           publish() {
             local package="$1"
+            local log
+            log="$(mktemp)"
             echo "::group::Publishing $package"
             for attempt in 1 2 3 4 5; do
-              if cargo publish --locked -p "$package"; then
+              if cargo publish --locked -p "$package" 2>&1 | tee "$log"; then
                 echo "::endgroup::"
+                rm -f "$log"
+                return 0
+              fi
+              if grep -Eq "crate .+@.+ already exists on crates.io index|crate version .+ is already uploaded" "$log"; then
+                echo "$package is already published; continuing"
+                echo "::endgroup::"
+                rm -f "$log"
                 return 0
               fi
               if [ "$attempt" = 5 ]; then
                 echo "::endgroup::"
+                rm -f "$log"
                 return 1
               fi
               echo "Publish failed for $package; waiting for registry/index propagation before retry $((attempt + 1))"
               sleep 30
             done
             echo "::endgroup::"
+            rm -f "$log"
           }
 
           publish rars-crc32
