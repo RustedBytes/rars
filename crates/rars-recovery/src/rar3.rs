@@ -372,8 +372,8 @@ mod tests {
                 .map(|shard| shard.get(offset).copied().unwrap_or(0))
                 .collect();
             let encoded = coder.encode(&column);
-            for (index, byte) in encoded.into_iter().enumerate() {
-                recovery[index][offset] = byte;
+            for (row, byte) in recovery.iter_mut().zip(encoded) {
+                row[offset] = byte;
             }
         }
 
