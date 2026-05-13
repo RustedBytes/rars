@@ -35,7 +35,7 @@ rars-format = { version = "0.1.0", path = "crates/rars-format" }
 rars-recovery = { version = "0.1.0", path = "crates/rars-recovery" }
 rpassword = "7"
 sha1 = "0.10"
-sha2 = "0.10"
+sha2 = "0.11"
 zeroize = { version = "1.8", default-features = false, features = ["alloc", "zeroize_derive"] }
 
 [workspace.lints.rust]
