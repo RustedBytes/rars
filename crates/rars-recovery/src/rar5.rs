@@ -742,6 +742,8 @@ fn invert_linear_system_matrix(gf: &Gf16, matrix: &[Vec<u16>]) -> Result<Vec<Vec
             *value = gf.mul(*value, inv);
         }
 
+        let pivot_matrix_row = matrix[col].clone();
+        let pivot_inverse_row = inverse[col].clone();
         for row in 0..n {
             if row == col {
                 continue;
@@ -750,11 +752,18 @@ fn invert_linear_system_matrix(gf: &Gf16, matrix: &[Vec<u16>]) -> Result<Vec<Vec
             if factor == 0 {
                 continue;
             }
-            for c in col..n {
-                matrix[row][c] ^= gf.mul(factor, matrix[col][c]);
+            for (value, pivot) in matrix[row]
+                .iter_mut()
+                .zip(pivot_matrix_row.iter().copied())
+                .skip(col)
+            {
+                *value ^= gf.mul(factor, pivot);
             }
-            for c in 0..n {
-                inverse[row][c] ^= gf.mul(factor, inverse[col][c]);
+            for (value, pivot) in inverse[row]
+                .iter_mut()
+                .zip(pivot_inverse_row.iter().copied())
+            {
+                *value ^= gf.mul(factor, pivot);
             }
         }
     }

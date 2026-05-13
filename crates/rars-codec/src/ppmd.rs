@@ -756,10 +756,7 @@ impl PpmdDecoder {
         if self.order_fall != 0 {
             ps.push(self.found_state);
         }
-        loop {
-            let Some(suffix) = self.contexts[c].suffix else {
-                break;
-            };
+        while let Some(suffix) = self.contexts[c].suffix {
             c = suffix;
             let found_symbol = self.state(self.found_state).ok()?.symbol;
             let index = self.contexts[c]

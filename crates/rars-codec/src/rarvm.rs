@@ -603,8 +603,7 @@ impl Vm {
             }
             Opcode::Div => {
                 let divisor = self.read_operand(op(1)?, byte_mode);
-                if divisor != 0 {
-                    let result = self.read_operand(op(0)?, byte_mode) / divisor;
+                if let Some(result) = self.read_operand(op(0)?, byte_mode).checked_div(divisor) {
                     self.write_operand(op(0)?, result, byte_mode)?;
                 }
             }
