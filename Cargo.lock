@@ -630,6 +630,7 @@ dependencies = [
 name = "rars-format"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "getrandom",
  "rars-codec",
  "rars-crc32",

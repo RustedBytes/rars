@@ -73,6 +73,16 @@ cargo run -p rars-cli --features parallel -- x --threads 4 archive.rar out/
 cargo test --workspace --features parallel
 ```
 
+Measure parallel archive-member work with Criterion:
+
+```sh
+cargo bench -p rars-format --bench parallel --features parallel
+cargo +nightly bench -p rars-format --bench parallel --features fast,parallel
+```
+
+The parallel benchmark reports `1_thread` and `all_threads_N` cases for RAR5
+multi-member compression and extraction.
+
 When `--threads` is omitted, `rars` uses all available cores. Passing
 `--threads` to a CLI built without `parallel` is rejected.
 
