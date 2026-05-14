@@ -1,6 +1,6 @@
 use super::*;
 pub use rars_codec::rar50::Rar50FilterKind as FilterKind;
-use rars_codec::rar50::Unpack50Encoder;
+use rars_codec::rar50::{EncodeOptions, Unpack50Encoder};
 use rars_crypto::rar50::{Rar50Cipher, Rar50Keys};
 use rars_recovery::rar5::build_structural_inline_recovery_data;
 
@@ -515,50 +515,51 @@ impl<'a> Rar50Writer<'a> {
                     .features
                     .solid
                     .then(|| Unpack50Encoder::with_options(encode_options));
-                for (index, member) in self.members.into_iter().enumerate() {
-                    let entry = member.into_compressed(self.options.target)?;
-                    validate_compressed_entry(&entry)?;
-                    if compression_method == 0 {
-                        resolved_members.push(ResolvedRar50WriteMember::StoredCompressed(entry));
-                        continue;
-                    }
-                    let (packed, solid_continuation) = if let Some(encoder) = solid_encoder.as_mut()
-                    {
-                        encode_with_solid_reset_policy(
+                if let Some(encoder) = solid_encoder.as_mut() {
+                    for (index, member) in self.members.into_iter().enumerate() {
+                        let entry = member.into_compressed(self.options.target)?;
+                        validate_compressed_entry(&entry)?;
+                        if compression_method == 0 {
+                            resolved_members
+                                .push(ResolvedRar50WriteMember::StoredCompressed(entry));
+                            continue;
+                        }
+                        let (packed, solid_continuation) = encode_with_solid_reset_policy(
                             encoder,
                             entry.data,
                             algorithm_version,
                             encode_options,
                             index,
-                        )?
-                    } else {
-                        (
-                            encode_member_with_filter_policy_candidates(
-                                entry.data,
+                        )?;
+                        if should_store_compressed_payload(
+                            entry.data,
+                            &packed,
+                            true,
+                            self.filter_policy,
+                        ) {
+                            resolved_members
+                                .push(ResolvedRar50WriteMember::StoredCompressed(entry));
+                        } else {
+                            resolved_members.push(ResolvedRar50WriteMember::Compressed {
+                                entry,
+                                packed,
                                 algorithm_version,
-                                self.filter_policy,
-                                &encode_option_candidates,
-                            )?,
-                            false,
-                        )
-                    };
-                    if should_store_compressed_payload(
-                        entry.data,
-                        &packed,
-                        self.options.features.solid,
-                        self.filter_policy,
-                    ) {
-                        resolved_members.push(ResolvedRar50WriteMember::StoredCompressed(entry));
-                    } else {
-                        resolved_members.push(ResolvedRar50WriteMember::Compressed {
-                            entry,
-                            packed,
-                            algorithm_version,
-                            compression_method,
-                            dictionary_size,
-                            solid_continuation,
-                        });
+                                compression_method,
+                                dictionary_size,
+                                solid_continuation,
+                            });
+                        }
                     }
+                } else {
+                    resolved_members = resolve_compressed_members(
+                        self.members,
+                        self.options.target,
+                        compression_method,
+                        algorithm_version,
+                        dictionary_size,
+                        self.filter_policy,
+                        &encode_option_candidates,
+                    )?;
                 }
                 Ok(ResolvedRar50WritePlan {
                     main_flags: if self.options.features.solid {
@@ -685,63 +686,61 @@ impl<'a> Rar50Writer<'a> {
                     .features
                     .solid
                     .then(|| Unpack50Encoder::with_options(encode_options));
-                for (index, member) in self.members.into_iter().enumerate() {
-                    let entry = member.into_encrypted_compressed(self.options.target)?;
-                    validate_encrypted_compressed_entry(&entry)?;
-                    if compression_method == 0 {
-                        let encrypted = encrypted_stored_payload(entry.data, entry.password)?;
-                        resolved_members.push(
-                            ResolvedRar50WriteMember::EncryptedStoredCompressed {
-                                entry,
-                                encrypted,
-                            },
-                        );
-                        continue;
-                    }
-                    let (packed, solid_continuation) = if let Some(encoder) = solid_encoder.as_mut()
-                    {
-                        encode_with_solid_reset_policy(
+                if let Some(encoder) = solid_encoder.as_mut() {
+                    for (index, member) in self.members.into_iter().enumerate() {
+                        let entry = member.into_encrypted_compressed(self.options.target)?;
+                        validate_encrypted_compressed_entry(&entry)?;
+                        if compression_method == 0 {
+                            let encrypted = encrypted_stored_payload(entry.data, entry.password)?;
+                            resolved_members.push(
+                                ResolvedRar50WriteMember::EncryptedStoredCompressed {
+                                    entry,
+                                    encrypted,
+                                },
+                            );
+                            continue;
+                        }
+                        let (packed, solid_continuation) = encode_with_solid_reset_policy(
                             encoder,
                             entry.data,
                             algorithm_version,
                             encode_options,
                             index,
-                        )?
-                    } else {
-                        (
-                            encode_member_with_filter_policy_candidates(
-                                entry.data,
-                                algorithm_version,
-                                FilterPolicy::None,
-                                &encode_option_candidates,
-                            )?,
-                            false,
-                        )
-                    };
-                    if should_store_compressed_payload(
-                        entry.data,
-                        &packed,
-                        self.options.features.solid,
-                        FilterPolicy::None,
-                    ) {
-                        let encrypted = encrypted_stored_payload(entry.data, entry.password)?;
-                        resolved_members.push(
-                            ResolvedRar50WriteMember::EncryptedStoredCompressed {
+                        )?;
+                        if should_store_compressed_payload(
+                            entry.data,
+                            &packed,
+                            true,
+                            FilterPolicy::None,
+                        ) {
+                            let encrypted = encrypted_stored_payload(entry.data, entry.password)?;
+                            resolved_members.push(
+                                ResolvedRar50WriteMember::EncryptedStoredCompressed {
+                                    entry,
+                                    encrypted,
+                                },
+                            );
+                        } else {
+                            let encrypted = encrypted_payload(&packed, entry.data, entry.password)?;
+                            resolved_members.push(ResolvedRar50WriteMember::EncryptedCompressed {
                                 entry,
                                 encrypted,
-                            },
-                        );
-                    } else {
-                        let encrypted = encrypted_payload(&packed, entry.data, entry.password)?;
-                        resolved_members.push(ResolvedRar50WriteMember::EncryptedCompressed {
-                            entry,
-                            encrypted,
-                            algorithm_version,
-                            compression_method,
-                            dictionary_size,
-                            solid_continuation,
-                        });
+                                algorithm_version,
+                                compression_method,
+                                dictionary_size,
+                                solid_continuation,
+                            });
+                        }
                     }
+                } else {
+                    resolved_members = resolve_encrypted_compressed_members(
+                        self.members,
+                        self.options.target,
+                        compression_method,
+                        algorithm_version,
+                        dictionary_size,
+                        &encode_option_candidates,
+                    )?;
                 }
                 Ok(ResolvedRar50WritePlan {
                     main_flags: if self.options.features.solid {
@@ -880,6 +879,157 @@ fn mixed_member_plan_error(target: crate::ArchiveVersion) -> Error {
     Error::UnsupportedFeature {
         version: target,
         feature: "RAR 5 mixed stored/compressed writer plan",
+    }
+}
+
+fn resolve_compressed_members<'a>(
+    members: Vec<Rar50WriteMember<'a>>,
+    target: crate::ArchiveVersion,
+    compression_method: u8,
+    algorithm_version: u8,
+    dictionary_size: u64,
+    filter_policy: FilterPolicy,
+    encode_option_candidates: &[EncodeOptions],
+) -> Result<Vec<ResolvedRar50WriteMember<'a>>> {
+    #[cfg(feature = "parallel")]
+    {
+        crate::parallel::map_collect(members, |member| {
+            resolve_compressed_member(
+                member,
+                target,
+                compression_method,
+                algorithm_version,
+                dictionary_size,
+                filter_policy,
+                encode_option_candidates,
+            )
+        })
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        members
+            .into_iter()
+            .map(|member| {
+                resolve_compressed_member(
+                    member,
+                    target,
+                    compression_method,
+                    algorithm_version,
+                    dictionary_size,
+                    filter_policy,
+                    encode_option_candidates,
+                )
+            })
+            .collect()
+    }
+}
+
+fn resolve_compressed_member<'a>(
+    member: Rar50WriteMember<'a>,
+    target: crate::ArchiveVersion,
+    compression_method: u8,
+    algorithm_version: u8,
+    dictionary_size: u64,
+    filter_policy: FilterPolicy,
+    encode_option_candidates: &[EncodeOptions],
+) -> Result<ResolvedRar50WriteMember<'a>> {
+    let entry = member.into_compressed(target)?;
+    validate_compressed_entry(&entry)?;
+    if compression_method == 0 {
+        return Ok(ResolvedRar50WriteMember::StoredCompressed(entry));
+    }
+    let packed = encode_member_with_filter_policy_candidates(
+        entry.data,
+        algorithm_version,
+        filter_policy,
+        encode_option_candidates,
+    )?;
+    if should_store_compressed_payload(entry.data, &packed, false, filter_policy) {
+        Ok(ResolvedRar50WriteMember::StoredCompressed(entry))
+    } else {
+        Ok(ResolvedRar50WriteMember::Compressed {
+            entry,
+            packed,
+            algorithm_version,
+            compression_method,
+            dictionary_size,
+            solid_continuation: false,
+        })
+    }
+}
+
+fn resolve_encrypted_compressed_members<'a>(
+    members: Vec<Rar50WriteMember<'a>>,
+    target: crate::ArchiveVersion,
+    compression_method: u8,
+    algorithm_version: u8,
+    dictionary_size: u64,
+    encode_option_candidates: &[EncodeOptions],
+) -> Result<Vec<ResolvedRar50WriteMember<'a>>> {
+    #[cfg(feature = "parallel")]
+    {
+        crate::parallel::map_collect(members, |member| {
+            resolve_encrypted_compressed_member(
+                member,
+                target,
+                compression_method,
+                algorithm_version,
+                dictionary_size,
+                encode_option_candidates,
+            )
+        })
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        members
+            .into_iter()
+            .map(|member| {
+                resolve_encrypted_compressed_member(
+                    member,
+                    target,
+                    compression_method,
+                    algorithm_version,
+                    dictionary_size,
+                    encode_option_candidates,
+                )
+            })
+            .collect()
+    }
+}
+
+fn resolve_encrypted_compressed_member<'a>(
+    member: Rar50WriteMember<'a>,
+    target: crate::ArchiveVersion,
+    compression_method: u8,
+    algorithm_version: u8,
+    dictionary_size: u64,
+    encode_option_candidates: &[EncodeOptions],
+) -> Result<ResolvedRar50WriteMember<'a>> {
+    let entry = member.into_encrypted_compressed(target)?;
+    validate_encrypted_compressed_entry(&entry)?;
+    if compression_method == 0 {
+        let encrypted = encrypted_stored_payload(entry.data, entry.password)?;
+        return Ok(ResolvedRar50WriteMember::EncryptedStoredCompressed { entry, encrypted });
+    }
+    let packed = encode_member_with_filter_policy_candidates(
+        entry.data,
+        algorithm_version,
+        FilterPolicy::None,
+        encode_option_candidates,
+    )?;
+    if should_store_compressed_payload(entry.data, &packed, false, FilterPolicy::None) {
+        let encrypted = encrypted_stored_payload(entry.data, entry.password)?;
+        Ok(ResolvedRar50WriteMember::EncryptedStoredCompressed { entry, encrypted })
+    } else {
+        let encrypted = encrypted_payload(&packed, entry.data, entry.password)?;
+        Ok(ResolvedRar50WriteMember::EncryptedCompressed {
+            entry,
+            encrypted,
+            algorithm_version,
+            compression_method,
+            dictionary_size,
+            solid_continuation: false,
+        })
     }
 }
 

@@ -260,6 +260,33 @@ impl Archive {
         }
     }
 
+    /// Extracts independent non-solid members in parallel, buffering decoded
+    /// file bytes before replaying writes in archive order.
+    ///
+    /// Solid archives, split members, multivolume sets, and RAR 1.3/1.4
+    /// archives use the regular streaming extractor.
+    #[cfg(feature = "parallel")]
+    pub fn extract_to_parallel_buffered<F>(
+        &self,
+        password: Option<&[u8]>,
+        mut open: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
+    {
+        match self {
+            Self::Rar13(archive) => archive.extract_to(password, |meta| open(&rar13_meta(meta))),
+            Self::Rar15To40(archive) => archive
+                .extract_to_parallel_buffered(read_options(password), |meta| {
+                    open(&rar15_40_meta(meta))
+                }),
+            Self::Rar50Plus(archive) => archive
+                .extract_to_parallel_buffered(read_options(password), |meta| {
+                    open(&rar50_meta(meta))
+                }),
+        }
+    }
+
     /// Returns full repaired archive bytes using the archive's embedded
     /// recovery records.
     pub fn repair_recovery(&self) -> Result<Vec<u8>> {

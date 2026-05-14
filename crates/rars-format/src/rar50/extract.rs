@@ -449,6 +449,89 @@ impl Archive {
         }
         Ok(())
     }
+
+    #[cfg(feature = "parallel")]
+    pub fn extract_to_parallel_buffered<F>(
+        &self,
+        options: crate::ArchiveReadOptions<'_>,
+        mut open: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
+    {
+        if self.main.is_solid()
+            || self.files().any(|file| {
+                file.is_split_before()
+                    || file.is_split_after()
+                    || file.should_stream_decode()
+                    || file.decoded_compression_info().is_ok_and(|info| info.solid)
+            })
+        {
+            return self.extract_to(options, open);
+        }
+
+        let password = options.password;
+        let files: Vec<_> = self.files().collect();
+        let entries = crate::parallel::map_collect(files, |file| {
+            decode_parallel_entry(self, file, password)
+        })?;
+        for entry in entries {
+            write_parallel_entry(entry, &mut open)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "parallel")]
+enum ParallelExtractedEntry {
+    Directory(ExtractedEntryMeta),
+    File {
+        meta: ExtractedEntryMeta,
+        data: Vec<u8>,
+    },
+    Skipped,
+}
+
+#[cfg(feature = "parallel")]
+fn decode_parallel_entry(
+    archive: &Archive,
+    file: &FileHeader,
+    password: Option<&[u8]>,
+) -> Result<ParallelExtractedEntry> {
+    if file.redirection.is_some() {
+        return Ok(ParallelExtractedEntry::Skipped);
+    }
+    if file.is_split_before() || file.is_split_after() {
+        return Err(Error::InvalidHeader(
+            "RAR 5 split entry requires multivolume extraction",
+        ));
+    }
+    let meta = file.metadata();
+    if meta.is_directory {
+        return Ok(ParallelExtractedEntry::Directory(meta));
+    }
+    let mut data = Vec::new();
+    let mut session = DecoderSession::new_with_password(password);
+    session.write_file_to(archive, file, &mut data)?;
+    Ok(ParallelExtractedEntry::File { meta, data })
+}
+
+#[cfg(feature = "parallel")]
+fn write_parallel_entry<F>(entry: ParallelExtractedEntry, open: &mut F) -> Result<()>
+where
+    F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
+{
+    match entry {
+        ParallelExtractedEntry::Directory(meta) => {
+            let _ = open(&meta)?;
+        }
+        ParallelExtractedEntry::File { meta, data } => {
+            let mut writer = open(&meta)?;
+            writer.write_all(&data)?;
+        }
+        ParallelExtractedEntry::Skipped => {}
+    }
+    Ok(())
 }
 
 struct DecodedData {

@@ -1179,6 +1179,34 @@ impl Archive {
         Ok(())
     }
 
+    #[cfg(feature = "parallel")]
+    pub fn extract_to_parallel_buffered<F>(
+        &self,
+        options: crate::ArchiveReadOptions<'_>,
+        mut open: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
+    {
+        if self.main.is_solid()
+            || self
+                .files()
+                .any(|file| file.is_solid() || file.is_split_before() || file.is_split_after())
+        {
+            return self.extract_to(options, open);
+        }
+
+        let password = options.password;
+        let files: Vec<_> = self.files().collect();
+        let entries = crate::parallel::map_collect(files, |file| {
+            decode_parallel_entry(self, file, password)
+        })?;
+        for entry in entries {
+            write_parallel_entry(entry, &mut open)?;
+        }
+        Ok(())
+    }
+
     pub fn archive_comment(&self) -> Result<Option<Vec<u8>>> {
         if let Some(comment) = self.blocks.iter().find_map(|block| match block {
             Block::Comment(comment) => Some(comment),
@@ -1197,6 +1225,60 @@ impl Archive {
         comment.file.verify_crc32(&data)?;
         Ok(Some(data))
     }
+}
+
+#[cfg(feature = "parallel")]
+enum ParallelExtractedEntry {
+    Directory(ExtractedEntryMeta),
+    File {
+        meta: ExtractedEntryMeta,
+        data: Vec<u8>,
+    },
+}
+
+#[cfg(feature = "parallel")]
+fn decode_parallel_entry(
+    archive: &Archive,
+    file: &FileHeader,
+    password: Option<&[u8]>,
+) -> Result<ParallelExtractedEntry> {
+    if file.is_split_before() || file.is_split_after() {
+        return Err(Error::InvalidHeader(
+            "RAR 1.5 split entry requires multivolume extraction",
+        ));
+    }
+    let meta = file.metadata();
+    if meta.is_directory {
+        return Ok(ParallelExtractedEntry::Directory(meta));
+    }
+    let mut data = Vec::new();
+    if file.is_stored() {
+        file.write_stored_to(archive, password, &mut data)
+            .map_err(|error| file.entry_error("extracting", error))?;
+    } else {
+        let mut session = DecoderSession::new_with_password(false, password);
+        session
+            .write_file_to(archive, file, &mut data)
+            .map_err(|error| file.entry_error("extracting", error))?;
+    }
+    Ok(ParallelExtractedEntry::File { meta, data })
+}
+
+#[cfg(feature = "parallel")]
+fn write_parallel_entry<F>(entry: ParallelExtractedEntry, open: &mut F) -> Result<()>
+where
+    F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
+{
+    match entry {
+        ParallelExtractedEntry::Directory(meta) => {
+            let _ = open(&meta)?;
+        }
+        ParallelExtractedEntry::File { meta, data } => {
+            let mut writer = open(&meta)?;
+            writer.write_all(&data)?;
+        }
+    }
+    Ok(())
 }
 
 fn classify_new_sub(name: &[u8]) -> NewSubKind {

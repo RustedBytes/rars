@@ -17,6 +17,8 @@ pub mod version;
 
 mod fast;
 mod io_util;
+#[cfg(feature = "parallel")]
+mod parallel;
 mod source;
 mod volume_extract;
 mod x86_filter_scan;

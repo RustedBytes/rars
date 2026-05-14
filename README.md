@@ -56,6 +56,26 @@ cargo +nightly test --workspace --features fast
 cargo +nightly bench -p rars-codec --bench chunk_sizes --features fast
 ```
 
+## Parallel Builds
+
+The optional `parallel` feature enables Rayon worker threads for independent
+archive members. It parallelizes non-solid compression planning for supported
+writers and buffered extraction of non-solid, non-split single archives while
+preserving archive order for output. Solid archives and multivolume extraction
+fall back to the existing sequential stream because their codec state depends on
+member order.
+
+Build or run the CLI with parallel workers:
+
+```sh
+cargo run -p rars-cli --features parallel -- --threads 4 a --format rar50 archive.rar files...
+cargo run -p rars-cli --features parallel -- x --threads 4 archive.rar out/
+cargo test --workspace --features parallel
+```
+
+When `--threads` is omitted, `rars` uses all available cores. Passing
+`--threads` to a CLI built without `parallel` is rejected.
+
 ## Development
 
 Run the test suite:

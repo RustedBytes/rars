@@ -20,5 +20,6 @@ all-features = true
 
 [features]
 fast = []
+parallel = []
 
 [dependencies]

@@ -20,9 +20,17 @@ all-features = true
 
 [features]
 fast = ["rars-codec/fast", "rars-crc32/fast"]
+parallel = [
+    "dep:rayon",
+    "rars-codec/parallel",
+    "rars-crc32/parallel",
+    "rars-crypto/parallel",
+    "rars-recovery/parallel",
+]
 
 [dependencies]
 getrandom.workspace = true
+rayon = { workspace = true, optional = true }
 rars-codec.workspace = true
 rars-crypto.workspace = true
 rars-crc32.workspace = true

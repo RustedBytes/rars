@@ -20,6 +20,7 @@ all-features = true
 
 [features]
 fast = ["rars-crc32/fast"]
+parallel = ["rars-crc32/parallel"]
 
 [dependencies]
 rars-crc32.workspace = true
