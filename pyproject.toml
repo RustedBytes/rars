@@ -27,3 +27,9 @@ features = ["extension-module"]
 
 [tool.pytest.ini_options]
 testpaths = ["python/tests"]
+
+[dependency-groups]
+dev = [
+    "maturin>=1.13.3",
+    "pytest>=9.0.3",
+]
