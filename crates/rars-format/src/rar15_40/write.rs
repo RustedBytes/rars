@@ -1069,9 +1069,16 @@ fn encode_independent_payloads(
 ) -> Result<Vec<EncodedPayload>> {
     #[cfg(feature = "parallel")]
     {
-        crate::parallel::map_slice_collect(entries, |entry| {
-            encode_independent_payload(entry.data, options)
-        })
+        if entries.len() > 1 {
+            crate::parallel::map_slice_collect(entries, |entry| {
+                encode_independent_payload(entry.data, options)
+            })
+        } else {
+            entries
+                .iter()
+                .map(|entry| encode_independent_payload(entry.data, options))
+                .collect()
+        }
     }
     #[cfg(not(feature = "parallel"))]
     {
@@ -1088,7 +1095,11 @@ where
 {
     #[cfg(feature = "parallel")]
     {
-        crate::parallel::map_slice_collect(entries, |entry| encode(entry))
+        if entries.len() > 1 {
+            crate::parallel::map_slice_collect(entries, |entry| encode(entry))
+        } else {
+            entries.iter().map(encode).collect()
+        }
     }
     #[cfg(not(feature = "parallel"))]
     {

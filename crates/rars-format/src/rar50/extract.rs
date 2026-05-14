@@ -472,6 +472,9 @@ impl Archive {
 
         let password = options.password;
         let files: Vec<_> = self.files().collect();
+        if files.len() < 2 {
+            return self.extract_to(options, open);
+        }
         let entries = crate::parallel::map_collect(files, |file| {
             decode_parallel_entry(self, file, password)
         })?;

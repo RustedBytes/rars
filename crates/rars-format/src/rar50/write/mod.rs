@@ -893,17 +893,34 @@ fn resolve_compressed_members<'a>(
 ) -> Result<Vec<ResolvedRar50WriteMember<'a>>> {
     #[cfg(feature = "parallel")]
     {
-        crate::parallel::map_collect(members, |member| {
-            resolve_compressed_member(
-                member,
-                target,
-                compression_method,
-                algorithm_version,
-                dictionary_size,
-                filter_policy,
-                encode_option_candidates,
-            )
-        })
+        if members.len() > 1 {
+            crate::parallel::map_collect(members, |member| {
+                resolve_compressed_member(
+                    member,
+                    target,
+                    compression_method,
+                    algorithm_version,
+                    dictionary_size,
+                    filter_policy,
+                    encode_option_candidates,
+                )
+            })
+        } else {
+            members
+                .into_iter()
+                .map(|member| {
+                    resolve_compressed_member(
+                        member,
+                        target,
+                        compression_method,
+                        algorithm_version,
+                        dictionary_size,
+                        filter_policy,
+                        encode_option_candidates,
+                    )
+                })
+                .collect()
+        }
     }
     #[cfg(not(feature = "parallel"))]
     {
@@ -968,16 +985,32 @@ fn resolve_encrypted_compressed_members<'a>(
 ) -> Result<Vec<ResolvedRar50WriteMember<'a>>> {
     #[cfg(feature = "parallel")]
     {
-        crate::parallel::map_collect(members, |member| {
-            resolve_encrypted_compressed_member(
-                member,
-                target,
-                compression_method,
-                algorithm_version,
-                dictionary_size,
-                encode_option_candidates,
-            )
-        })
+        if members.len() > 1 {
+            crate::parallel::map_collect(members, |member| {
+                resolve_encrypted_compressed_member(
+                    member,
+                    target,
+                    compression_method,
+                    algorithm_version,
+                    dictionary_size,
+                    encode_option_candidates,
+                )
+            })
+        } else {
+            members
+                .into_iter()
+                .map(|member| {
+                    resolve_encrypted_compressed_member(
+                        member,
+                        target,
+                        compression_method,
+                        algorithm_version,
+                        dictionary_size,
+                        encode_option_candidates,
+                    )
+                })
+                .collect()
+        }
     }
     #[cfg(not(feature = "parallel"))]
     {
