@@ -1227,11 +1227,7 @@ fn best_match(
 }
 
 fn match_length(input: &[u8], pos: usize, distance: usize, max_length: usize) -> usize {
-    let mut length = 0usize;
-    while length < max_length && input[pos + length] == input[pos + length - distance] {
-        length += 1;
-    }
-    length
+    crate::fast::match_length(input, pos, distance, max_length)
 }
 
 fn consider_match_candidate(

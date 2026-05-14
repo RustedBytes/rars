@@ -18,5 +18,8 @@ workspace = true
 [package.metadata.docs.rs]
 all-features = true
 
+[features]
+fast = ["rars-format/fast"]
+
 [dependencies]
 rars-format.workspace = true

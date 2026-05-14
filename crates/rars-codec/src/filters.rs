@@ -79,30 +79,28 @@ pub(crate) fn e8e9_decode(data: &mut [u8], file_offset: u32, include_e9: bool) {
         return;
     }
     let cmp_mask = if include_e9 { 0xfe } else { 0xff };
-    let mut cur_pos = 0usize;
-    while cur_pos < data.len() - 4 {
-        cur_pos += 1;
-        let opcode = data[cur_pos - 1];
-        if opcode & cmp_mask == 0xe8 {
-            let offset = file_offset.wrapping_add(cur_pos as u32);
-            let addr = u32::from_le_bytes([
-                data[cur_pos],
-                data[cur_pos + 1],
-                data[cur_pos + 2],
-                data[cur_pos + 3],
-            ]);
-            let new_addr = if addr < 0x0100_0000 {
-                Some(addr.wrapping_sub(offset))
-            } else if addr & 0x8000_0000 != 0 && addr.wrapping_add(offset) & 0x8000_0000 == 0 {
-                Some(addr.wrapping_add(0x0100_0000))
-            } else {
-                None
-            };
-            if let Some(value) = new_addr {
-                data[cur_pos..cur_pos + 4].copy_from_slice(&value.to_le_bytes());
-            }
-            cur_pos += 4;
+    let opcode_limit = data.len() - 4;
+    let mut opcode_pos = 0usize;
+    while let Some(pos) = crate::fast::next_x86_opcode(data, opcode_pos, opcode_limit, cmp_mask) {
+        let cur_pos = pos + 1;
+        let offset = file_offset.wrapping_add(cur_pos as u32);
+        let addr = u32::from_le_bytes([
+            data[cur_pos],
+            data[cur_pos + 1],
+            data[cur_pos + 2],
+            data[cur_pos + 3],
+        ]);
+        let new_addr = if addr < 0x0100_0000 {
+            Some(addr.wrapping_sub(offset))
+        } else if addr & 0x8000_0000 != 0 && addr.wrapping_add(offset) & 0x8000_0000 == 0 {
+            Some(addr.wrapping_add(0x0100_0000))
+        } else {
+            None
+        };
+        if let Some(value) = new_addr {
+            data[cur_pos..cur_pos + 4].copy_from_slice(&value.to_le_bytes());
         }
+        opcode_pos = pos + 5;
     }
 }
 
@@ -111,30 +109,27 @@ pub(crate) fn e8e9_encode(data: &mut [u8], file_offset: u32, include_e9: bool) {
         return;
     }
     let cmp_mask = if include_e9 { 0xfe } else { 0xff };
-    let mut cur_pos = 0usize;
-    while cur_pos < data.len() - 4 {
-        cur_pos += 1;
-        let opcode = data[cur_pos - 1];
-        if opcode & cmp_mask == 0xe8 {
-            let offset = file_offset.wrapping_add(cur_pos as u32);
-            let addr = u32::from_le_bytes([
-                data[cur_pos],
-                data[cur_pos + 1],
-                data[cur_pos + 2],
-                data[cur_pos + 3],
-            ]);
-            let candidate = addr.wrapping_add(offset);
-            if candidate < 0x0100_0000 {
+    let opcode_limit = data.len() - 4;
+    let mut opcode_pos = 0usize;
+    while let Some(pos) = crate::fast::next_x86_opcode(data, opcode_pos, opcode_limit, cmp_mask) {
+        let cur_pos = pos + 1;
+        let offset = file_offset.wrapping_add(cur_pos as u32);
+        let addr = u32::from_le_bytes([
+            data[cur_pos],
+            data[cur_pos + 1],
+            data[cur_pos + 2],
+            data[cur_pos + 3],
+        ]);
+        let candidate = addr.wrapping_add(offset);
+        if candidate < 0x0100_0000 {
+            data[cur_pos..cur_pos + 4].copy_from_slice(&candidate.to_le_bytes());
+        } else {
+            let candidate = addr.wrapping_sub(0x0100_0000);
+            if candidate & 0x8000_0000 != 0 && candidate.wrapping_add(offset) & 0x8000_0000 == 0 {
                 data[cur_pos..cur_pos + 4].copy_from_slice(&candidate.to_le_bytes());
-            } else {
-                let candidate = addr.wrapping_sub(0x0100_0000);
-                if candidate & 0x8000_0000 != 0 && candidate.wrapping_add(offset) & 0x8000_0000 == 0
-                {
-                    data[cur_pos..cur_pos + 4].copy_from_slice(&candidate.to_le_bytes());
-                }
             }
-            cur_pos += 4;
         }
+        opcode_pos = pos + 5;
     }
 }
 
@@ -213,6 +208,71 @@ mod tests {
         data
     }
 
+    fn reference_e8e9_encode(data: &mut [u8], file_offset: u32, include_e9: bool) {
+        if data.len() <= 4 {
+            return;
+        }
+        let cmp_mask = if include_e9 { 0xfe } else { 0xff };
+        let mut cur_pos = 0usize;
+        while cur_pos < data.len() - 4 {
+            cur_pos += 1;
+            let opcode = data[cur_pos - 1];
+            if opcode & cmp_mask == 0xe8 {
+                let offset = file_offset.wrapping_add(cur_pos as u32);
+                let addr = u32::from_le_bytes([
+                    data[cur_pos],
+                    data[cur_pos + 1],
+                    data[cur_pos + 2],
+                    data[cur_pos + 3],
+                ]);
+                let candidate = addr.wrapping_add(offset);
+                if candidate < 0x0100_0000 {
+                    data[cur_pos..cur_pos + 4].copy_from_slice(&candidate.to_le_bytes());
+                } else {
+                    let candidate = addr.wrapping_sub(0x0100_0000);
+                    if candidate & 0x8000_0000 != 0
+                        && candidate.wrapping_add(offset) & 0x8000_0000 == 0
+                    {
+                        data[cur_pos..cur_pos + 4].copy_from_slice(&candidate.to_le_bytes());
+                    }
+                }
+                cur_pos += 4;
+            }
+        }
+    }
+
+    fn reference_e8e9_decode(data: &mut [u8], file_offset: u32, include_e9: bool) {
+        if data.len() <= 4 {
+            return;
+        }
+        let cmp_mask = if include_e9 { 0xfe } else { 0xff };
+        let mut cur_pos = 0usize;
+        while cur_pos < data.len() - 4 {
+            cur_pos += 1;
+            let opcode = data[cur_pos - 1];
+            if opcode & cmp_mask == 0xe8 {
+                let offset = file_offset.wrapping_add(cur_pos as u32);
+                let addr = u32::from_le_bytes([
+                    data[cur_pos],
+                    data[cur_pos + 1],
+                    data[cur_pos + 2],
+                    data[cur_pos + 3],
+                ]);
+                let new_addr = if addr < 0x0100_0000 {
+                    Some(addr.wrapping_sub(offset))
+                } else if addr & 0x8000_0000 != 0 && addr.wrapping_add(offset) & 0x8000_0000 == 0 {
+                    Some(addr.wrapping_add(0x0100_0000))
+                } else {
+                    None
+                };
+                if let Some(value) = new_addr {
+                    data[cur_pos..cur_pos + 4].copy_from_slice(&value.to_le_bytes());
+                }
+                cur_pos += 4;
+            }
+        }
+    }
+
     #[test]
     fn e8_transform_round_trips_representative_bytes() {
         let input = x86_sample();
@@ -243,6 +303,36 @@ mod tests {
         .unwrap();
 
         assert_eq!(filtered, input);
+    }
+
+    #[test]
+    fn e8e9_transform_matches_scalar_at_lane_boundaries_and_skips_payloads() {
+        let mut input = vec![0x41u8; 104];
+        for (pos, address) in [
+            (0usize, 0x0000_00e8u32),
+            (31, 0x0000_0100),
+            (36, 0x0000_0200),
+            (64, 0x0000_0300),
+            (96, 0xffff_ff00),
+        ] {
+            input[pos] = if pos == 36 { 0xe9 } else { 0xe8 };
+            input[pos + 1..pos + 5].copy_from_slice(&address.to_le_bytes());
+        }
+        input[32] = 0xe8;
+        input[65] = 0xe9;
+
+        for &include_e9 in &[false, true] {
+            let mut expected = input.clone();
+            let mut actual = input.clone();
+            reference_e8e9_encode(&mut expected, 0x1000, include_e9);
+            e8e9_encode(&mut actual, 0x1000, include_e9);
+            assert_eq!(actual, expected);
+
+            reference_e8e9_decode(&mut expected, 0x1000, include_e9);
+            e8e9_decode(&mut actual, 0x1000, include_e9);
+            assert_eq!(actual, expected);
+            assert_eq!(actual, input);
+        }
     }
 
     #[test]

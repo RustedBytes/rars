@@ -34,6 +34,28 @@ header encryption where implemented, comments, RARVM filters, RAR5 quick-open
 records, and supported recovery records. Run `rars --help` for the exact option
 set.
 
+## Fast Builds
+
+The optional `fast` feature enables safe portable SIMD paths for selected hot
+compression and decompression helpers, including LZ match scanning, x86 filter
+scanning, and CRC-32 updates. It uses Rust's experimental `std::simd` API, so it
+requires a nightly toolchain. Default builds do not enable this feature and
+remain stable-compatible.
+
+Build or run the CLI with the fast path:
+
+```sh
+cargo +nightly run -p rars-cli --features fast -- info archive.rar
+cargo +nightly build --workspace --features fast
+```
+
+Run the fast test and benchmark paths:
+
+```sh
+cargo +nightly test --workspace --features fast
+cargo +nightly bench -p rars-codec --bench chunk_sizes --features fast
+```
+
 ## Development
 
 Run the test suite:

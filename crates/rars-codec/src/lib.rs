@@ -1,3 +1,6 @@
+#![cfg_attr(feature = "fast", feature(portable_simd))]
+
+mod fast;
 mod filters;
 mod huffman;
 mod ppmd;

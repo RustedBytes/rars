@@ -1,4 +1,8 @@
+#![cfg_attr(feature = "fast", feature(portable_simd))]
+
 //! Shared RAR CRC-32 primitives.
+
+mod fast;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Crc32 {
@@ -57,6 +61,12 @@ fn update_raw_byte(crc: u32, byte: u8) -> u32 {
     (crc >> 8) ^ table_entry((crc as u8) ^ byte)
 }
 
+#[cfg(feature = "fast")]
+fn update_raw(crc: u32, input: &[u8]) -> u32 {
+    fast::update_raw(crc, input)
+}
+
+#[cfg(not(feature = "fast"))]
 fn update_raw(mut crc: u32, mut input: &[u8]) -> u32 {
     while input.len() >= 8 {
         let word = u32::from_le_bytes([input[0], input[1], input[2], input[3]]);
@@ -111,6 +121,8 @@ fn gf2_matrix_square(matrix: &[u32; 32]) -> [u32; 32] {
 
 const TABLES: [[u32; 256]; 8] = crc32_tables();
 const TABLE: [u32; 256] = TABLES[0];
+#[cfg(feature = "fast")]
+const TABLES_FLAT: [u32; 8 * 256] = crc32_tables_flat();
 
 const fn crc32_tables() -> [[u32; 256]; 8] {
     let mut tables = [[0; 256]; 8];
@@ -138,6 +150,21 @@ const fn crc32_tables() -> [[u32; 256]; 8] {
         table += 1;
     }
     tables
+}
+
+#[cfg(feature = "fast")]
+const fn crc32_tables_flat() -> [u32; 8 * 256] {
+    let mut flat = [0; 8 * 256];
+    let mut table = 0;
+    while table < 8 {
+        let mut index = 0;
+        while index < 256 {
+            flat[table * 256 + index] = TABLES[table][index];
+            index += 1;
+        }
+        table += 1;
+    }
+    flat
 }
 
 #[cfg(test)]
@@ -168,6 +195,41 @@ mod tests {
         bytewise.update(b"suffix");
 
         assert_eq!(skipped.finish(), bytewise.finish());
+    }
+
+    fn reference_crc32(input: &[u8]) -> u32 {
+        let mut crc = 0xffff_ffffu32;
+        for &byte in input {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                let mask = 0u32.wrapping_sub(crc & 1);
+                crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+            }
+        }
+        !crc
+    }
+
+    fn deterministic_bytes(len: usize) -> Vec<u8> {
+        let mut state = 0x1234_5678u32;
+        let mut out = Vec::with_capacity(len);
+        while out.len() < len {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            out.push((state >> 24) as u8);
+        }
+        out
+    }
+
+    #[test]
+    fn crc32_matches_bitwise_reference_across_chunk_boundaries() {
+        for len in 0..=257 {
+            let input = deterministic_bytes(len);
+            assert_eq!(crc32(&input), reference_crc32(&input), "len {len}");
+        }
+
+        for len in [1024, 4095, 4096, 4097, 65_536] {
+            let input = deterministic_bytes(len);
+            assert_eq!(crc32(&input), reference_crc32(&input), "len {len}");
+        }
     }
 
     #[test]

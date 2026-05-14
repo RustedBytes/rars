@@ -18,6 +18,9 @@ workspace = true
 [package.metadata.docs.rs]
 all-features = true
 
+[features]
+fast = ["rars-codec/fast", "rars-crc32/fast"]
+
 [dependencies]
 getrandom.workspace = true
 rars-codec.workspace = true
