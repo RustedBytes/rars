@@ -260,3 +260,30 @@ jobs:
           publish rars-format
           publish rars
           publish rars-cli
+
+  # ----------------------------------------------------------------------
+  # 5. Publish the packaged binaries to the tagged GitHub Release.
+  # ----------------------------------------------------------------------
+  publish-github-release:
+    name: Publish GitHub Release
+    needs: [verify-tag, build, publish-crates]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ env.BIN_NAME }} ${{ needs.verify-tag.outputs.version }}
+          generate_release_notes: true
+          prerelease: ${{ contains(needs.verify-tag.outputs.version, '-') }}
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
