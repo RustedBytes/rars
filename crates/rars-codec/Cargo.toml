@@ -20,3 +20,10 @@ all-features = true
 
 [dependencies]
 rars-crc32.workspace = true
+
+[dev-dependencies]
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "chunk_sizes"
+harness = false
