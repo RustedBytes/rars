@@ -1096,7 +1096,7 @@ where
     #[cfg(feature = "parallel")]
     {
         if entries.len() > 1 {
-            crate::parallel::map_slice_collect(entries, |entry| encode(entry))
+            crate::parallel::map_slice_collect(entries, encode)
         } else {
             entries.iter().map(encode).collect()
         }
