@@ -18,4 +18,8 @@ workspace = true
 [package.metadata.docs.rs]
 all-features = true
 
+[features]
+fast = []
+parallel = []
+
 [dependencies]

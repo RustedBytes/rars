@@ -18,6 +18,10 @@ workspace = true
 [package.metadata.docs.rs]
 all-features = true
 
+[features]
+fast = ["rars-crc32/fast"]
+parallel = ["rars-crc32/parallel"]
+
 [dependencies]
 aes.workspace = true
 hmac.workspace = true

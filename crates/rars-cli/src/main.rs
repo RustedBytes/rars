@@ -34,7 +34,7 @@ use rars::{
 use repair::cmd_repair;
 use std::collections::HashSet;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use time::{current_filetime, format_filetime_utc};
 use volumes::{
@@ -65,12 +65,55 @@ impl From<rars::Error> for CliError {
 
 fn run() -> CliResult<()> {
     let cli = cli::parse();
+    configure_threads(cli.threads)?;
     match cli.command {
         Command::Info(args) => cmd_info(args),
         Command::Test(args) => cmd_test(args),
         Command::Extract(args) => cmd_extract(args),
         Command::Repair(args) => cmd_repair(args),
         Command::Add(args) => cmd_add(args),
+    }
+}
+
+#[cfg(feature = "parallel")]
+fn configure_threads(threads: Option<usize>) -> CliResult<()> {
+    let default_threads = std::thread::available_parallelism()
+        .ok()
+        .map(std::num::NonZeroUsize::get);
+    let mut builder = rayon::ThreadPoolBuilder::new();
+    if let Some(threads) = threads.or(default_threads) {
+        builder = builder.num_threads(threads);
+    }
+    builder
+        .build_global()
+        .map_err(|err| CliError::general(format!("failed to configure parallel workers: {err}")))
+}
+
+#[cfg(not(feature = "parallel"))]
+fn configure_threads(threads: Option<usize>) -> CliResult<()> {
+    if threads.is_some() {
+        return Err(CliError::usage(
+            "--threads requires building rars-cli with --features parallel",
+        ));
+    }
+    Ok(())
+}
+
+fn extract_archive_to<F>(
+    archive: &DetectedArchive,
+    password: Option<&[u8]>,
+    open: F,
+) -> rars::Result<()>
+where
+    F: FnMut(&rars::ExtractedEntryMeta) -> rars::Result<Box<dyn Write>>,
+{
+    #[cfg(feature = "parallel")]
+    {
+        archive.extract_to_parallel_buffered(password, open)
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        archive.extract_to(password, open)
     }
 }
 
@@ -492,16 +535,15 @@ fn cmd_test(args: TestArgs) -> CliResult<()> {
         ensure_password_for_extract(&archive, &mut password)?;
         warn_rar50_redirections(&archive);
         let mut entries = Vec::new();
-        archive
-            .extract_to(password_bytes(&password), |meta| {
-                entries.push(meta.clone());
-                Ok(Box::new(std::io::sink()))
+        extract_archive_to(&archive, password_bytes(&password), |meta| {
+            entries.push(meta.clone());
+            Ok(Box::new(std::io::sink()))
+        })
+        .map_err(|err| {
+            classify_rars_error(err, |err| {
+                format!("failed to test archive '{}': {err}", paths[0])
             })
-            .map_err(|err| {
-                classify_rars_error(err, |err| {
-                    format!("failed to test archive '{}': {err}", paths[0])
-                })
-            })?;
+        })?;
         for entry in &entries {
             print_ok_entry(entry);
         }
@@ -552,31 +594,30 @@ fn cmd_extract(args: ExtractArgs) -> CliResult<()> {
         let family = archive.family();
         let mut outputs = Vec::new();
         let mut planned_paths = HashSet::new();
-        archive
-            .extract_to(password_bytes(&password), |meta| {
-                let planned = output_path_for_entry(&out_dir, meta)?;
-                if !planned_paths.insert(planned.clone()) {
-                    return Err(rars::Error::InvalidHeader(
-                        "multiple archive entries map to the same output path",
-                    ));
-                }
-                let (path, writer) = open_output_writer(&out_dir, meta, overwrite)?;
-                outputs.push(ExtractedOutput {
-                    name: meta.name.clone(),
-                    path,
-                    meta: meta.clone(),
-                    family,
-                });
-                Ok(writer)
+        extract_archive_to(&archive, password_bytes(&password), |meta| {
+            let planned = output_path_for_entry(&out_dir, meta)?;
+            if !planned_paths.insert(planned.clone()) {
+                return Err(rars::Error::InvalidHeader(
+                    "multiple archive entries map to the same output path",
+                ));
+            }
+            let (path, writer) = open_output_writer(&out_dir, meta, overwrite)?;
+            outputs.push(ExtractedOutput {
+                name: meta.name.clone(),
+                path,
+                meta: meta.clone(),
+                family,
+            });
+            Ok(writer)
+        })
+        .map_err(|err| {
+            classify_rars_error(err, |err| {
+                format!(
+                    "failed to write extracted entry to '{}': {err}",
+                    out_dir.display()
+                )
             })
-            .map_err(|err| {
-                classify_rars_error(err, |err| {
-                    format!(
-                        "failed to write extracted entry to '{}': {err}",
-                        out_dir.display()
-                    )
-                })
-            })?;
+        })?;
         restore_output_metadata(&outputs).map_err(|err| {
             CliError::general(format!(
                 "failed to restore extracted metadata under '{}': {err}",
@@ -1629,6 +1670,16 @@ fn parse_size(input: &str) -> CliResult<usize> {
 
 pub(crate) fn parse_size_string(input: &str) -> Result<usize, String> {
     parse_size(input).map_err(|err| err.to_string())
+}
+
+pub(crate) fn parse_thread_count(input: &str) -> Result<usize, String> {
+    let threads = input
+        .parse::<usize>()
+        .map_err(|_| format!("invalid thread count: {input}"))?;
+    if threads == 0 {
+        return Err("thread count must be at least 1".to_string());
+    }
+    Ok(threads)
 }
 
 pub(crate) fn resolve_password_args(args: &PasswordArgs) -> CliResult<Option<Password>> {

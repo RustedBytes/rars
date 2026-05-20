@@ -1,3 +1,5 @@
+#![cfg_attr(feature = "fast", feature(portable_simd))]
+
 //! Version-specific RAR archive format support.
 //!
 //! This crate contains the wire-format parsers, writers, recovery handling, and
@@ -13,7 +15,10 @@ pub mod rar15_40;
 pub mod rar50;
 pub mod version;
 
+mod fast;
 mod io_util;
+#[cfg(feature = "parallel")]
+mod parallel;
 mod source;
 mod volume_extract;
 mod x86_filter_scan;

@@ -83,23 +83,35 @@ pub fn write_compressed_archive_with_comment(
     }
     write_main_header(&mut out, main_flags);
     write_archive_comment(&mut out, archive_comment, options.target)?;
-    let mut solid_encoder = SolidEncoder::for_target(options, options.features.solid)?;
-    let mut solid_run_has_member = false;
-    for entry in entries {
-        let payload = encode_or_store_payload(entry.data, options, &mut solid_encoder)?;
-        let solid_continuation =
-            options.features.solid && payload.method != 0x30 && solid_run_has_member;
-        write_compressed_entry(
-            &mut out,
-            entry,
-            &payload.data,
-            payload.method,
-            options.target,
-            dictionary_flags_for_options(options)?,
-            solid_continuation,
-        )?;
-        if options.features.solid {
+    if options.features.solid {
+        let mut solid_encoder = SolidEncoder::for_target(options, true)?;
+        let mut solid_run_has_member = false;
+        for entry in entries {
+            let payload = encode_or_store_payload(entry.data, options, &mut solid_encoder)?;
+            let solid_continuation = payload.method != 0x30 && solid_run_has_member;
+            write_compressed_entry(
+                &mut out,
+                entry,
+                &payload.data,
+                payload.method,
+                options.target,
+                dictionary_flags_for_options(options)?,
+                solid_continuation,
+            )?;
             solid_run_has_member = payload.method != 0x30;
+        }
+    } else {
+        let payloads = encode_independent_payloads(entries, options)?;
+        for (entry, payload) in entries.iter().zip(&payloads) {
+            write_compressed_entry(
+                &mut out,
+                entry,
+                &payload.data,
+                payload.method,
+                options.target,
+                dictionary_flags_for_options(options)?,
+                false,
+            )?;
         }
     }
     Ok(out)
@@ -489,7 +501,7 @@ fn disjoint_filter_ranges(mut ranges: Vec<std::ops::Range<usize>>) -> Vec<std::o
 fn write_rar29_filtered_archive(
     entries: &[FileEntry<'_>],
     options: WriterOptions,
-    mut encode: impl FnMut(&FileEntry<'_>) -> Result<EncodedPayload>,
+    encode: impl Fn(&FileEntry<'_>) -> Result<EncodedPayload> + Sync,
 ) -> Result<Vec<u8>> {
     validate_rar29_filtered_writer_options(options)?;
     if options.features.header_encryption {
@@ -511,33 +523,59 @@ fn write_rar29_filtered_archive(
     } else {
         None
     };
-    let mut solid_run_has_member = false;
-    for entry in entries {
-        let payload = encode(entry)?;
-        let solid_continuation =
-            options.features.solid && payload.method != 0x30 && solid_run_has_member;
-        if let Some(password) = header_password {
-            write_header_encrypted_compressed_entry(
-                &mut out,
-                entry,
-                &payload.data,
-                payload.method,
-                options,
-                solid_continuation,
-                password,
-            )?;
-        } else {
-            write_compressed_entry(
-                &mut out,
-                entry,
-                &payload.data,
-                payload.method,
-                options.target,
-                dictionary_flags_for_options(options)?,
-                solid_continuation,
-            )?;
+    if options.features.solid {
+        let mut solid_run_has_member = false;
+        for entry in entries {
+            let payload = encode(entry)?;
+            let solid_continuation = payload.method != 0x30 && solid_run_has_member;
+            if let Some(password) = header_password {
+                write_header_encrypted_compressed_entry(
+                    &mut out,
+                    entry,
+                    &payload.data,
+                    payload.method,
+                    options,
+                    solid_continuation,
+                    password,
+                )?;
+            } else {
+                write_compressed_entry(
+                    &mut out,
+                    entry,
+                    &payload.data,
+                    payload.method,
+                    options.target,
+                    dictionary_flags_for_options(options)?,
+                    solid_continuation,
+                )?;
+            }
+            solid_run_has_member = payload.method != 0x30;
         }
-        solid_run_has_member = payload.method != 0x30;
+    } else {
+        let payloads = encode_filtered_payloads(entries, &encode)?;
+        for (entry, payload) in entries.iter().zip(&payloads) {
+            if let Some(password) = header_password {
+                write_header_encrypted_compressed_entry(
+                    &mut out,
+                    entry,
+                    &payload.data,
+                    payload.method,
+                    options,
+                    false,
+                    password,
+                )?;
+            } else {
+                write_compressed_entry(
+                    &mut out,
+                    entry,
+                    &payload.data,
+                    payload.method,
+                    options.target,
+                    dictionary_flags_for_options(options)?,
+                    false,
+                )?;
+            }
+        }
     }
     Ok(out)
 }
@@ -575,23 +613,35 @@ fn write_header_encrypted_compressed_archive(
     out.extend_from_slice(RAR15_SIGNATURE);
     let main_flags = MHD_PASSWORD | if options.features.solid { MHD_SOLID } else { 0 };
     write_main_header(&mut out, main_flags);
-    let mut solid_encoder = SolidEncoder::for_target(options, options.features.solid)?;
-    let mut solid_run_has_member = false;
-    for entry in entries {
-        let payload = encode_or_store_payload(entry.data, options, &mut solid_encoder)?;
-        let solid_continuation =
-            options.features.solid && payload.method != 0x30 && solid_run_has_member;
-        write_header_encrypted_compressed_entry(
-            &mut out,
-            entry,
-            &payload.data,
-            payload.method,
-            options,
-            solid_continuation,
-            password,
-        )?;
-        if options.features.solid {
+    if options.features.solid {
+        let mut solid_encoder = SolidEncoder::for_target(options, true)?;
+        let mut solid_run_has_member = false;
+        for entry in entries {
+            let payload = encode_or_store_payload(entry.data, options, &mut solid_encoder)?;
+            let solid_continuation = payload.method != 0x30 && solid_run_has_member;
+            write_header_encrypted_compressed_entry(
+                &mut out,
+                entry,
+                &payload.data,
+                payload.method,
+                options,
+                solid_continuation,
+                password,
+            )?;
             solid_run_has_member = payload.method != 0x30;
+        }
+    } else {
+        let payloads = encode_independent_payloads(entries, options)?;
+        for (entry, payload) in entries.iter().zip(&payloads) {
+            write_header_encrypted_compressed_entry(
+                &mut out,
+                entry,
+                &payload.data,
+                payload.method,
+                options,
+                false,
+                password,
+            )?;
         }
     }
     Ok(out)
@@ -1006,6 +1056,55 @@ impl SolidEncoder {
 struct EncodedPayload {
     data: Vec<u8>,
     method: u8,
+}
+
+fn encode_independent_payload(data: &[u8], options: WriterOptions) -> Result<EncodedPayload> {
+    let mut solid_encoder = None;
+    encode_or_store_payload(data, options, &mut solid_encoder)
+}
+
+fn encode_independent_payloads(
+    entries: &[FileEntry<'_>],
+    options: WriterOptions,
+) -> Result<Vec<EncodedPayload>> {
+    #[cfg(feature = "parallel")]
+    {
+        if entries.len() > 1 {
+            crate::parallel::map_slice_collect(entries, |entry| {
+                encode_independent_payload(entry.data, options)
+            })
+        } else {
+            entries
+                .iter()
+                .map(|entry| encode_independent_payload(entry.data, options))
+                .collect()
+        }
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        entries
+            .iter()
+            .map(|entry| encode_independent_payload(entry.data, options))
+            .collect()
+    }
+}
+
+fn encode_filtered_payloads<F>(entries: &[FileEntry<'_>], encode: &F) -> Result<Vec<EncodedPayload>>
+where
+    F: Fn(&FileEntry<'_>) -> Result<EncodedPayload> + Sync,
+{
+    #[cfg(feature = "parallel")]
+    {
+        if entries.len() > 1 {
+            crate::parallel::map_slice_collect(entries, |entry| encode(entry))
+        } else {
+            entries.iter().map(encode).collect()
+        }
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        entries.iter().map(encode).collect()
+    }
 }
 
 fn encode_or_store_payload(

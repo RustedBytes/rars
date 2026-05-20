@@ -16,6 +16,9 @@ use rars::ArchiveVersion;
     disable_help_subcommand = true
 )]
 pub(crate) struct Cli {
+    /// Worker threads for parallel compression and extraction (default: all available cores)
+    #[arg(long, value_name = "N", global = true, value_parser = crate::parse_thread_count)]
+    pub threads: Option<usize>,
     #[command(subcommand)]
     pub command: Command,
 }

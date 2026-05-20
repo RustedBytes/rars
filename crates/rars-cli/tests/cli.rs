@@ -766,11 +766,37 @@ fn prints_usage_for_help_command() {
     let output = rars().arg("--help").output().unwrap();
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     let stdout = stdout(&output);
-    assert!(stdout.contains("Usage: rars <COMMAND>"));
+    assert!(stdout.contains("Usage: rars [OPTIONS] <COMMAND>"));
+    assert!(stdout.contains("--threads <N>"));
     assert!(stdout.contains("Exit codes:"));
     assert!(stdout.contains("info"));
     assert!(stdout.contains("extract"));
     assert!(stdout.contains("add"));
+}
+
+#[test]
+#[cfg(feature = "parallel")]
+fn threads_flag_is_accepted_with_parallel_feature() {
+    let output = rars()
+        .args(["--threads", "1", "info"])
+        .arg(fixture("README_store.rar"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+}
+
+#[test]
+#[cfg(not(feature = "parallel"))]
+fn threads_flag_requires_parallel_feature() {
+    let output = rars()
+        .args(["--threads", "1", "info"])
+        .arg(fixture("README_store.rar"))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr(&output).contains("--threads requires building rars-cli with --features parallel")
+    );
 }
 
 #[test]

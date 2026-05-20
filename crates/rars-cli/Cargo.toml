@@ -18,6 +18,10 @@ workspace = true
 [package.metadata.docs.rs]
 all-features = true
 
+[features]
+fast = ["rars/fast", "rars-crc32/fast"]
+parallel = ["dep:rayon", "rars/parallel", "rars-crc32/parallel"]
+
 [[bin]]
 name = "rars"
 path = "src/main.rs"
@@ -25,6 +29,7 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 libc.workspace = true
+rayon = { workspace = true, optional = true }
 rars.workspace = true
 rars-crc32.workspace = true
 rpassword.workspace = true
